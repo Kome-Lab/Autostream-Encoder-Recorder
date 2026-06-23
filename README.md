@@ -90,9 +90,10 @@ docs / deployment sample を更新した場合:
 ```powershell
 cd ..\autostream-docs
 npm run docs:check
-npm run goal:audit
 npm run docs:build
 ```
+
+Detailed deployment, archive, and security documentation is maintained in the `autostream-docs` repository.
 
 ## セキュリティ
 

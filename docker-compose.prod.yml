@@ -1,0 +1,18 @@
+services:
+  encoder-recorder:
+    image: encoder-recorder:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AUTOSTREAM_ENV: production
+      AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG: "true"
+      AUTOSTREAM_REQUIRE_OUTPUT_RELAY: "true"
+      AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://127.0.0.1/autostream/{stream_id}
+    ports:
+      - "127.0.0.1:8080:8080"
+  output-relay:
+    image: tiangolo/nginx-rtmp:latest
+    restart: unless-stopped
+    network_mode: "service:encoder-recorder"
+    volumes:
+      - ./relay/nginx-rtmp.conf:/etc/nginx/nginx.conf:ro

@@ -1,0 +1,21 @@
+worker_processes auto;
+
+events {
+  worker_connections 1024;
+}
+
+rtmp {
+  server {
+    listen 1935;
+    chunk_size 4096;
+
+    application autostream {
+      live on;
+      record off;
+
+      # Copy this file to relay/nginx-rtmp.conf and replace the placeholder.
+      # relay/nginx-rtmp.conf is gitignored because it contains the YouTube stream key.
+      push rtmps://a.rtmps.youtube.com/live2/<YOUTUBE_STREAM_KEY>;
+    }
+  }
+}

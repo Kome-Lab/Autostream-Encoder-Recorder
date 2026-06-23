@@ -1,0 +1,1203 @@
+package httpapi
+
+import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/example/autostream-encoder-recorder/internal/archive"
+	"github.com/example/autostream-encoder-recorder/internal/audioingest"
+	"github.com/example/autostream-encoder-recorder/internal/control"
+	"github.com/example/autostream-encoder-recorder/internal/ffmpeg"
+	"github.com/example/autostream-encoder-recorder/internal/ingesttoken"
+	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
+	"github.com/example/autostream-encoder-recorder/internal/observability"
+	"github.com/example/autostream-encoder-recorder/internal/streamproc"
+	"github.com/example/autostream-encoder-recorder/internal/workerevents"
+)
+
+type Status struct {
+	ServiceType string    `json:"service_type"`
+	ServiceID   string    `json:"service_id"`
+	Status      string    `json:"status"`
+	CheckedAt   time.Time `json:"checked_at"`
+}
+
+type TokenVerifier struct {
+	PlainToken             string
+	SHA256Hex              string
+	WorkerEventsPlainToken string
+	WorkerEventsSHA256Hex  string
+	DiscordAudioPlainToken string
+	DiscordAudioSHA256Hex  string
+	IngestTokenSigningKey  string
+	RequireSignedIngest    bool
+}
+
+const (
+	maxControlBodyBytes             = 64 * 1024
+	maxWorkerEventBodyBytes         = 256 * 1024
+	defaultDiscordAudioBodyBytes    = 512 * 1024
+	defaultDiscordAudioMaxPackets   = 100
+	defaultDiscordAudioMaxOpusBytes = 4096
+)
+
+var (
+	errRawArchiveSecretFieldsNotAllowed   = errors.New("raw_archive_secret_fields_not_allowed")
+	errRawYouTubeSecretFieldNotAllowed    = errors.New("raw_youtube_secret_field_not_allowed")
+	errRuntimeSecretResolverNotConfigured = errors.New("runtime_secret_resolver_not_configured")
+)
+
+func TokenVerifierFromEnv() TokenVerifier {
+	return TokenVerifier{
+		PlainToken:             os.Getenv("SERVICE_CONTROL_TOKEN"),
+		SHA256Hex:              os.Getenv("SERVICE_CONTROL_TOKEN_SHA256"),
+		WorkerEventsPlainToken: os.Getenv("ENCODER_WORKER_EVENTS_TOKEN"),
+		WorkerEventsSHA256Hex:  os.Getenv("ENCODER_WORKER_EVENTS_TOKEN_SHA256"),
+		DiscordAudioPlainToken: os.Getenv("ENCODER_DISCORD_AUDIO_TOKEN"),
+		DiscordAudioSHA256Hex:  os.Getenv("ENCODER_DISCORD_AUDIO_TOKEN_SHA256"),
+		IngestTokenSigningKey:  os.Getenv("AUTOSTREAM_STREAM_INGEST_SIGNING_KEY"),
+		RequireSignedIngest:    envBool("AUTOSTREAM_REQUIRE_SIGNED_INGEST_TOKENS", true),
+	}
+}
+
+func (v TokenVerifier) Verify(header string) bool {
+	return verifyBearerToken(header, v.PlainToken, v.SHA256Hex)
+}
+
+func (v TokenVerifier) VerifyWorkerEvents(header, streamID string) bool {
+	_, ok := v.WorkerEventsClaims(header, streamID)
+	return ok
+}
+
+func (v TokenVerifier) VerifyDiscordAudio(header, streamID string) bool {
+	_, ok := v.DiscordAudioClaims(header, streamID)
+	return ok
+}
+
+func (v TokenVerifier) WorkerEventsClaims(header, streamID string) (ingesttoken.Claims, bool) {
+	if claims, ok := v.verifySignedIngest(header, ingesttoken.Expected{StreamID: streamID, ServiceType: "worker", Purpose: "worker_events", Audience: "encoder_recorder"}); ok {
+		return claims, true
+	}
+	if !v.RequireSignedIngest && tokenConfigured(v.WorkerEventsPlainToken, v.WorkerEventsSHA256Hex) && verifyBearerToken(header, v.WorkerEventsPlainToken, v.WorkerEventsSHA256Hex) {
+		return ingesttoken.Claims{}, true
+	}
+	return ingesttoken.Claims{}, false
+}
+
+func (v TokenVerifier) DiscordAudioClaims(header, streamID string) (ingesttoken.Claims, bool) {
+	if claims, ok := v.verifySignedIngest(header, ingesttoken.Expected{StreamID: streamID, ServiceType: "discord_bot", Purpose: "discord_audio", Audience: "encoder_recorder"}); ok {
+		return claims, true
+	}
+	if !v.RequireSignedIngest && tokenConfigured(v.DiscordAudioPlainToken, v.DiscordAudioSHA256Hex) && verifyBearerToken(header, v.DiscordAudioPlainToken, v.DiscordAudioSHA256Hex) {
+		return ingesttoken.Claims{}, true
+	}
+	return ingesttoken.Claims{}, false
+}
+
+func (v TokenVerifier) verifySignedIngest(header string, expected ingesttoken.Expected) (ingesttoken.Claims, bool) {
+	token := bearerToken(header)
+	if token == "" || !ingesttoken.IsSigned(token) || strings.TrimSpace(v.IngestTokenSigningKey) == "" {
+		return ingesttoken.Claims{}, false
+	}
+	claims, err := ingesttoken.Verify(v.IngestTokenSigningKey, token, expected)
+	return claims, err == nil
+}
+
+func tokenConfigured(plain, sha256Hex string) bool {
+	return strings.TrimSpace(plain) != "" || strings.TrimSpace(sha256Hex) != ""
+}
+
+func envBool(key string, fallback bool) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if raw == "" {
+		return fallback
+	}
+	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+}
+
+func verifyBearerToken(header, plainToken, sha256Hex string) bool {
+	token := bearerToken(header)
+	if token == "" {
+		return false
+	}
+	if sha256Hex != "" {
+		sum := sha256.Sum256([]byte(token))
+		got := hex.EncodeToString(sum[:])
+		return subtle.ConstantTimeCompare([]byte(got), []byte(strings.ToLower(sha256Hex))) == 1
+	}
+	if plainToken != "" {
+		return subtle.ConstantTimeCompare([]byte(token), []byte(plainToken)) == 1
+	}
+	return false
+}
+
+func bearerToken(header string) string {
+	if !strings.HasPrefix(header, "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+}
+
+func requireServiceToken(w http.ResponseWriter, r *http.Request, verifier TokenVerifier) bool {
+	if verifier.Verify(r.Header.Get("Authorization")) {
+		return true
+	}
+	writeJSON(w, http.StatusUnauthorized, map[string]string{"code": "missing_or_invalid_service_token"})
+	return false
+}
+
+func NewServer(serviceType string) http.Handler {
+	return NewServerWithProcessManager(serviceType, streamproc.NewManagerFromEnv())
+}
+
+func NewServerWithProcessManager(serviceType string, processManager *streamproc.Manager) http.Handler {
+	archiveRoot := os.Getenv("AUTOSTREAM_ARCHIVE_DIR")
+	if archiveRoot == "" && processManager != nil {
+		archiveRoot = processManager.ArchiveRoot
+	}
+	if archiveRoot == "" {
+		archiveRoot = "/var/lib/autostream/archives"
+	}
+	return NewServerWithManagers(serviceType, processManager, workerevents.NewManager(archiveRoot), TokenVerifierFromEnv())
+}
+
+func NewServerWithManagers(serviceType string, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier) http.Handler {
+	return NewServerWithManagersAndSecretResolver(serviceType, processManager, eventManager, verifier, nil)
+}
+
+type RuntimeSecretResolver func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error)
+type RuntimeConfigProvider func(ctx context.Context) (control.RuntimeConfig, error)
+
+func NewServerWithManagersAndSecretResolver(serviceType string, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver) http.Handler {
+	return NewServerWithManagersAndRuntimeConfig(serviceType, processManager, eventManager, verifier, resolver, nil)
+}
+
+func NewServerWithManagersAndRuntimeConfig(serviceType string, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver, runtimeConfig RuntimeConfigProvider) http.Handler {
+	if eventManager == nil {
+		eventManager = workerevents.NewManager("/var/lib/autostream/archives")
+	}
+	audioManager := audioingest.NewManager(eventManager.ArchiveRoot)
+	audioManager.MaxPackets = envInt("AUDIO_INGEST_MAX_PACKETS", defaultDiscordAudioMaxPackets)
+	audioManager.MaxOpusSize = envInt("AUDIO_INGEST_MAX_OPUS_BYTES", defaultDiscordAudioMaxOpusBytes)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, Status{ServiceType: serviceType, ServiceID: os.Getenv("SERVICE_ID"), Status: "ready", CheckedAt: time.Now().UTC()})
+	})
+	mux.HandleFunc("GET /preflight", servicePreflight(verifier))
+	mux.HandleFunc("POST /heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+	})
+	mux.HandleFunc("POST /streams/dry-run", dryRunStream(verifier, runtimeConfig))
+	mux.HandleFunc("POST /streams/start", startStream(processManager, audioManager, verifier, resolver, runtimeConfig))
+	mux.HandleFunc("POST /streams/{id}/stop", stopStream(processManager, audioManager, verifier))
+	mux.HandleFunc("GET /streams/{id}/process-status", streamProcessStatus(processManager, verifier))
+	mux.HandleFunc("GET /streams/{id}/audio-status", discordAudioStatus(audioManager, verifier))
+	mux.HandleFunc("POST /streams/package", packageStream(verifier, resolver, runtimeConfig))
+	mux.HandleFunc("POST /worker-events", workerEvents(eventManager, processManager, verifier))
+	mux.HandleFunc("GET /streams/{id}/worker-events", recentWorkerEvents(eventManager, verifier))
+	mux.HandleFunc("POST /streams/{id}/audio/opus", discordOpusAudio(audioManager, processManager, verifier))
+	return securityHeaders(mux)
+}
+
+type preflightResponse struct {
+	CheckedAt time.Time        `json:"checked_at"`
+	Ready     bool             `json:"ready"`
+	Checks    []preflightCheck `json:"checks"`
+	Summary   map[string]any   `json:"summary"`
+}
+
+type preflightCheck struct {
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+}
+
+func servicePreflight(verifier TokenVerifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		response := buildPreflight(verifier)
+		writeJSON(w, http.StatusOK, response)
+	}
+}
+
+func buildPreflight(verifier TokenVerifier) preflightResponse {
+	checks := []preflightCheck{
+		serviceTokenPreflight(verifier),
+		ffmpegPreflight(envDefault("FFMPEG_BIN", "ffmpeg")),
+		archiveRootPreflight(envDefault("AUTOSTREAM_ARCHIVE_DIR", "/var/lib/autostream/archives")),
+		outputRelayPreflight(),
+		youtubeRuntimeConfigPreflight("youtube_rtmp_url", "YOUTUBE_RTMP_URL", "YouTube RTMPS URL"),
+		youtubeRuntimeConfigPreflight("youtube_stream_key", "YOUTUBE_STREAM_KEY", "YouTube stream key"),
+		googleDrivePreflight(),
+		observabilityPreflight(),
+	}
+	ready := true
+	for _, check := range checks {
+		if check.Severity == "critical" && check.Status != "ok" {
+			ready = false
+			break
+		}
+	}
+	return preflightResponse{
+		CheckedAt: time.Now().UTC(),
+		Ready:     ready,
+		Checks:    checks,
+		Summary: map[string]any{
+			"ffmpeg_bin":                  envDefault("FFMPEG_BIN", "ffmpeg"),
+			"archive_root_configured":     strings.TrimSpace(envDefault("AUTOSTREAM_ARCHIVE_DIR", "/var/lib/autostream/archives")) != "",
+			"google_drive_auth_mode":      safeConfigValue(os.Getenv("GOOGLE_DRIVE_AUTH_MODE")),
+			"google_drive_upload_dry_run": os.Getenv("GOOGLE_DRIVE_AUTH_MODE") == "",
+			"observability_configured":    strings.TrimSpace(os.Getenv("OBSERVABILITY_URL")) != "" && strings.TrimSpace(os.Getenv("OBSERVABILITY_TOKEN")) != "",
+		},
+	}
+}
+
+func serviceTokenPreflight(verifier TokenVerifier) preflightCheck {
+	if strings.TrimSpace(verifier.SHA256Hex) != "" {
+		return preflightCheck{ID: "service_control_token", Status: "ok", Severity: "critical", Message: "SERVICE_CONTROL_TOKEN_SHA256 is configured."}
+	}
+	if strings.TrimSpace(verifier.PlainToken) != "" {
+		return preflightCheck{ID: "service_control_token", Status: "ok", Severity: "warning", Message: "SERVICE_CONTROL_TOKEN is configured. Prefer SERVICE_CONTROL_TOKEN_SHA256 for production."}
+	}
+	return preflightCheck{ID: "service_control_token", Status: "missing", Severity: "critical", Message: "Inbound service control token is not configured."}
+}
+
+func ffmpegPreflight(bin string) preflightCheck {
+	if strings.TrimSpace(bin) == "" {
+		return preflightCheck{ID: "ffmpeg_binary", Status: "missing", Severity: "critical", Message: "FFMPEG_BIN is empty."}
+	}
+	if _, err := exec.LookPath(bin); err != nil {
+		return preflightCheck{ID: "ffmpeg_binary", Status: "not_found", Severity: "critical", Message: "FFmpeg binary was not found on PATH or at the configured location."}
+	}
+	return preflightCheck{ID: "ffmpeg_binary", Status: "ok", Severity: "critical", Message: "FFmpeg binary is available."}
+}
+
+func archiveRootPreflight(root string) preflightCheck {
+	if strings.TrimSpace(root) == "" {
+		return preflightCheck{ID: "archive_root", Status: "missing", Severity: "critical", Message: "AUTOSTREAM_ARCHIVE_DIR is empty."}
+	}
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		return preflightCheck{ID: "archive_root", Status: "unavailable", Severity: "critical", Message: "Archive root directory cannot be created or opened."}
+	}
+	probe, err := os.CreateTemp(root, ".autostream-preflight-*")
+	if err != nil {
+		return preflightCheck{ID: "archive_root", Status: "not_writable", Severity: "critical", Message: "Archive root directory is not writable."}
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	_ = os.Remove(name)
+	if !pathInsideRoot(root, name) {
+		return preflightCheck{ID: "archive_root", Status: "invalid", Severity: "critical", Message: "Archive root write probe escaped the configured root."}
+	}
+	return preflightCheck{ID: "archive_root", Status: "ok", Severity: "critical", Message: "Archive root directory is writable."}
+}
+
+func pathInsideRoot(root, path string) bool {
+	rootAbs, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+func outputRelayPreflight() preflightCheck {
+	raw := strings.TrimSpace(os.Getenv("AUTOSTREAM_OUTPUT_RELAY_URL"))
+	required := requireOutputRelay()
+	if raw == "" {
+		if required {
+			return preflightCheck{ID: "output_relay", Status: "missing", Severity: "critical", Message: "AUTOSTREAM_OUTPUT_RELAY_URL is required in production to keep YouTube stream keys out of FFmpeg process arguments."}
+		}
+		return preflightCheck{ID: "output_relay", Status: "compatibility_mode", Severity: "warning", Message: "Output relay is not configured; FFmpeg will use the direct RTMPS target in compatibility mode."}
+	}
+	target := relayOutputTargetForPreflight(raw, "preflight-stream")
+	if err := ffmpeg.ValidateRelayOutputTarget(target); err != nil {
+		return preflightCheck{ID: "output_relay", Status: "invalid", Severity: "critical", Message: "AUTOSTREAM_OUTPUT_RELAY_URL must resolve to a loopback RTMP/RTMPS relay target."}
+	}
+	return preflightCheck{ID: "output_relay", Status: "ok", Severity: "critical", Message: "Output relay is configured; FFmpeg receives only the local relay target."}
+}
+
+func requireOutputRelay() bool {
+	if envBool("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", false) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("AUTOSTREAM_ENV")), "production")
+}
+
+func relayOutputTargetForPreflight(template, streamID string) string {
+	escapedStreamID := url.PathEscape(strings.TrimSpace(streamID))
+	if strings.Contains(template, "{stream_id}") {
+		return strings.ReplaceAll(template, "{stream_id}", escapedStreamID)
+	}
+	return strings.TrimRight(template, "/") + "/" + escapedStreamID
+}
+
+func youtubeRuntimeConfigPreflight(id, key, label string) preflightCheck {
+	if strings.TrimSpace(os.Getenv(key)) != "" {
+		return preflightCheck{ID: id, Status: "ok", Severity: "warning", Message: label + " env fallback is configured. Prefer Control Panel YouTube output runtime config."}
+	}
+	return preflightCheck{ID: id, Status: "runtime_config_required", Severity: "warning", Message: label + " should be supplied by Control Panel YouTube output runtime config; env fallback is optional."}
+}
+
+func googleDrivePreflight() preflightCheck {
+	mode := strings.TrimSpace(os.Getenv("GOOGLE_DRIVE_AUTH_MODE"))
+	if mode == "" {
+		return preflightCheck{ID: "google_drive", Status: "dry_run", Severity: "warning", Message: "Google Drive auth mode is not configured; archive upload will use dry-run uploader."}
+	}
+	if mode != "service_account" {
+		return preflightCheck{ID: "google_drive", Status: "runtime_config_required", Severity: "warning", Message: "OAuth2 Drive upload must be supplied by Control Panel archive runtime config; env fallback only supports service_account."}
+	}
+	if strings.TrimSpace(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")) == "" || strings.TrimSpace(os.Getenv("GOOGLE_DRIVE_FOLDER_ID")) == "" {
+		return preflightCheck{ID: "google_drive", Status: "missing_config", Severity: "warning", Message: "Service Account mode requires GOOGLE_APPLICATION_CREDENTIALS and GOOGLE_DRIVE_FOLDER_ID."}
+	}
+	if _, err := os.Stat(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")); err != nil {
+		return preflightCheck{ID: "google_drive", Status: "credential_file_unavailable", Severity: "warning", Message: "Google credential file is not readable by this process."}
+	}
+	return preflightCheck{ID: "google_drive", Status: "ok", Severity: "warning", Message: "Google Drive Service Account upload is configured."}
+}
+
+func observabilityPreflight() preflightCheck {
+	urlConfigured := strings.TrimSpace(os.Getenv("OBSERVABILITY_URL")) != ""
+	tokenConfigured := strings.TrimSpace(os.Getenv("OBSERVABILITY_TOKEN")) != ""
+	if !urlConfigured && !tokenConfigured {
+		return preflightCheck{ID: "observability", Status: "disabled", Severity: "warning", Message: "Observability is not configured; local service can run but incidents and metrics will not be reported."}
+	}
+	if !urlConfigured || !tokenConfigured {
+		return preflightCheck{ID: "observability", Status: "partial", Severity: "warning", Message: "OBSERVABILITY_URL and OBSERVABILITY_TOKEN must both be configured."}
+	}
+	return preflightCheck{ID: "observability", Status: "ok", Severity: "warning", Message: "Observability reporting is configured."}
+}
+
+func safeConfigValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "dry_run"
+	}
+	if value == "service_account" || value == "oauth2" {
+		return value
+	}
+	return "custom"
+}
+
+func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		var job lifecycle.StreamJob
+		if status, err := decodeLimitedJSON(w, r, maxControlBodyBytes, &job); err != nil {
+			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
+			return
+		}
+		if err := applyYouTubeRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
+			return
+		}
+		if err := applyArchiveRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
+			return
+		}
+		if rawYouTubeStreamKeyInputDisallowed(job) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_youtube_stream_key_not_allowed"})
+			return
+		}
+		if strings.TrimSpace(job.StreamKey) == "" && strings.TrimSpace(job.StreamKeySecretName) != "" {
+			job.StreamKey = "<RUNTIME_STREAM_KEY>"
+		}
+		if missing := applyYouTubeRuntimeConfigFallback(&job); len(missing) > 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"code": "youtube_runtime_config_required", "missing": missing})
+			return
+		}
+		archiveRoot := os.Getenv("AUTOSTREAM_ARCHIVE_DIR")
+		if archiveRoot == "" {
+			archiveRoot = "/var/lib/autostream/archives"
+		}
+		ffmpegBin := os.Getenv("FFMPEG_BIN")
+		if ffmpegBin == "" {
+			ffmpegBin = "ffmpeg"
+		}
+		manager := lifecycle.Manager{
+			ArchiveRoot: archiveRoot,
+			FFmpegBin:   ffmpegBin,
+			Runner:      &ffmpeg.DryRunRunner{},
+			Uploader:    archive.DryRunUploader{},
+		}
+		result, err := manager.DryRun(r.Context(), job)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "dry_run_failed"})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, result.Metadata)
+	}
+}
+
+func startStream(processManager *streamproc.Manager, audioManager *audioingest.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver, runtimeConfig RuntimeConfigProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		if processManager == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "process_manager_not_configured"})
+			return
+		}
+		var job lifecycle.StreamJob
+		if status, err := decodeLimitedJSON(w, r, maxControlBodyBytes, &job); err != nil {
+			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
+			return
+		}
+		if err := applyYouTubeRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
+			return
+		}
+		if err := applyArchiveRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
+			return
+		}
+		if rawYouTubeStreamKeyInputDisallowed(job) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_youtube_stream_key_not_allowed"})
+			return
+		}
+		if err := resolveYouTubeRuntimeSecrets(r.Context(), &job, resolver); err != nil {
+			writeRuntimeSecretResolveError(w, err)
+			return
+		}
+		if missing := applyYouTubeRuntimeConfigFallback(&job); len(missing) > 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"code": "youtube_runtime_config_required", "missing": missing})
+			return
+		}
+		if err := resolveArchiveRuntimeSecrets(r.Context(), &job, resolver); err != nil {
+			writeRuntimeSecretResolveError(w, err)
+			return
+		}
+		audioBridgeMode := false
+		if strings.TrimSpace(job.InputURL) == "" {
+			if audioManager == nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"code": "input_url_required"})
+				return
+			}
+			bridge, err := audioManager.StartBridge(job.StreamID)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"code": "audio_bridge_failed"})
+				return
+			}
+			job.InputURL = bridge.InputURL
+			job.InputMode = "discord_opus_rtp"
+			audioBridgeMode = true
+		} else if strings.HasPrefix(strings.TrimSpace(job.InputURL), "internal_discord_audio:") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "internal_audio_input_not_allowed"})
+			return
+		}
+		snapshot, err := processManager.Start(job)
+		if errors.Is(err, streamproc.ErrAlreadyRunning) {
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "stream_already_running"})
+			return
+		}
+		if err != nil {
+			if audioBridgeMode && audioManager != nil {
+				audioManager.StopBridge(job.StreamID)
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "start_stream_failed"})
+			return
+		}
+		if audioBridgeMode {
+			go reportDiscordAudioHealth(processManager, audioManager, job.StreamID)
+		}
+		writeJSON(w, http.StatusAccepted, publicProcessSnapshot(snapshot))
+	}
+}
+
+func applyYouTubeRuntimeConfig(ctx context.Context, job *lifecycle.StreamJob, provider RuntimeConfigProvider) error {
+	if job == nil || provider == nil || strings.TrimSpace(job.StreamID) == "" {
+		return nil
+	}
+	if strings.TrimSpace(job.RTMPURL) != "" && (strings.TrimSpace(job.StreamKey) != "" || strings.TrimSpace(job.StreamKeySecretName) != "") {
+		return nil
+	}
+	cfg, err := provider(ctx)
+	if err != nil {
+		return err
+	}
+	youtube, ok := cfg.YouTubeConfigForStream(job.StreamID)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(job.RTMPURL) == "" {
+		job.RTMPURL = youtube.RTMPURL()
+	}
+	if strings.TrimSpace(job.StreamKey) == "" && strings.TrimSpace(job.StreamKeySecretName) == "" {
+		job.StreamKeySecretName = youtube.StreamKeySecretName()
+	}
+	return nil
+}
+
+func applyArchiveRuntimeConfig(ctx context.Context, job *lifecycle.StreamJob, provider RuntimeConfigProvider) error {
+	if job == nil || provider == nil || strings.TrimSpace(job.StreamID) == "" {
+		return nil
+	}
+	cfg, err := provider(ctx)
+	if err != nil {
+		return err
+	}
+	archiveRuntime, ok := cfg.ArchiveConfigForStream(job.StreamID)
+	if !ok {
+		return nil
+	}
+	mergeRuntimeArchiveConfig(&job.ArchiveConfig, archiveRuntime)
+	return nil
+}
+
+func mergeRuntimeArchiveConfig(dst *lifecycle.ArchiveConfig, src control.RuntimeArchiveStreamConfig) {
+	if dst == nil {
+		return
+	}
+	setStringIfEmpty(&dst.DriveDestinationID, src.DriveDestinationID())
+	setStringIfEmpty(&dst.ArchiveProfileID, src.ArchiveProfileIDValue())
+	setStringIfEmpty(&dst.AuthMode, src.AuthMode())
+	setStringIfEmpty(&dst.OAuthAccountID, src.OAuthAccountID())
+	setStringIfEmpty(&dst.OAuthProviderID, src.OAuthProviderID())
+	setStringIfEmpty(&dst.FolderIDSecretName, src.FolderIDSecretName())
+	setStringIfEmpty(&dst.ServiceAccountSecretName, src.ServiceAccountSecretName())
+	setStringIfEmpty(&dst.ServiceAccountCredentialsSecretName, src.ServiceAccountCredentialsSecretName())
+	setStringIfEmpty(&dst.BasePath, src.BasePath())
+	if value, ok := src.SharedDrive(); ok && value {
+		dst.SharedDrive = true
+	}
+	setStringIfEmpty(&dst.ClientID, src.ClientID())
+	setStringIfEmpty(&dst.ClientSecretSecretName, src.ClientSecretSecretName())
+	setStringIfEmpty(&dst.RefreshTokenSecretName, src.RefreshTokenSecretName())
+}
+
+func setStringIfEmpty(dst *string, value string) {
+	if dst == nil || strings.TrimSpace(*dst) != "" || strings.TrimSpace(value) == "" {
+		return
+	}
+	*dst = strings.TrimSpace(value)
+}
+
+func applyYouTubeRuntimeConfigFallback(job *lifecycle.StreamJob) []string {
+	if job == nil {
+		return nil
+	}
+	missing := missingYouTubeRuntimeFields(*job)
+	if len(missing) == 0 {
+		return nil
+	}
+	if requireControlPanelRuntimeConfig() {
+		return missing
+	}
+	if job.StreamKey == "" {
+		job.StreamKey = os.Getenv("YOUTUBE_STREAM_KEY")
+	}
+	if job.RTMPURL == "" {
+		job.RTMPURL = os.Getenv("YOUTUBE_RTMP_URL")
+	}
+	return missingYouTubeRuntimeFields(*job)
+}
+
+func missingYouTubeRuntimeFields(job lifecycle.StreamJob) []string {
+	var missing []string
+	if strings.TrimSpace(job.RTMPURL) == "" {
+		missing = append(missing, "rtmp_url")
+	}
+	if strings.TrimSpace(job.StreamKey) == "" {
+		missing = append(missing, "stream_key")
+	}
+	return missing
+}
+
+func requireControlPanelRuntimeConfig() bool {
+	if envBool("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", false) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("AUTOSTREAM_ENV")), "production")
+}
+
+func rawYouTubeStreamKeyInputDisallowed(job lifecycle.StreamJob) bool {
+	return requireControlPanelRuntimeConfig() &&
+		strings.TrimSpace(job.StreamKey) != "" &&
+		strings.TrimSpace(job.StreamKeySecretName) == ""
+}
+
+func resolveYouTubeRuntimeSecrets(ctx context.Context, job *lifecycle.StreamJob, resolver RuntimeSecretResolver) error {
+	if job == nil || strings.TrimSpace(job.StreamKeySecretName) == "" {
+		return nil
+	}
+	if resolver == nil {
+		return errRuntimeSecretResolverNotConfigured
+	}
+	if strings.TrimSpace(job.StreamKey) != "" {
+		return errRawYouTubeSecretFieldNotAllowed
+	}
+	value, err := resolver(ctx, job.StreamID, "", job.StreamKeySecretName)
+	if err != nil {
+		return err
+	}
+	job.StreamKey = value
+	return nil
+}
+
+func resolveArchiveRuntimeSecrets(ctx context.Context, job *lifecycle.StreamJob, resolver RuntimeSecretResolver) error {
+	if job == nil {
+		return nil
+	}
+	cfg := &job.ArchiveConfig
+	if archiveConfigHasRawSecretFields(*cfg) {
+		return errRawArchiveSecretFieldsNotAllowed
+	}
+	if cfg.AuthMode == "" || resolver == nil {
+		return nil
+	}
+	if cfg.FolderID == "" && cfg.FolderIDSecretName != "" {
+		value, err := resolver(ctx, job.StreamID, cfg.ArchiveProfileID, cfg.FolderIDSecretName)
+		if err != nil {
+			return err
+		}
+		cfg.FolderID = value
+	}
+	if cfg.ServiceAccountJSON == "" && cfg.ServiceAccountSecretName != "" {
+		value, err := resolver(ctx, job.StreamID, cfg.ArchiveProfileID, cfg.ServiceAccountSecretName)
+		if err != nil {
+			return err
+		}
+		cfg.ServiceAccountJSON = value
+	}
+	if cfg.ServiceAccountJSON == "" && cfg.ServiceAccountCredentialsSecretName != "" {
+		value, err := resolver(ctx, job.StreamID, cfg.ArchiveProfileID, cfg.ServiceAccountCredentialsSecretName)
+		if err != nil {
+			return err
+		}
+		cfg.ServiceAccountJSON = value
+	}
+	if cfg.ClientSecret == "" && cfg.ClientSecretSecretName != "" {
+		value, err := resolver(ctx, job.StreamID, cfg.ArchiveProfileID, cfg.ClientSecretSecretName)
+		if err != nil {
+			return err
+		}
+		cfg.ClientSecret = value
+	}
+	if cfg.RefreshToken == "" && cfg.RefreshTokenSecretName != "" {
+		value, err := resolver(ctx, job.StreamID, cfg.ArchiveProfileID, cfg.RefreshTokenSecretName)
+		if err != nil {
+			return err
+		}
+		cfg.RefreshToken = value
+	}
+	return nil
+}
+
+func archiveConfigHasRawSecretFields(cfg lifecycle.ArchiveConfig) bool {
+	return strings.TrimSpace(cfg.FolderID) != "" ||
+		strings.TrimSpace(cfg.ServiceAccountJSON) != "" ||
+		strings.TrimSpace(cfg.ClientSecret) != "" ||
+		strings.TrimSpace(cfg.RefreshToken) != ""
+}
+
+func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Manager, verifier TokenVerifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		if processManager == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "process_manager_not_configured"})
+			return
+		}
+		snapshot, err := processManager.Stop(r.PathValue("id"))
+		if errors.Is(err, streamproc.ErrNotRunning) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"code": "stream_not_running"})
+			return
+		}
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "stop_stream_failed"})
+			return
+		}
+		if audioManager != nil {
+			audioManager.StopBridge(r.PathValue("id"))
+		}
+		writeJSON(w, http.StatusAccepted, publicProcessSnapshot(snapshot))
+	}
+}
+
+func streamProcessStatus(processManager *streamproc.Manager, verifier TokenVerifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		if processManager == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "process_manager_not_configured"})
+			return
+		}
+		snapshot, err := processManager.Status(r.PathValue("id"))
+		if errors.Is(err, streamproc.ErrNotRunning) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"code": "stream_not_running"})
+			return
+		}
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "get_process_status_failed"})
+			return
+		}
+		writeJSON(w, http.StatusOK, publicProcessSnapshot(snapshot))
+	}
+}
+
+type processSnapshotResponse struct {
+	StreamID     string            `json:"stream_id"`
+	Name         string            `json:"name"`
+	Status       string            `json:"status"`
+	StartedAtJST string            `json:"started_at_jst"`
+	StoppedAtJST string            `json:"stopped_at_jst,omitempty"`
+	Archive      map[string]string `json:"archive"`
+	Error        string            `json:"error,omitempty"`
+}
+
+func publicProcessSnapshot(snapshot streamproc.Snapshot) processSnapshotResponse {
+	return processSnapshotResponse{
+		StreamID:     snapshot.StreamID,
+		Name:         snapshot.Name,
+		Status:       snapshot.Status,
+		StartedAtJST: snapshot.StartedAtJST,
+		StoppedAtJST: snapshot.StoppedAtJST,
+		Archive:      snapshot.Archive,
+		Error:        snapshot.Error,
+	}
+}
+
+func discordAudioStatus(audioManager *audioingest.Manager, verifier TokenVerifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		if audioManager == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "audio_ingest_not_configured"})
+			return
+		}
+		writeJSON(w, http.StatusOK, audioManager.Status(r.PathValue("id"), time.Now().UTC()))
+	}
+}
+
+func packageStream(verifier TokenVerifier, resolver RuntimeSecretResolver, runtimeConfig RuntimeConfigProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		var job lifecycle.PackageJob
+		if status, err := decodeLimitedJSON(w, r, maxControlBodyBytes, &job); err != nil {
+			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
+			return
+		}
+		if err := applyPackageArchiveRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
+			return
+		}
+		if err := resolvePackageArchiveRuntimeSecrets(r.Context(), &job, resolver); err != nil {
+			writeRuntimeSecretResolveError(w, err)
+			return
+		}
+		archiveRoot := os.Getenv("AUTOSTREAM_ARCHIVE_DIR")
+		if archiveRoot == "" {
+			archiveRoot = "/var/lib/autostream/archives"
+		}
+		ffmpegBin := os.Getenv("FFMPEG_BIN")
+		if ffmpegBin == "" {
+			ffmpegBin = "ffmpeg"
+		}
+		var runner ffmpeg.Runner = ffmpeg.CommandRunner{}
+		if job.DryRun {
+			runner = &ffmpeg.DryRunRunner{}
+		}
+		uploader := archive.RetryUploader{
+			Inner:  uploaderFromEnv(job.DryRun),
+			Policy: archive.RetryPolicy{MaxAttempts: envInt("GOOGLE_DRIVE_UPLOAD_RETRY_MAX", 5), BaseDelay: time.Duration(envInt("GOOGLE_DRIVE_UPLOAD_RETRY_BASE_DELAY_SEC", 2)) * time.Second},
+		}
+		manager := lifecycle.Manager{ArchiveRoot: archiveRoot, FFmpegBin: ffmpegBin, Runner: runner, Uploader: uploader}
+		started := time.Now().UTC()
+		result, err := manager.Package(r.Context(), job)
+		if err != nil {
+			reportPackageFailed(r.Context(), job, time.Since(started), err)
+			writeJSON(w, http.StatusBadRequest, packageFailureResponse(err, job.DryRun))
+			return
+		}
+		reportPackageCompleted(r.Context(), job, result, time.Since(started))
+		reportControlPanelArtifacts(r.Context(), job.StreamID, result)
+		writeJSON(w, http.StatusAccepted, result.Metadata)
+	}
+}
+
+func resolvePackageArchiveRuntimeSecrets(ctx context.Context, job *lifecycle.PackageJob, resolver RuntimeSecretResolver) error {
+	if job == nil {
+		return nil
+	}
+	streamJob := lifecycle.StreamJob{StreamID: job.StreamID, ArchiveConfig: job.ArchiveConfig}
+	if err := resolveArchiveRuntimeSecrets(ctx, &streamJob, resolver); err != nil {
+		return err
+	}
+	job.ArchiveConfig = streamJob.ArchiveConfig
+	return nil
+}
+
+func applyPackageArchiveRuntimeConfig(ctx context.Context, job *lifecycle.PackageJob, provider RuntimeConfigProvider) error {
+	if job == nil {
+		return nil
+	}
+	streamJob := lifecycle.StreamJob{StreamID: job.StreamID, ArchiveConfig: job.ArchiveConfig}
+	if err := applyArchiveRuntimeConfig(ctx, &streamJob, provider); err != nil {
+		return err
+	}
+	job.ArchiveConfig = streamJob.ArchiveConfig
+	return nil
+}
+
+func writeRuntimeSecretResolveError(w http.ResponseWriter, err error) {
+	if errors.Is(err, control.ErrRuntimeSecretLeaseActive) {
+		writeJSON(w, http.StatusConflict, map[string]string{"code": control.RuntimeSecretLeaseActiveCode})
+		return
+	}
+	if errors.Is(err, errRawArchiveSecretFieldsNotAllowed) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_archive_secret_fields_not_allowed"})
+		return
+	}
+	if errors.Is(err, errRawYouTubeSecretFieldNotAllowed) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_youtube_secret_field_not_allowed"})
+		return
+	}
+	if errors.Is(err, errRuntimeSecretResolverNotConfigured) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "runtime_secret_resolver_not_configured"})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"code": "archive_secret_resolve_failed"})
+}
+
+func workerEvents(eventManager *workerevents.Manager, processManager *streamproc.Manager, verifier TokenVerifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var event workerevents.Event
+		if status, err := decodeLimitedJSON(w, r, maxWorkerEventBodyBytes, &event); err != nil {
+			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
+			return
+		}
+		claims, authorized := verifier.WorkerEventsClaims(r.Header.Get("Authorization"), event.StreamID)
+		if !authorized {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"code": "missing_or_invalid_worker_events_token"})
+			return
+		}
+		if claims.ServiceID != "" && claims.ServiceID != event.ServiceID {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"code": "worker_service_id_mismatch"})
+			return
+		}
+		if !isRunningStream(processManager, event.StreamID) {
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "stream_not_running"})
+			return
+		}
+		result, err := eventManager.Add(event)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "worker_event_rejected"})
+			return
+		}
+		reportWorkerEventReceived(r.Context(), event)
+		writeJSON(w, http.StatusAccepted, result)
+	}
+}
+
+func recentWorkerEvents(eventManager *workerevents.Manager, verifier TokenVerifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !verifier.Verify(r.Header.Get("Authorization")) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"code": "missing_or_invalid_service_token"})
+			return
+		}
+		events, err := eventManager.Recent(r.PathValue("id"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "worker_events_unavailable"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"events": events})
+	}
+}
+
+func discordOpusAudio(audioManager *audioingest.Manager, processManager *streamproc.Manager, verifier TokenVerifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if audioManager == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "audio_ingest_not_configured"})
+			return
+		}
+		var req audioingest.IngestRequest
+		if status, err := decodeLimitedJSON(w, r, int64(envInt("AUDIO_INGEST_MAX_BODY_BYTES", defaultDiscordAudioBodyBytes)), &req); err != nil {
+			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
+			return
+		}
+		if req.StreamID == "" {
+			req.StreamID = r.PathValue("id")
+		}
+		if req.StreamID != r.PathValue("id") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "stream_id_mismatch"})
+			return
+		}
+		claims, authorized := verifier.DiscordAudioClaims(r.Header.Get("Authorization"), req.StreamID)
+		if !authorized {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"code": "missing_or_invalid_discord_audio_token"})
+			return
+		}
+		if claims.ServiceID != "" && claims.ServiceID != req.Source {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"code": "discord_service_id_mismatch"})
+			return
+		}
+		if !isRunningStream(processManager, req.StreamID) {
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "stream_not_running"})
+			return
+		}
+		if !audioManager.Status(req.StreamID, time.Now().UTC()).BridgeActive {
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "audio_bridge_not_active"})
+			return
+		}
+		result, err := audioManager.Add(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "audio_ingest_rejected"})
+			return
+		}
+		reportDiscordAudioReceived(r.Context(), req.StreamID, result.AcceptedCount)
+		writeJSON(w, http.StatusAccepted, result)
+	}
+}
+
+func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, limit int64, dst any) (int, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(dst); err != nil {
+		return limitedJSONStatus(err), err
+	}
+	if err := decoder.Decode(&struct{}{}); errors.Is(err, io.EOF) {
+		return http.StatusOK, nil
+	} else {
+		return limitedJSONStatus(err), err
+	}
+}
+
+func limitedJSONStatus(err error) int {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
+func limitedJSONErrorCode(status int) string {
+	if status == http.StatusRequestEntityTooLarge {
+		return "request_body_too_large"
+	}
+	return "bad_request"
+}
+
+func isRunningStream(processManager *streamproc.Manager, streamID string) bool {
+	if processManager == nil || strings.TrimSpace(streamID) == "" {
+		return false
+	}
+	snapshot, err := processManager.Status(streamID)
+	return err == nil && snapshot.Status == "running"
+}
+
+func reportWorkerEventReceived(ctx context.Context, event workerevents.Event) {
+	reporter := observability.NewClientFromEnv()
+	if !reporter.Enabled() {
+		return
+	}
+	_ = reporter.Event(ctx, event.StreamID, "worker.event.received", "accepted", map[string]any{"event_type": event.Type})
+}
+
+func reportDiscordAudioReceived(ctx context.Context, streamID string, count int) {
+	reporter := observability.NewClientFromEnv()
+	if !reporter.Enabled() {
+		return
+	}
+	reportMetric(ctx, reporter, streamID, "discord.audio_receiving", 1)
+	_ = reporter.Event(ctx, streamID, "discord.audio_ingest.received", "accepted", map[string]any{"packet_count": count})
+}
+
+func reportDiscordAudioHealth(processManager *streamproc.Manager, audioManager *audioingest.Manager, streamID string) {
+	if processManager == nil || audioManager == nil || streamID == "" {
+		return
+	}
+	reporter := observability.NewClientFromEnv()
+	if !reporter.Enabled() {
+		return
+	}
+	interval := time.Duration(envInt("AUDIO_INGEST_METRICS_INTERVAL_SEC", 5)) * time.Second
+	timeoutSec := float64(envInt("AUDIO_INGEST_TIMEOUT_SEC", 5))
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		snapshot, err := processManager.Status(streamID)
+		if err != nil || (snapshot.Status != "running" && snapshot.Status != "stopping") {
+			return
+		}
+		stats := audioManager.Status(streamID, time.Now().UTC())
+		receiving := 0.0
+		timeout := stats.LastPacketAgeSec
+		if stats.PacketsTotal > 0 && stats.LastPacketAgeSec < timeoutSec {
+			receiving = 1
+			timeout = 0
+		}
+		reportMetric(context.Background(), reporter, streamID, "discord.audio_receiving", receiving)
+		reportMetric(context.Background(), reporter, streamID, "discord.audio_packets_total", float64(stats.PacketsTotal))
+		reportMetric(context.Background(), reporter, streamID, "media.input_timeout_sec", timeout)
+		<-ticker.C
+	}
+}
+
+func reportPackageFailed(ctx context.Context, job lifecycle.PackageJob, elapsed time.Duration, err error) {
+	reporter := observability.NewClientFromEnv()
+	if !reporter.Enabled() {
+		return
+	}
+	phase := lifecycle.ErrorPhase(err)
+	if phase == "upload" {
+		reportMetric(ctx, reporter, job.StreamID, "archive.package_status", 1)
+		reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_status", 0)
+	} else {
+		reportMetric(ctx, reporter, job.StreamID, "archive.package_status", 0)
+	}
+	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_duration_sec", elapsed.Seconds())
+	_ = reporter.Event(ctx, job.StreamID, "archive.package.failed", "failed", packageFailureAttributes(err, job.DryRun))
+}
+
+func reportPackageCompleted(ctx context.Context, job lifecycle.PackageJob, result lifecycle.Result, elapsed time.Duration) {
+	reporter := observability.NewClientFromEnv()
+	if !reporter.Enabled() {
+		return
+	}
+	reportMetric(ctx, reporter, job.StreamID, "archive.package_status", 1)
+	reportMetric(ctx, reporter, job.StreamID, "archive.final_mp4_exists", 1)
+	reportMetric(ctx, reporter, job.StreamID, "recorder.remux_duration_ms", result.RemuxDurationMS)
+	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_status", 1)
+	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_retry_count", float64(maxInt(result.Metadata.Upload.Attempts-1, 0)))
+	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_duration_sec", elapsed.Seconds())
+	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_file_count", float64(result.Metadata.Upload.UploadedFileCount()))
+	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_folder_fingerprint_present", boolMetric(result.Metadata.Upload.HasFolderFingerprint()))
+	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_final_mp4_fingerprint_present", boolMetric(result.Metadata.Upload.HasFileFingerprint("final.mp4")))
+	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_metadata_fingerprint_present", boolMetric(result.Metadata.Upload.HasFileFingerprint("metadata.json")))
+	_ = reporter.Event(ctx, job.StreamID, "archive.package.completed", "completed", map[string]any{
+		"dry_run":           job.DryRun,
+		"upload_dry_run":    result.Metadata.Upload.DryRun,
+		"upload_attempts":   result.Metadata.Upload.Attempts,
+		"file_count":        len(result.Metadata.Upload.FileIDs),
+		"remux_duration_ms": result.RemuxDurationMS,
+	})
+}
+
+func reportControlPanelArtifacts(ctx context.Context, streamID string, result lifecycle.Result) {
+	config := control.ConfigFromEnv()
+	if config.ControlPanelURL == "" || config.Token == "" {
+		return
+	}
+	artifacts := control.ArchiveArtifacts(result.Layout)
+	if len(artifacts) == 0 {
+		return
+	}
+	client := control.Client{Config: config}
+	if err := client.ReportArtifacts(ctx, streamID, artifacts); err != nil {
+		log.Printf("control panel artifact report failed: %v", err)
+	}
+}
+
+func reportMetric(ctx context.Context, reporter observability.Client, streamID, name string, value float64) {
+	_ = reporter.Report(ctx, observability.Signal{Type: "metric", Name: name, StreamID: streamID, Value: &value})
+}
+
+func packageFailureAttributes(err error, dryRun bool) map[string]any {
+	phase := lifecycle.ErrorPhase(err)
+	if phase == "" {
+		phase = "unknown"
+	}
+	return map[string]any{
+		"failure_phase": phase,
+		"error_class":   lifecycle.ErrorClass(err),
+		"dry_run":       dryRun,
+	}
+}
+
+func packageFailureResponse(err error, dryRun bool) map[string]any {
+	attrs := packageFailureAttributes(err, dryRun)
+	return map[string]any{
+		"code":          "package_failed",
+		"failure_phase": attrs["failure_phase"],
+		"error_class":   attrs["error_class"],
+		"dry_run":       attrs["dry_run"],
+	}
+}
+
+func uploaderFromEnv(dryRun bool) archive.ArchiveUploader {
+	if dryRun || os.Getenv("GOOGLE_DRIVE_AUTH_MODE") == "" {
+		return archive.DryRunUploader{}
+	}
+	return archive.GoogleDriveAPIUploader{Config: archive.GoogleDriveConfigFromEnv()}
+}
+
+func envInt(key string, fallback int) int {
+	value, err := strconv.Atoi(os.Getenv(key))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func envDefault(key, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func boolMetric(ok bool) float64 {
+	if ok {
+		return 1
+	}
+	return 0
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}

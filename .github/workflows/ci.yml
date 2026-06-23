@@ -1,0 +1,20 @@
+﻿name: autostream-encoder-recorder CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: go test ./...
+      - run: go build ./...
+

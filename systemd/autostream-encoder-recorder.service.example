@@ -1,0 +1,22 @@
+[Unit]
+Description=encoder-recorder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=autostream
+Group=autostream
+EnvironmentFile=/etc/autostream/encoder-recorder.env
+ExecStart=/usr/local/bin/encoder-recorder
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/var/lib/autostream/encoder-recorder /var/lib/autostream/archives
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
