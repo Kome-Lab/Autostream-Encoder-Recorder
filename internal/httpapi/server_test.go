@@ -1012,6 +1012,7 @@ func TestStartEndpointAppliesControlPanelYouTubeRuntimeConfig(t *testing.T) {
 func TestDryRunEndpointAppliesControlPanelYouTubeRuntimeConfigWithoutResolvingSecret(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	t.Setenv("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", "true")
+	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", t.TempDir())
 	handler := NewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		nil,
