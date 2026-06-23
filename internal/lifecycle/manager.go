@@ -162,12 +162,6 @@ func (m Manager) DryRun(ctx context.Context, job StreamJob) (Result, error) {
 	if job.StreamID == "" || job.Name == "" {
 		return Result{}, errors.New("stream id and name are required")
 	}
-	if err := ffmpeg.ValidateInputTarget(job.InputURL); err != nil {
-		return Result{}, err
-	}
-	if err := ffmpeg.ValidateOutputTarget(job.RTMPURL, job.StreamKey); err != nil {
-		return Result{}, err
-	}
 	layout, err := archive.NewLayout(m.ArchiveRoot, job.StreamID)
 	if err != nil {
 		return Result{}, err
@@ -176,6 +170,12 @@ func (m Manager) DryRun(ctx context.Context, job StreamJob) (Result, error) {
 		return Result{}, err
 	}
 	if err := archive.EnsureDirNoSymlinks(layout.RootDir, layout.FinalDir()); err != nil {
+		return Result{}, err
+	}
+	if err := ffmpeg.ValidateInputTarget(job.InputURL); err != nil {
+		return Result{}, err
+	}
+	if err := ffmpeg.ValidateOutputTarget(job.RTMPURL, job.StreamKey); err != nil {
 		return Result{}, err
 	}
 	runner := m.Runner
@@ -263,7 +263,7 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 	}
 	defer release()
 	if err := archive.EnsureDirNoSymlinks(layout.RootDir, layout.FinalDir()); err != nil {
-		return Result{}, err
+		return Result{}, PackageError{Phase: "package", Err: err}
 	}
 	if err := rejectArchiveDirSymlinks(layout.RootDir, layout.TmpDir()); err != nil {
 		return Result{}, PackageError{Phase: "input", Err: err}

@@ -84,7 +84,7 @@ func ReserveOutputFileNoSymlink(rootDir, path string) error {
 	if err := EnsureDirNoSymlinks(rootAbs, filepath.Dir(pathAbs)); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(pathAbs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+	file, err := os.OpenFile(pathAbs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
 		if closeErr := file.Close(); closeErr != nil {
 			return closeErr
