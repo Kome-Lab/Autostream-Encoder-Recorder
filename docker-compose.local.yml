@@ -1,14 +1,9 @@
 services:
   encoder-recorder:
     environment:
-      SERVICE_ID: encoder-recorder-local-01
-      SERVICE_NAME: Encoder Recorder Local
-      SERVICE_PUBLIC_URL: http://host.docker.internal:8081
+      AUTOSTREAM_NODE_CONFIG: /etc/autostream-node/config.yml
       SERVICE_VERSION: 0.1.0-local
-      CONTROL_PANEL_URL: http://host.docker.internal:8080
-      CONTROL_PANEL_TOKEN: ${AUTOSTREAM_LOCAL_ENCODER_TOKEN:?AUTOSTREAM_LOCAL_ENCODER_TOKEN is required}
       CONTROL_PANEL_HEARTBEAT_INTERVAL_SEC: 5
-      SERVICE_CONTROL_TOKEN_SHA256: 133dd58081fce1840b7eabfb72582af6a8413e8b9dab2845ee7e0ce4f86f3a38
       ENCODER_WORKER_EVENTS_TOKEN_SHA256: a0e6041a5315ef8d9da50741b123686402c79144c799a54cec74e4caf51f734e
       ENCODER_DISCORD_AUDIO_TOKEN_SHA256: 5080094e5681df3c6959ee8c8110a1aa94bb5bcaa340977438cc21ed7cb6b5c5
       AUTOSTREAM_STREAM_INGEST_SIGNING_KEY: dev-only-stream-ingest-signing-key-change-me
@@ -19,7 +14,6 @@ services:
       AUTOSTREAM_BIND_ADDR: 0.0.0.0:8080
       AUTOSTREAM_DATA_DIR: /var/lib/autostream/encoder-recorder
       AUTOSTREAM_ARCHIVE_DIR: /var/lib/autostream/archives
-      DATABASE_URL: mysql://autostream:example_password_change_me@tcp(mariadb:3306)/autostream_encoder_recorder?parseTime=true
       FFMPEG_BIN: ffmpeg
       YOUTUBE_RTMP_URL: rtmps://example.youtube.com/live2
       YOUTUBE_STREAM_KEY: dev-only-youtube-stream-key
@@ -31,6 +25,7 @@ services:
     ports: !override
       - "8081:8080"
     volumes:
+      - ./config/autostream-node.yml:/etc/autostream-node/config.yml:ro
       - encoder-archives:/var/lib/autostream/archives
 
 volumes:

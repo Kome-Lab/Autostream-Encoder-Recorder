@@ -48,6 +48,7 @@ type Config struct {
 	ServicePublicURL string
 	Version          string
 	HeartbeatEvery   time.Duration
+	ConfigError      string
 }
 
 type Client struct {
@@ -317,7 +318,7 @@ func runtimeMapBool(values map[string]any, key string) (bool, bool) {
 }
 
 func ConfigFromEnv() Config {
-	return Config{
+	cfg := Config{
 		ControlPanelURL:  os.Getenv("CONTROL_PANEL_URL"),
 		Token:            os.Getenv("CONTROL_PANEL_TOKEN"),
 		ServiceID:        envDefault("SERVICE_ID", "encoder-recorder-01"),
@@ -326,9 +327,14 @@ func ConfigFromEnv() Config {
 		Version:          envDefault("SERVICE_VERSION", "dev"),
 		HeartbeatEvery:   envDuration("CONTROL_PANEL_HEARTBEAT_INTERVAL_SEC", 30*time.Second),
 	}
+	applyNodeConfigFromEnv(&cfg, ServiceType)
+	return cfg
 }
 
 func (c Config) Validate() error {
+	if strings.TrimSpace(c.ConfigError) != "" {
+		return errors.New(c.ConfigError)
+	}
 	if strings.TrimSpace(c.ControlPanelURL) == "" {
 		return errors.New("CONTROL_PANEL_URL is required")
 	}
