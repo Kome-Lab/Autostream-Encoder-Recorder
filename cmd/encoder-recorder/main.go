@@ -19,6 +19,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "configure" {
+		if err := control.RunConfigureCommand(os.Args[2:], control.ServiceType, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "configure failed: %v\n", err)
+			os.Exit(2)
+		}
+		return
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
