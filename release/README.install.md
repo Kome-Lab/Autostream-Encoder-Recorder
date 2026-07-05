@@ -15,8 +15,8 @@ This archive contains the Linux binary, systemd example, and placeholder environ
 ```bash
 sudo apt-get update
 sudo apt-get install -y ffmpeg
-sudo install -o root -g root -m 0755 bin/encoder-recorder /usr/local/bin/encoder-recorder
-sudo ln -sf /usr/local/bin/encoder-recorder /usr/local/bin/autostream-encoder-recorder
+sudo install -o root -g root -m 0755 bin/autostream-encoder-recorder /usr/local/bin/autostream-encoder-recorder
+sudo ln -sf /usr/local/bin/autostream-encoder-recorder /usr/local/bin/encoder-recorder
 sudo install -d -o autostream -g autostream /var/lib/autostream/encoder-recorder /var/lib/autostream/archives
 sudo install -o root -g root -m 0644 systemd/autostream-encoder-recorder.service.example /etc/systemd/system/autostream-encoder-recorder.service
 sudo install -o root -g root -m 0640 .env.example /etc/autostream/encoder-recorder.env
