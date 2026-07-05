@@ -155,6 +155,9 @@ func NewManagerFromEnv() *Manager {
 	var artifactReporter ArtifactReporter
 	if controlConfig.ControlPanelURL != "" && controlConfig.Token != "" {
 		artifactReporter = control.Client{Config: controlConfig}
+		if reporter == nil {
+			reporter = control.Client{Config: controlConfig}
+		}
 	}
 	return &Manager{
 		ArchiveRoot:              archiveRoot,

@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/example/autostream-encoder-recorder/internal/observability"
 )
 
 const ServiceType = "encoder_recorder"
@@ -427,6 +429,16 @@ func (c Client) ReportArtifacts(ctx context.Context, streamID string, artifacts 
 	defer cancel()
 	body := ArtifactReport{ServiceID: c.Config.ServiceID, StreamID: streamID, Artifacts: artifacts}
 	return c.post(reportCtx, "/services/stream-artifacts", body)
+}
+
+func (c Client) Report(ctx context.Context, signal observability.Signal) error {
+	if strings.TrimSpace(signal.Type) == "" || strings.TrimSpace(signal.Name) == "" {
+		return errors.New("signal type and name are required")
+	}
+	if signal.Timestamp.IsZero() {
+		signal.Timestamp = time.Now().UTC()
+	}
+	return c.post(ctx, "/services/observability/signals", signal)
 }
 
 func (c Client) RuntimeConfig(ctx context.Context) (RuntimeConfig, error) {

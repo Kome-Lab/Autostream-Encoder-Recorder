@@ -277,7 +277,7 @@ func buildPreflight(verifier TokenVerifier) preflightResponse {
 			"archive_root_configured":     strings.TrimSpace(envDefault("AUTOSTREAM_ARCHIVE_DIR", "/var/lib/autostream/archives")) != "",
 			"google_drive_auth_mode":      safeConfigValue(os.Getenv("GOOGLE_DRIVE_AUTH_MODE")),
 			"google_drive_upload_dry_run": os.Getenv("GOOGLE_DRIVE_AUTH_MODE") == "",
-			"observability_configured":    strings.TrimSpace(os.Getenv("OBSERVABILITY_URL")) != "" && strings.TrimSpace(os.Getenv("OBSERVABILITY_TOKEN")) != "",
+			"observability_configured":    observabilityDirectConfigured() || observabilityControlPanelProxyConfigured(),
 		},
 	}
 }
@@ -394,6 +394,12 @@ func googleDrivePreflight() preflightCheck {
 }
 
 func observabilityPreflight() preflightCheck {
+	if observabilityDirectConfigured() {
+		return preflightCheck{ID: "observability", Status: "ok", Severity: "warning", Message: "Direct Observability reporting is configured."}
+	}
+	if observabilityControlPanelProxyConfigured() {
+		return preflightCheck{ID: "observability", Status: "proxied", Severity: "warning", Message: "Observability reporting uses Control Panel and the Node Runtime Token."}
+	}
 	urlConfigured := strings.TrimSpace(os.Getenv("OBSERVABILITY_URL")) != ""
 	tokenConfigured := strings.TrimSpace(os.Getenv("OBSERVABILITY_TOKEN")) != ""
 	if !urlConfigured && !tokenConfigured {
@@ -402,7 +408,16 @@ func observabilityPreflight() preflightCheck {
 	if !urlConfigured || !tokenConfigured {
 		return preflightCheck{ID: "observability", Status: "partial", Severity: "warning", Message: "OBSERVABILITY_URL and OBSERVABILITY_TOKEN must both be configured."}
 	}
-	return preflightCheck{ID: "observability", Status: "ok", Severity: "warning", Message: "Observability reporting is configured."}
+	return preflightCheck{ID: "observability", Status: "disabled", Severity: "warning", Message: "Observability is not configured; local service can run but incidents and metrics will not be reported."}
+}
+
+func observabilityDirectConfigured() bool {
+	return strings.TrimSpace(os.Getenv("OBSERVABILITY_URL")) != "" && strings.TrimSpace(os.Getenv("OBSERVABILITY_TOKEN")) != ""
+}
+
+func observabilityControlPanelProxyConfigured() bool {
+	cfg := control.ConfigFromEnv()
+	return strings.TrimSpace(cfg.ControlPanelURL) != "" && strings.TrimSpace(cfg.Token) != "" && strings.TrimSpace(cfg.ConfigError) == ""
 }
 
 func safeConfigValue(value string) string {

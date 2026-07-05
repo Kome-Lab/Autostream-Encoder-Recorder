@@ -9,8 +9,6 @@ services:
       AUTOSTREAM_STREAM_INGEST_SIGNING_KEY: dev-only-stream-ingest-signing-key-change-me
       AUTOSTREAM_REQUIRE_SIGNED_INGEST_TOKENS: "true"
       AUTOSTREAM_ALLOW_HOSTNAME_INPUTS: "false"
-      OBSERVABILITY_URL: http://host.docker.internal:8082
-      OBSERVABILITY_TOKEN: dev-only-observability-ingest-token
       AUTOSTREAM_BIND_ADDR: 0.0.0.0:8080
       AUTOSTREAM_DATA_DIR: /var/lib/autostream/encoder-recorder
       AUTOSTREAM_ARCHIVE_DIR: /var/lib/autostream/archives

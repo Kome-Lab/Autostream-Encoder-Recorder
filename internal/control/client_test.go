@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/example/autostream-encoder-recorder/internal/observability"
 )
 
 func TestRegisterPostsServiceRegistration(t *testing.T) {
@@ -83,6 +85,34 @@ func TestReportArtifactsPostsLogicalPathsOnly(t *testing.T) {
 	body, _ := json.Marshal(got)
 	if strings.Contains(string(body), `C:\`) || strings.Contains(string(body), "/var/lib/") {
 		t.Fatalf("local path leaked in artifact report: %s", body)
+	}
+}
+
+func TestReportSignalPostsViaControlPanel(t *testing.T) {
+	var gotAuth string
+	var got observability.Signal
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/services/observability/signals" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	client := Client{Config: Config{ControlPanelURL: server.URL, Token: "node-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: server.URL}}
+	value := 60.0
+	if err := client.Report(t.Context(), observability.Signal{Type: "metric", Name: "encoder.output_fps", StreamID: "stream-01", Value: &value}); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer node-token" {
+		t.Fatalf("unexpected auth header: %q", gotAuth)
+	}
+	if got.Type != "metric" || got.Name != "encoder.output_fps" || got.Value == nil || *got.Value != 60 {
+		t.Fatalf("unexpected signal: %#v", got)
 	}
 }
 
