@@ -1,9 +1,12 @@
 FROM golang:1.26-trixie AS build
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -o /out/autostream-encoder-recorder ./cmd/encoder-recorder
+RUN go build -o /out/autostream-encoder-recorder -ldflags="-s -w -X github.com/example/autostream-encoder-recorder/internal/version.Version=${VERSION} -X github.com/example/autostream-encoder-recorder/internal/version.Commit=${COMMIT} -X github.com/example/autostream-encoder-recorder/internal/version.BuildDate=${BUILD_DATE}" ./cmd/encoder-recorder
 
 FROM debian:trixie-slim
 RUN apt-get update \

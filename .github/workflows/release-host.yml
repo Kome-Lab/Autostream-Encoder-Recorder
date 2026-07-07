@@ -74,7 +74,9 @@ jobs:
             artifact="${ARTIFACT_PREFIX}_${version}_linux_${arch}"
             root="staging/${artifact}"
             mkdir -p "${root}/bin" "${root}/systemd"
-            GOOS=linux GOARCH="${arch}" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${root}/bin/${ARTIFACT_PREFIX}" ./cmd/encoder-recorder
+            build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            ldflags="-s -w -X github.com/example/autostream-encoder-recorder/internal/version.Version=${version} -X github.com/example/autostream-encoder-recorder/internal/version.Commit=${GITHUB_SHA} -X github.com/example/autostream-encoder-recorder/internal/version.BuildDate=${build_date}"
+            GOOS=linux GOARCH="${arch}" CGO_ENABLED=0 go build -trimpath -ldflags="${ldflags}" -o "${root}/bin/${ARTIFACT_PREFIX}" ./cmd/encoder-recorder
             cp "${root}/bin/${ARTIFACT_PREFIX}" "${root}/bin/${SERVICE_NAME}"
             cp .env.example "${root}/.env.example"
             cp systemd/*.service.example "${root}/systemd/"

@@ -16,9 +16,14 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/ffmpeg"
 	"github.com/example/autostream-encoder-recorder/internal/httpapi"
 	"github.com/example/autostream-encoder-recorder/internal/streamproc"
+	"github.com/example/autostream-encoder-recorder/internal/version"
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "version") {
+		fmt.Printf("autostream-encoder-recorder %s\ncommit: %s\nbuild_date: %s\n", version.Current(), version.Commit, version.BuildDate)
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "configure" {
 		if err := control.RunConfigureCommand(os.Args[2:], control.ServiceType, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "configure failed: %v\n", err)
