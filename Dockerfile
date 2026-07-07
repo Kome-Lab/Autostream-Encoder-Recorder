@@ -17,6 +17,6 @@ RUN apt-get update \
     && chown -R 65532:65532 /var/lib/autostream
 COPY --from=build /out/autostream-encoder-recorder /usr/local/bin/autostream-encoder-recorder
 COPY --from=build /out/autostream-encoder-recorder /usr/local/bin/encoder-recorder
-ENV AUTOSTREAM_NODE_CONFIG=/etc/autostream-node/config.yml
+ENV AUTOSTREAM_NODE_CONFIG=/etc/autostream-encoder-recorder/config.yml
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/autostream-encoder-recorder"]
