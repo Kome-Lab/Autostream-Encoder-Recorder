@@ -82,7 +82,13 @@ func TokenVerifierFromEnv() TokenVerifier {
 }
 
 func (v TokenVerifier) Verify(header string) bool {
-	return verifyBearerToken(header, v.PlainToken, v.SHA256Hex)
+	if verifyBearerToken(header, v.PlainToken, v.SHA256Hex) {
+		return true
+	}
+	if v.PlainToken == "" && v.SHA256Hex == "" {
+		return verifyBearerToken(header, control.NodeRuntimeTokenFromEnv(), "")
+	}
+	return false
 }
 
 func (v TokenVerifier) VerifyWorkerEvents(header, streamID string) bool {

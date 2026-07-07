@@ -42,6 +42,11 @@ func main() {
 	processManager := streamproc.NewManagerFromEnv()
 	controlClient := control.Client{Config: control.ConfigFromEnv()}
 	var runtimeConfigProvider httpapi.RuntimeConfigProvider
+	var runtimeSecretResolver httpapi.RuntimeSecretResolver
+	if shouldUseControlPanelRuntimeConfig(controlClient.Config) {
+		runtimeConfigProvider = controlRuntimeConfigFromEnv
+		runtimeSecretResolver = controlRuntimeSecretResolverFromEnv
+	}
 	if controlClient.Config.ControlPanelURL != "" && controlClient.Config.Token != "" {
 		if err := controlClient.Register(ctx); err != nil {
 			if requireControlPanelRuntimeConfig() {
@@ -59,16 +64,21 @@ func main() {
 				log.Fatal("control panel runtime config is required in this environment")
 			}
 		}
-		runtimeConfigProvider = controlClient.RuntimeConfig
 		go controlClient.RunHeartbeatLoopWithMetrics(ctx, processManager.CurrentStreamID, processManager.HeartbeatMetrics, func(err error) {
 			log.Printf("control panel heartbeat failed: %v", err)
 		})
 	} else if requireControlPanelRuntimeConfig() {
-		log.Fatal("CONTROL_PANEL_URL and CONTROL_PANEL_TOKEN are required in this environment")
+		if control.NodeConfigPendingFromEnv() {
+			log.Printf("node config pending: waiting for %s", control.NodeConfigPathFromEnv())
+		} else if strings.TrimSpace(controlClient.Config.ConfigError) != "" {
+			log.Fatalf("node config invalid: %v", controlClient.Config.ConfigError)
+		} else {
+			log.Fatal("CONTROL_PANEL_URL and CONTROL_PANEL_TOKEN are required in this environment")
+		}
 	}
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           httpapi.NewServerWithManagersAndRuntimeConfig("encoder_recorder", processManager, nil, httpapi.TokenVerifierFromEnv(), controlClient.ResolveRuntimeSecret, runtimeConfigProvider),
+		Handler:           httpapi.NewServerWithManagersAndRuntimeConfig("encoder_recorder", processManager, nil, httpapi.TokenVerifierFromEnv(), runtimeSecretResolver, runtimeConfigProvider),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -104,6 +114,20 @@ func main() {
 			}
 		}
 	}
+}
+
+func shouldUseControlPanelRuntimeConfig(cfg control.Config) bool {
+	return requireControlPanelRuntimeConfig() ||
+		control.NodeConfigPendingFromEnv() ||
+		(strings.TrimSpace(cfg.ControlPanelURL) != "" && strings.TrimSpace(cfg.Token) != "")
+}
+
+func controlRuntimeConfigFromEnv(ctx context.Context) (control.RuntimeConfig, error) {
+	return control.Client{Config: control.ConfigFromEnv()}.RuntimeConfig(ctx)
+}
+
+func controlRuntimeSecretResolverFromEnv(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
+	return control.Client{Config: control.ConfigFromEnv()}.ResolveRuntimeSecret(ctx, streamID, archiveProfileID, secretName)
 }
 
 func logRuntimeConfig(ctx context.Context, client control.Client) (control.RuntimeConfig, bool) {

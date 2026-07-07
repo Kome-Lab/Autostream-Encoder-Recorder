@@ -1547,6 +1547,19 @@ func TestTokenVerifierFromEnvAllowsStaticFallbackOnlyWhenExplicitlyDisabled(t *t
 	}
 }
 
+func TestTokenVerifierReadsNodeRuntimeTokenAfterStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	t.Setenv("AUTOSTREAM_NODE_CONFIG", path)
+	verifier := TokenVerifierFromEnv()
+	if verifier.Verify("Bearer runtime-secret") {
+		t.Fatal("runtime token should not verify before config exists")
+	}
+	writeNodeConfigForVerifierTest(t, path, "encoder_recorder")
+	if !verifier.Verify("Bearer runtime-secret") {
+		t.Fatal("runtime token should verify after config is written")
+	}
+}
+
 func getAudioStatus(t *testing.T, handler http.Handler) struct {
 	BridgeActive     bool    `json:"bridge_active"`
 	PacketsTotal     int64   `json:"packets_total"`
@@ -1571,6 +1584,27 @@ func getAudioStatus(t *testing.T, handler http.Handler) struct {
 		t.Fatal(err)
 	}
 	return status
+}
+
+func writeNodeConfigForVerifierTest(t *testing.T, path, nodeType string) {
+	t.Helper()
+	body := `panel:
+  url: "https://panel.example.jp"
+node:
+  id: "encoder-recorder-01"
+  name: "Encoder Recorder 01"
+  type: "` + nodeType + `"
+api:
+  host: "encoder.example.jp"
+  port: 8443
+  ssl_enabled: true
+auth:
+  token_id: "token-id"
+  token: "runtime-secret"
+`
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestUploaderFromEnvSelectsGoogleDriveUploaderWhenConfigured(t *testing.T) {
