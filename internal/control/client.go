@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -285,6 +286,10 @@ func (cfg RuntimeArchiveStreamConfig) ArchiveFileName() string {
 	return runtimeMapString(cfg.ArchiveConfig, "archive_file_name")
 }
 
+func (cfg RuntimeArchiveStreamConfig) RetentionDays() int {
+	return runtimeMapInt(cfg.ArchiveConfig, "retention_days")
+}
+
 func (cfg RuntimeArchiveStreamConfig) ClientID() string {
 	return runtimeMapString(cfg.ArchiveConfig, "client_id")
 }
@@ -327,6 +332,36 @@ func runtimeMapBool(values map[string]any, key string) (bool, bool) {
 	default:
 		return false, false
 	}
+}
+
+func runtimeMapInt(values map[string]any, key string) int {
+	if values == nil {
+		return 0
+	}
+	value, ok := values[key]
+	if !ok {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		if typed > 0 {
+			return typed
+		}
+	case int64:
+		if typed > 0 {
+			return int(typed)
+		}
+	case float64:
+		if typed > 0 {
+			return int(typed)
+		}
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func ConfigFromEnv() Config {

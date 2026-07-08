@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,7 @@ type ArchiveConfig struct {
 	ClientSecretSecretName              string `json:"client_secret_secret_name,omitempty"`
 	RefreshToken                        string `json:"refresh_token,omitempty"`
 	RefreshTokenSecretName              string `json:"refresh_token_secret_name,omitempty"`
+	RetentionDays                       int    `json:"retention_days,omitempty"`
 }
 
 type Metadata struct {
@@ -140,6 +142,8 @@ func ErrorClass(err error) string {
 		return "archive_package_failed"
 	case "upload":
 		return "archive_upload_failed"
+	case "retention":
+		return "archive_retention_failed"
 	default:
 		if err == nil {
 			return "none"
@@ -350,6 +354,9 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 		return Result{}, PackageError{Phase: "upload", Err: err}
 	}
 	metadata.Upload = upload
+	if err := cleanupExpiredLocalArchives(m.ArchiveRoot, job.StreamID, job.ArchiveConfig.RetentionDays, time.Now().UTC()); err != nil {
+		return Result{}, PackageError{Phase: "retention", Err: err}
+	}
 	return Result{Layout: layout, Metadata: metadata, RemuxDurationMS: remuxDurationMS}, nil
 }
 
@@ -420,6 +427,9 @@ func archiveConfigMetadata(cfg ArchiveConfig) map[string]any {
 	}
 	if cfg.ArchiveFileName != "" {
 		out["archive_file_name"] = archiveUploadFileName(cfg, "final.mp4")
+	}
+	if cfg.RetentionDays > 0 {
+		out["retention_days"] = cfg.RetentionDays
 	}
 	if cfg.FolderID != "" || cfg.FolderIDSecretName != "" {
 		out["folder_id_configured"] = true
@@ -533,6 +543,102 @@ func collectArchiveFiles(layout archive.Layout, cfg ArchiveConfig) ([]archive.Fi
 		files = append(files, archive.File{LocalPath: candidate.local, DrivePath: candidate.drive, SizeBytes: info.Size()})
 	}
 	return files, nil
+}
+
+func cleanupExpiredLocalArchives(rootDir, currentStreamID string, retentionDays int, now time.Time) error {
+	if retentionDays <= 0 {
+		return nil
+	}
+	rootAbs, err := filepath.Abs(rootDir)
+	if err != nil {
+		return err
+	}
+	finalRoot := filepath.Join(rootAbs, "final")
+	info, err := os.Lstat(finalRoot)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("archive final directory must not be a symlink")
+	}
+	if !info.IsDir() {
+		return errors.New("archive final path must be a directory")
+	}
+	if err := archive.EnsureDirNoSymlinks(rootAbs, finalRoot); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(finalRoot)
+	if err != nil {
+		return err
+	}
+	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	for _, entry := range entries {
+		streamID := entry.Name()
+		if streamID == currentStreamID {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return errors.New("archive stream directory must not be a symlink")
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		layout, err := archive.NewLayout(rootAbs, streamID)
+		if err != nil {
+			continue
+		}
+		finalDir := layout.FinalDir()
+		if err := archive.EnsureDirNoSymlinks(rootAbs, finalDir); err != nil {
+			return err
+		}
+		modifiedAt, err := archiveFinalDirLastModified(finalDir)
+		if err != nil {
+			return err
+		}
+		if modifiedAt.Before(cutoff) {
+			if err := os.RemoveAll(finalDir); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func archiveFinalDirLastModified(dir string) (time.Time, error) {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return time.Time{}, errors.New("archive stream directory must not be a symlink")
+	}
+	if !info.IsDir() {
+		return time.Time{}, errors.New("archive stream path must be a directory")
+	}
+	latest := info.ModTime()
+	err = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == dir {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("archive artifact path must not be a symlink")
+		}
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+		return nil
+	})
+	return latest, err
 }
 
 func archiveUploadFileName(cfg ArchiveConfig, fallback string) string {

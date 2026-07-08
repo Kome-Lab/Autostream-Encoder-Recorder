@@ -1,6 +1,6 @@
 # autostream-encoder-recorder
 
-AutoStream の Encoder/Recorder service です。Control Panel から stream job を受け取り、Discord Bot から届く音声、Worker から届く overlay/caption/participant event、外部 media input を FFmpeg で最終出力へ合成します。配信中は `final.mkv` を安全に録画し、停止後に `final.mp4` へ remux して Google Drive API へ upload します。
+AutoStream の Encoder/Recorder service です。Control Panel から stream job を受け取り、Discord Bot から届く音声、Worker から届く字幕、チャット、participant event、配信枠に紐づくウォーターマーク画像、外部 media input を FFmpeg で最終出力へ合成します。配信中は `final.mkv` を安全に録画し、停止後に `final.mp4` へ remux して Google Drive API へ upload します。
 
 ## 責務
 
@@ -11,6 +11,7 @@ AutoStream の Encoder/Recorder service です。Control Panel から stream job
 - FFmpeg による live output と MKV 録画
 - `final.mkv -> final.mp4` packaging
 - Google Drive OAuth destination への upload
+- Control Panel からの local archive artifact download / rename / delete
 - Observability への metric / event / failure signal 送信
 
 ## Control Panel 管理
@@ -46,6 +47,7 @@ Control Panel runtime config が必須の環境で `rtmp_url` / `stream_key` / a
 `archive_config.auth_mode` が stream job に含まれる場合も、Google Drive / OAuth の不足値を env から補完しません。
 
 Control Panel runtime config includes `stream_archive_configs` for Drive destination and archive profile binding. Encoder/Recorder applies the ready primary entry for `/streams/start`, `/streams/dry-run`, and `/streams/package`; it copies only non-secret fields and secret reference names such as `folder_id_secret_name`, `client_secret_secret_name`, and `refresh_token_secret_name`. Raw Drive folder IDs, OAuth client secrets, and refresh tokens must be resolved through `/services/runtime-secrets/resolve` and must not be sent in request bodies, env fallback, logs, metadata, or API responses. Service Account authentication is not supported.
+The non-secret `retention_days` archive config controls local final archive cleanup. After package completes, Encoder/Recorder removes expired `AUTOSTREAM_ARCHIVE_DIR/final/<stream_id>/` directories for other safe stream IDs and never follows symlinks or deletes outside the archive root.
 
 ## Production Output Relay
 
@@ -69,6 +71,8 @@ YOUTUBE_STREAM_KEY=<YOUTUBE_STREAM_KEY>
 ```
 
 Google Drive archive upload には env fallback を使いません。Control Panel の配信枠設定で OAuth account、folder ID、shared drive ID、archive file name を指定します。共有ドライブの folder ID を使う場合は stream archive settings で shared drive を有効化します。Uploader は Drive API に `supportsAllDrives=true` を付けて folder / file 操作を行います。
+
+Encoder/Recorder は Control Panel へ報告した final artifact を `AUTOSTREAM_ARCHIVE_DIR/final/<stream_id>/` 配下に一定期間保持します。Control Panel は割り当て済みの primary encoder に service token 付きで接続し、録画ファイルの download、rename、delete を行います。対象ファイル名は安全な basename と `.mp4`、`.mkv`、`.json`、`.jsonl`、`.vtt` に限定し、symlink と archive root 外への移動は拒否します。
 
 ## Input Policy
 
@@ -96,6 +100,6 @@ Detailed deployment, archive, and security documentation is maintained in the `a
 - stream key、OAuth refresh token、Drive credential、webhook URL は raw でログに出しません。
 - Google Drive config を表示する場合も configured status と fingerprint だけを使います。
 - FFmpeg は shell string ではなく argument array で起動します。
-- archive path は `AUTOSTREAM_ARCHIVE_DIR` 配下に制限します。
+- archive path は `AUTOSTREAM_ARCHIVE_DIR` 配下に制限し、Control Panel からの録画ファイル操作も `final/<stream_id>/<file>` だけを対象にします。
 - service token は Control Panel 側で hash 保存し、再表示しません。
 - runtime config は service assignment と service type を検証してから取得します。

@@ -359,6 +359,58 @@ func TestPackageUsesArchiveConfigFileNameForDriveUpload(t *testing.T) {
 	}
 }
 
+func TestCleanupExpiredLocalArchivesKeepsCurrentAndRecent(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	oldDir := writeFinalArchiveForTest(t, root, "stream-old", now.Add(-45*24*time.Hour))
+	recentDir := writeFinalArchiveForTest(t, root, "stream-recent", now.Add(-10*24*time.Hour))
+	currentDir := writeFinalArchiveForTest(t, root, "stream-current", now.Add(-90*24*time.Hour))
+
+	if err := cleanupExpiredLocalArchives(root, "stream-current", 30, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		t.Fatalf("expected expired archive to be removed, err=%v", err)
+	}
+	if _, err := os.Stat(recentDir); err != nil {
+		t.Fatalf("expected recent archive to remain: %v", err)
+	}
+	if _, err := os.Stat(currentDir); err != nil {
+		t.Fatalf("expected current archive to remain: %v", err)
+	}
+}
+
+func TestPackageAppliesLocalArchiveRetention(t *testing.T) {
+	root := t.TempDir()
+	oldDir := writeFinalArchiveForTest(t, root, "stream-old", time.Now().Add(-72*time.Hour))
+	layout, err := archive.NewLayout(root, "stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.TmpDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.FinalDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.FinalMKV(), []byte("mkv"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.TmpLogs(), []byte("{}\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.DryRunUploader{}}
+	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", ArchiveConfig: ArchiveConfig{RetentionDays: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		t.Fatalf("expected package retention cleanup to remove expired archive, err=%v", err)
+	}
+	if _, err := os.Stat(layout.FinalDir()); err != nil {
+		t.Fatalf("expected current package archive to remain: %v", err)
+	}
+}
+
 func TestArchiveConfigOAuth2BuildsGoogleDriveUploader(t *testing.T) {
 	manager := Manager{}
 	uploader := manager.uploaderForJob(PackageJob{
@@ -889,6 +941,35 @@ func TestPackageRejectsTmpLogSymlink(t *testing.T) {
 	} else if ErrorPhase(err) != "package" {
 		t.Fatalf("expected package failure phase, got %q: %v", ErrorPhase(err), err)
 	}
+}
+
+func writeFinalArchiveForTest(t *testing.T, root, streamID string, modifiedAt time.Time) string {
+	t.Helper()
+	layout, err := archive.NewLayout(root, streamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.FinalDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		path string
+		body []byte
+	}{
+		{layout.FinalMP4(), []byte("mp4")},
+		{layout.FinalMetadata(), []byte("{}\n")},
+	} {
+		if err := os.WriteFile(item.path, item.body, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(item.path, modifiedAt, modifiedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(layout.FinalDir(), modifiedAt, modifiedAt); err != nil {
+		t.Fatal(err)
+	}
+	return layout.FinalDir()
 }
 
 type blockingUploader struct {

@@ -42,6 +42,70 @@ func TestDryRunEndpointRequiresAuthorization(t *testing.T) {
 	}
 }
 
+func TestArchiveArtifactEndpointsRequireTokenAndSafeFinalFile(t *testing.T) {
+	root := t.TempDir()
+	layout, err := archive.NewLayout(root, "stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.EnsureDirNoSymlinks(layout.RootDir, layout.FinalDir()); err != nil {
+		t.Fatal(err)
+	}
+	finalPath := filepath.Join(layout.FinalDir(), "final.mp4")
+	if err := os.WriteFile(finalPath, []byte("archive-bytes"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
+
+	unauthorizedReq := httptest.NewRequest(http.MethodGet, "/streams/stream-01/artifacts/final.mp4", nil)
+	unauthorizedRes := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedRes, unauthorizedReq)
+	if unauthorizedRes.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d body = %s", unauthorizedRes.Code, unauthorizedRes.Body.String())
+	}
+
+	downloadReq := httptest.NewRequest(http.MethodGet, "/streams/stream-01/artifacts/final.mp4", nil)
+	downloadReq.Header.Set("Authorization", "Bearer service-token")
+	downloadRes := httptest.NewRecorder()
+	handler.ServeHTTP(downloadRes, downloadReq)
+	if downloadRes.Code != http.StatusOK || downloadRes.Body.String() != "archive-bytes" {
+		t.Fatalf("download status = %d body = %s", downloadRes.Code, downloadRes.Body.String())
+	}
+	if downloadRes.Header().Get("Content-Disposition") != `attachment; filename="final.mp4"` {
+		t.Fatalf("download content disposition = %q", downloadRes.Header().Get("Content-Disposition"))
+	}
+
+	unsafeReq := httptest.NewRequest(http.MethodGet, "/streams/stream-01/artifacts/bad..mp4", nil)
+	unsafeReq.Header.Set("Authorization", "Bearer service-token")
+	unsafeRes := httptest.NewRecorder()
+	handler.ServeHTTP(unsafeRes, unsafeReq)
+	if unsafeRes.Code != http.StatusBadRequest || !strings.Contains(unsafeRes.Body.String(), "invalid_archive_artifact") {
+		t.Fatalf("unsafe status = %d body = %s", unsafeRes.Code, unsafeRes.Body.String())
+	}
+
+	renameReq := httptest.NewRequest(http.MethodPut, "/streams/stream-01/artifacts/final.mp4", strings.NewReader(`{"name":"renamed.mp4"}`))
+	renameReq.Header.Set("Authorization", "Bearer service-token")
+	renameRes := httptest.NewRecorder()
+	handler.ServeHTTP(renameRes, renameReq)
+	if renameRes.Code != http.StatusOK || !strings.Contains(renameRes.Body.String(), "renamed.mp4") {
+		t.Fatalf("rename status = %d body = %s", renameRes.Code, renameRes.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(layout.FinalDir(), "renamed.mp4")); err != nil {
+		t.Fatalf("renamed artifact missing: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/streams/stream-01/artifacts/renamed.mp4", nil)
+	deleteReq.Header.Set("Authorization", "Bearer service-token")
+	deleteRes := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRes, deleteReq)
+	if deleteRes.Code != http.StatusOK {
+		t.Fatalf("delete status = %d body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(layout.FinalDir(), "renamed.mp4")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("renamed artifact should be deleted, stat err=%v", err)
+	}
+}
+
 func TestResolveArchiveRuntimeSecrets(t *testing.T) {
 	job := lifecycle.StreamJob{
 		StreamID: "stream-01",
@@ -757,6 +821,7 @@ func TestPackageEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 						"folder_id_secret_name":     "drive_destination:dest-01:folder_id",
 						"base_path":                 "AutoStream/Archives",
 						"shared_drive":              true,
+						"retention_days":            float64(45),
 						"client_id":                 "google-client-id",
 						"client_secret_secret_name": "oauth_provider:provider-01:client_secret",
 						"refresh_token_secret_name": "oauth_account:account-01:refresh_token",
@@ -783,7 +848,7 @@ func TestPackageEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 			t.Fatalf("expected package runtime archive secret %q to be resolved, got %#v", secretName, resolvedSecrets)
 		}
 	}
-	for _, expected := range []string{`"auth_mode":"oauth2"`, `"shared_drive":true`, `"folder_id_configured":true`, `"client_secret_configured":true`, `"refresh_token_configured":true`} {
+	for _, expected := range []string{`"auth_mode":"oauth2"`, `"shared_drive":true`, `"retention_days":45`, `"folder_id_configured":true`, `"client_secret_configured":true`, `"refresh_token_configured":true`} {
 		if !strings.Contains(res.Body.String(), expected) {
 			t.Fatalf("expected safe archive config summary %q in response: %s", expected, res.Body.String())
 		}
