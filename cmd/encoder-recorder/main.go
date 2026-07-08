@@ -67,10 +67,10 @@ func main() {
 		go controlClient.RunHeartbeatLoopWithMetrics(ctx, processManager.CurrentStreamID, processManager.HeartbeatMetrics, func(err error) {
 			log.Printf("control panel heartbeat failed: %v", err)
 		})
+	} else if control.NodeConfigPendingFromEnv() {
+		go runPendingControlPanelRegistrationLoop(ctx, processManager, requireControlPanelRuntimeConfig())
 	} else if requireControlPanelRuntimeConfig() {
-		if control.NodeConfigPendingFromEnv() {
-			log.Printf("node config pending: waiting for %s", control.NodeConfigPathFromEnv())
-		} else if strings.TrimSpace(controlClient.Config.ConfigError) != "" {
+		if strings.TrimSpace(controlClient.Config.ConfigError) != "" {
 			log.Fatalf("node config invalid: %v", controlClient.Config.ConfigError)
 		} else {
 			log.Fatal("CONTROL_PANEL_URL and CONTROL_PANEL_TOKEN are required in this environment")
@@ -124,6 +124,83 @@ func shouldUseControlPanelRuntimeConfig(cfg control.Config) bool {
 
 func controlRuntimeConfigFromEnv(ctx context.Context) (control.RuntimeConfig, error) {
 	return control.Client{Config: control.ConfigFromEnv()}.RuntimeConfig(ctx)
+}
+
+func runPendingControlPanelRegistrationLoop(ctx context.Context, processManager *streamproc.Manager, requireRuntimeConfig bool) {
+	lastState := ""
+	registeredServiceID := ""
+	for {
+		cfg := control.ConfigFromEnv()
+		client := control.Client{Config: cfg}
+		wait := controlPanelRegistrationInterval(cfg)
+		state := ""
+		switch {
+		case strings.TrimSpace(cfg.ConfigError) != "":
+			state = "invalid:" + cfg.ConfigError
+			if requireRuntimeConfig {
+				log.Fatalf("node config invalid: %v", cfg.ConfigError)
+			}
+			logRegistrationStateChange(&lastState, state, "node config invalid: %v", cfg.ConfigError)
+			registeredServiceID = ""
+		case strings.TrimSpace(cfg.ControlPanelURL) == "" || strings.TrimSpace(cfg.Token) == "":
+			state = "pending:" + control.NodeConfigPathFromEnv()
+			logRegistrationStateChange(&lastState, state, "node config pending: waiting for %s", control.NodeConfigPathFromEnv())
+			registeredServiceID = ""
+		default:
+			if registeredServiceID != cfg.ServiceID {
+				if err := client.Register(ctx); err != nil {
+					state = "register-failed:" + err.Error()
+					if requireRuntimeConfig {
+						log.Fatalf("control panel registration is required in this environment: %v", err)
+					}
+					logRegistrationStateChange(&lastState, state, "control panel registration failed: %v", err)
+					registeredServiceID = ""
+					break
+				}
+				registeredServiceID = cfg.ServiceID
+				state = "registered:" + cfg.ServiceID
+				logRegistrationStateChange(&lastState, state, "registered with control panel as %s", cfg.ServiceID)
+				if runtimeCfg, ok := logRuntimeConfig(ctx, client); ok {
+					if profile, applied := encoderProfileFromRuntimeConfig(runtimeCfg); applied {
+						processManager.Profile = profile
+						log.Printf("applied control panel encoder profile for %s: %dx%d %dfps", cfg.ServiceID, profile.Width, profile.Height, profile.FPS)
+					}
+				} else if requireRuntimeConfig {
+					log.Fatal("control panel runtime config is required in this environment")
+				}
+			}
+			if registeredServiceID == cfg.ServiceID {
+				if err := client.HeartbeatWithMetrics(ctx, "online", processManager.CurrentStreamID(), processManager.HeartbeatMetrics()); err != nil {
+					state = "heartbeat-failed:" + err.Error()
+					logRegistrationStateChange(&lastState, state, "control panel heartbeat failed: %v", err)
+				} else {
+					lastState = "online:" + cfg.ServiceID
+				}
+			}
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func controlPanelRegistrationInterval(cfg control.Config) time.Duration {
+	if strings.TrimSpace(cfg.ControlPanelURL) != "" && strings.TrimSpace(cfg.Token) != "" && cfg.HeartbeatEvery > 0 {
+		return cfg.HeartbeatEvery
+	}
+	return 10 * time.Second
+}
+
+func logRegistrationStateChange(lastState *string, state, format string, args ...any) {
+	if state == *lastState {
+		return
+	}
+	log.Printf(format, args...)
+	*lastState = state
 }
 
 func controlRuntimeSecretResolverFromEnv(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {

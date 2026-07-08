@@ -1029,10 +1029,7 @@ func envBool(key string, fallback bool) bool {
 }
 
 func uploaderFromEnv(dryRun bool) archive.ArchiveUploader {
-	if dryRun || os.Getenv("GOOGLE_DRIVE_AUTH_MODE") == "" {
-		return archive.DryRunUploader{}
-	}
-	return archive.GoogleDriveAPIUploader{Config: archive.GoogleDriveConfigFromEnv()}
+	return archive.DryRunUploader{}
 }
 
 func jst() *time.Location {

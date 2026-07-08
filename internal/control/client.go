@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -66,6 +67,9 @@ type Registration struct {
 	PublicURL    string         `json:"public_url"`
 	Version      string         `json:"version"`
 	Capabilities map[string]any `json:"capabilities"`
+	Hostname     string         `json:"hostname,omitempty"`
+	OS           string         `json:"os,omitempty"`
+	Arch         string         `json:"arch,omitempty"`
 }
 
 type Heartbeat struct {
@@ -73,6 +77,10 @@ type Heartbeat struct {
 	Status          string             `json:"status"`
 	CurrentStreamID string             `json:"current_stream_id,omitempty"`
 	Version         string             `json:"version,omitempty"`
+	Capabilities    map[string]any     `json:"capabilities,omitempty"`
+	Hostname        string             `json:"hostname,omitempty"`
+	OS              string             `json:"os,omitempty"`
+	Arch            string             `json:"arch,omitempty"`
 	Metrics         map[string]float64 `json:"metrics,omitempty"`
 }
 
@@ -261,20 +269,20 @@ func (cfg RuntimeArchiveStreamConfig) FolderIDSecretName() string {
 	return runtimeMapString(cfg.ArchiveConfig, "folder_id_secret_name")
 }
 
-func (cfg RuntimeArchiveStreamConfig) ServiceAccountSecretName() string {
-	return runtimeMapString(cfg.ArchiveConfig, "service_account_json_secret_name")
-}
-
-func (cfg RuntimeArchiveStreamConfig) ServiceAccountCredentialsSecretName() string {
-	return runtimeMapString(cfg.ArchiveConfig, "service_account_credentials_secret_name")
-}
-
 func (cfg RuntimeArchiveStreamConfig) BasePath() string {
 	return runtimeMapString(cfg.ArchiveConfig, "base_path")
 }
 
 func (cfg RuntimeArchiveStreamConfig) SharedDrive() (bool, bool) {
 	return runtimeMapBool(cfg.ArchiveConfig, "shared_drive")
+}
+
+func (cfg RuntimeArchiveStreamConfig) SharedDriveID() string {
+	return runtimeMapString(cfg.ArchiveConfig, "shared_drive_id")
+}
+
+func (cfg RuntimeArchiveStreamConfig) ArchiveFileName() string {
+	return runtimeMapString(cfg.ArchiveConfig, "archive_file_name")
 }
 
 func (cfg RuntimeArchiveStreamConfig) ClientID() string {
@@ -385,25 +393,40 @@ func isLocalDevHost(host string) bool {
 	return normalized == "localhost" || normalized == "127.0.0.1" || normalized == "host.docker.internal"
 }
 
+func serviceCapabilities() map[string]any {
+	return map[string]any{
+		"ffmpeg":             true,
+		"record_final_mkv":   true,
+		"remux_final_mp4":    true,
+		"google_drive_api":   true,
+		"archive_retry":      true,
+		"audio_ingest_opus":  true,
+		"health_endpoint":    true,
+		"package_endpoint":   true,
+		"default_resolution": "1920x1080",
+		"default_fps":        60,
+	}
+}
+
+func reportHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(hostname)
+}
+
 func (c Client) Register(ctx context.Context) error {
 	body := Registration{
-		ServiceID:   c.Config.ServiceID,
-		ServiceType: ServiceType,
-		ServiceName: c.Config.ServiceName,
-		PublicURL:   c.Config.ServicePublicURL,
-		Version:     c.Config.Version,
-		Capabilities: map[string]any{
-			"ffmpeg":             true,
-			"record_final_mkv":   true,
-			"remux_final_mp4":    true,
-			"google_drive_api":   true,
-			"archive_retry":      true,
-			"audio_ingest_opus":  true,
-			"health_endpoint":    true,
-			"package_endpoint":   true,
-			"default_resolution": "1920x1080",
-			"default_fps":        60,
-		},
+		ServiceID:    c.Config.ServiceID,
+		ServiceType:  ServiceType,
+		ServiceName:  c.Config.ServiceName,
+		PublicURL:    c.Config.ServicePublicURL,
+		Version:      c.Config.Version,
+		Capabilities: serviceCapabilities(),
+		Hostname:     reportHostname(),
+		OS:           runtime.GOOS,
+		Arch:         runtime.GOARCH,
 	}
 	return c.post(ctx, "/services/register", body)
 }
@@ -416,7 +439,17 @@ func (c Client) HeartbeatWithMetrics(ctx context.Context, status, currentStreamI
 	if status == "" {
 		status = "online"
 	}
-	body := Heartbeat{ServiceID: c.Config.ServiceID, Status: status, CurrentStreamID: currentStreamID, Version: c.Config.Version, Metrics: metrics}
+	body := Heartbeat{
+		ServiceID:       c.Config.ServiceID,
+		Status:          status,
+		CurrentStreamID: currentStreamID,
+		Version:         c.Config.Version,
+		Capabilities:    serviceCapabilities(),
+		Hostname:        reportHostname(),
+		OS:              runtime.GOOS,
+		Arch:            runtime.GOARCH,
+		Metrics:         metrics,
+	}
 	return c.post(ctx, "/services/heartbeat", body)
 }
 

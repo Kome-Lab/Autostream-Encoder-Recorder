@@ -18,23 +18,23 @@ import (
 )
 
 func TestGoogleDriveConfigValidate(t *testing.T) {
-	cfg := GoogleDriveConfig{AuthMode: "service_account", ApplicationCredential: "/etc/autostream/google.json", FolderID: "folder", BasePath: "AutoStream"}
+	cfg := GoogleDriveConfig{AuthMode: "oauth2", ClientID: "client-id", ClientSecret: "client-secret", RefreshToken: "refresh-token", FolderID: "folder", BasePath: "AutoStream"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestGoogleDriveConfigValidateAllowsServiceAccountJSON(t *testing.T) {
+func TestGoogleDriveConfigValidateRejectsServiceAccountJSON(t *testing.T) {
 	cfg := GoogleDriveConfig{AuthMode: "service_account", ServiceAccountJSON: `{"type":"service_account","client_email":"svc@example.com","private_key":"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"}`, FolderID: "folder", BasePath: "AutoStream"}
-	if err := cfg.Validate(); err != nil {
-		t.Fatal(err)
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected service account JSON to be rejected")
 	}
 }
 
-func TestGoogleDriveConfigRejectsMissingCredential(t *testing.T) {
+func TestGoogleDriveConfigRejectsServiceAccountMode(t *testing.T) {
 	cfg := GoogleDriveConfig{AuthMode: "service_account", FolderID: "folder", BasePath: "AutoStream"}
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected missing credential to fail")
+		t.Fatal("expected service account mode to fail")
 	}
 }
 
@@ -60,13 +60,10 @@ func TestGoogleDriveConfigRejectsIncompleteOAuth2(t *testing.T) {
 }
 
 func TestGoogleDriveConfigFromEnvSharedDrive(t *testing.T) {
-	t.Setenv("GOOGLE_DRIVE_AUTH_MODE", "service_account")
-	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/etc/autostream/google.json")
-	t.Setenv("GOOGLE_DRIVE_FOLDER_ID", "folder")
 	t.Setenv("GDRIVE_BASE_PATH", "AutoStream")
 	t.Setenv("GOOGLE_DRIVE_SHARED_DRIVE", "true")
 	cfg := GoogleDriveConfigFromEnv()
-	if !cfg.SharedDrive {
+	if cfg.AuthMode != "" || cfg.ApplicationCredential != "" || cfg.FolderID != "" || !cfg.SharedDrive {
 		t.Fatalf("expected shared drive flag to be enabled: %#v", cfg)
 	}
 }
@@ -165,7 +162,7 @@ func TestEnsureDriveFolderUsesSharedDriveQueryOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := ensureDriveFolder(context.Background(), svc, "shared-parent", "Archive", true)
+	id, err := ensureDriveFolder(context.Background(), svc, "shared-parent", "Archive", true, "")
 	if err != nil {
 		t.Fatal(err)
 	}

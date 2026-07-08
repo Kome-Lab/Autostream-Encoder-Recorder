@@ -315,19 +315,64 @@ func TestPackageUsesArchiveConfigUploaderFactory(t *testing.T) {
 	}
 }
 
+func TestPackageUsesArchiveConfigFileNameForDriveUpload(t *testing.T) {
+	root := t.TempDir()
+	layout, err := archive.NewLayout(root, "stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.TmpDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.FinalDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.FinalMKV(), []byte("mkv"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.FinalMP4(), []byte("mp4"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.TmpLogs(), []byte("{}\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	uploader := &archiveFileNameCheckingUploader{t: t, want: "Council Meeting.mp4"}
+	manager := Manager{
+		ArchiveRoot: root,
+		FFmpegBin:   "ffmpeg",
+		Runner:      &ffmpeg.DryRunRunner{},
+		UploaderForJob: func(PackageJob) archive.ArchiveUploader {
+			return uploader
+		},
+	}
+	if _, err := manager.Package(context.Background(), PackageJob{
+		StreamID: "stream-01",
+		Name:     "Morning Stream",
+		ArchiveConfig: ArchiveConfig{
+			ArchiveFileName: "Council Meeting",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !uploader.observed {
+		t.Fatal("expected configured archive file name to be uploaded")
+	}
+}
+
 func TestArchiveConfigOAuth2BuildsGoogleDriveUploader(t *testing.T) {
 	manager := Manager{}
 	uploader := manager.uploaderForJob(PackageJob{
 		StreamID: "stream-01",
 		Name:     "Morning Stream",
 		ArchiveConfig: ArchiveConfig{
-			AuthMode:     "oauth2",
-			FolderID:     "drive-folder-id",
-			BasePath:     "AutoStream",
-			SharedDrive:  true,
-			ClientID:     "google-client-id",
-			ClientSecret: "google-client-secret",
-			RefreshToken: "google-refresh-token",
+			AuthMode:      "oauth2",
+			FolderID:      "drive-folder-id",
+			BasePath:      "AutoStream",
+			SharedDrive:   true,
+			SharedDriveID: "shared-drive-01",
+			ClientID:      "google-client-id",
+			ClientSecret:  "google-client-secret",
+			RefreshToken:  "google-refresh-token",
 		},
 	})
 	retry, ok := uploader.(archive.RetryUploader)
@@ -338,12 +383,12 @@ func TestArchiveConfigOAuth2BuildsGoogleDriveUploader(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected Google Drive uploader, got %#v", retry.Inner)
 	}
-	if driveUploader.Config.AuthMode != "oauth2" || driveUploader.Config.ClientSecret != "google-client-secret" || driveUploader.Config.RefreshToken != "google-refresh-token" || !driveUploader.Config.SharedDrive {
+	if driveUploader.Config.AuthMode != "oauth2" || driveUploader.Config.ClientSecret != "google-client-secret" || driveUploader.Config.RefreshToken != "google-refresh-token" || !driveUploader.Config.SharedDrive || driveUploader.Config.SharedDriveID != "shared-drive-01" {
 		t.Fatalf("unexpected OAuth Drive config: %#v", driveUploader.Config)
 	}
 }
 
-func TestArchiveConfigServiceAccountJSONBuildsGoogleDriveUploader(t *testing.T) {
+func TestArchiveConfigServiceAccountJSONIsRejectedByGoogleDriveConfig(t *testing.T) {
 	manager := Manager{}
 	uploader := manager.uploaderForJob(PackageJob{
 		StreamID: "stream-01",
@@ -357,11 +402,11 @@ func TestArchiveConfigServiceAccountJSONBuildsGoogleDriveUploader(t *testing.T) 
 		},
 	})
 	driveUploader := googleDriveUploaderFromRetry(t, uploader)
-	if driveUploader.Config.AuthMode != "service_account" || driveUploader.Config.ServiceAccountJSON == "" || driveUploader.Config.ApplicationCredential != "" || !driveUploader.Config.SharedDrive {
-		t.Fatalf("unexpected Service Account Drive config: %#v", driveUploader.Config)
+	if driveUploader.Config.AuthMode != "service_account" || driveUploader.Config.ServiceAccountJSON != "" || driveUploader.Config.ApplicationCredential != "" || !driveUploader.Config.SharedDrive {
+		t.Fatalf("unexpected unsupported Service Account Drive config: %#v", driveUploader.Config)
 	}
-	if err := driveUploader.Config.Validate(); err != nil {
-		t.Fatal(err)
+	if err := driveUploader.Config.Validate(); err == nil {
+		t.Fatal("expected service account config to be rejected")
 	}
 }
 
@@ -467,22 +512,22 @@ func TestArchiveMetadataIncludesSafeArchiveConfigOnly(t *testing.T) {
 		StreamID: "stream-01",
 		Name:     "Morning Stream",
 		ArchiveConfig: ArchiveConfig{
-			DriveDestinationID:                  "drive-destination-01",
-			ArchiveProfileID:                    "archive-profile-01",
-			AuthMode:                            "oauth2",
-			OAuthAccountID:                      "oauth-account-01",
-			OAuthProviderID:                     "oauth-provider-01",
-			FolderID:                            "raw-drive-folder-id",
-			FolderIDSecretName:                  "drive_destination:drive-destination-01:folder_id",
-			ServiceAccountJSON:                  `{"type":"service_account","private_key":"raw-service-account-private-key"}`,
-			ServiceAccountCredentialsSecretName: "google_drive_credentials",
-			BasePath:                            "AutoStream",
-			SharedDrive:                         true,
-			ClientID:                            "google-client-id",
-			ClientSecret:                        "raw-google-client-secret",
-			ClientSecretSecretName:              "oauth_provider:oauth-provider-01:client_secret",
-			RefreshToken:                        "raw-google-refresh-token",
-			RefreshTokenSecretName:              "oauth_account:oauth-account-01:refresh_token",
+			DriveDestinationID:     "drive-destination-01",
+			ArchiveProfileID:       "archive-profile-01",
+			AuthMode:               "oauth2",
+			OAuthAccountID:         "oauth-account-01",
+			OAuthProviderID:        "oauth-provider-01",
+			FolderID:               "raw-drive-folder-id",
+			FolderIDSecretName:     "drive_destination:drive-destination-01:folder_id",
+			BasePath:               "AutoStream",
+			SharedDrive:            true,
+			SharedDriveID:          "raw-shared-drive-id",
+			ArchiveFileName:        "Council Meeting.mp4",
+			ClientID:               "google-client-id",
+			ClientSecret:           "raw-google-client-secret",
+			ClientSecretSecretName: "oauth_provider:oauth-provider-01:client_secret",
+			RefreshToken:           "raw-google-refresh-token",
+			RefreshTokenSecretName: "oauth_account:oauth-account-01:refresh_token",
 		},
 	})
 	if err != nil {
@@ -495,7 +540,7 @@ func TestArchiveMetadataIncludesSafeArchiveConfigOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"raw-drive-folder-id", "raw-service-account-private-key", "raw-google-client-secret", "raw-google-refresh-token"} {
+	for _, secret := range []string{"raw-drive-folder-id", "raw-shared-drive-id", "raw-service-account-private-key", "raw-google-client-secret", "raw-google-refresh-token"} {
 		if strings.Contains(string(metadataBody), secret) {
 			t.Fatalf("archive metadata leaked raw secret %q: %s", secret, string(metadataBody))
 		}
@@ -511,11 +556,40 @@ func TestArchiveMetadataIncludesSafeArchiveConfigOnly(t *testing.T) {
 	if cfg["drive_destination_id"] != "drive-destination-01" || cfg["auth_mode"] != "oauth2" || cfg["shared_drive"] != true {
 		t.Fatalf("unexpected archive config summary: %#v", cfg)
 	}
-	for _, key := range []string{"folder_id_configured", "service_account_json_configured", "client_secret_configured", "refresh_token_configured"} {
+	for _, key := range []string{"folder_id_configured", "client_secret_configured", "refresh_token_configured"} {
 		if cfg[key] != true {
 			t.Fatalf("expected %s in archive config summary: %#v", key, cfg)
 		}
 	}
+	if _, ok := cfg["service_account_json_configured"]; ok {
+		t.Fatalf("service account summary should not be emitted: %#v", cfg)
+	}
+	if cfg["shared_drive_id_configured"] != true || cfg["archive_file_name"] != "Council Meeting.mp4" {
+		t.Fatalf("expected archive file/shared drive summary in metadata: %#v", cfg)
+	}
+}
+
+type archiveFileNameCheckingUploader struct {
+	t        *testing.T
+	want     string
+	observed bool
+}
+
+func (u *archiveFileNameCheckingUploader) Upload(ctx context.Context, streamName, streamID string, startedAtJST time.Time, files []archive.File) (archive.UploadResult, error) {
+	if err := ctx.Err(); err != nil {
+		return archive.UploadResult{}, err
+	}
+	result := archive.UploadResult{DryRun: true, FolderID: "folder", FileIDs: map[string]string{}}
+	for _, file := range files {
+		if file.DrivePath == u.want {
+			u.observed = true
+		}
+		if file.DrivePath == "final.mp4" {
+			u.t.Fatalf("default final.mp4 drive name should be replaced by %q: %#v", u.want, files)
+		}
+		result.FileIDs[file.DrivePath] = "id-" + file.DrivePath
+	}
+	return result, nil
 }
 
 type metadataCheckingUploader struct {

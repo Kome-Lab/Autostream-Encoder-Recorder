@@ -23,6 +23,7 @@ type GoogleDriveConfig struct {
 	FolderID              string
 	BasePath              string
 	SharedDrive           bool
+	SharedDriveID         string
 	ClientID              string
 	ClientSecret          string
 	RefreshToken          string
@@ -52,15 +53,15 @@ func (c GoogleDriveConfig) SafeSummary() map[string]any {
 		"shared_drive": c.SharedDrive,
 		"dry_run":      c.DryRun,
 	}
-	if strings.TrimSpace(c.ApplicationCredential) != "" {
-		out["application_credentials_configured"] = true
-	}
-	if strings.TrimSpace(c.ServiceAccountJSON) != "" {
-		out["service_account_json_configured"] = true
+	if strings.TrimSpace(c.ApplicationCredential) != "" || strings.TrimSpace(c.ServiceAccountJSON) != "" {
+		out["unsupported_service_account_configured"] = true
 	}
 	if strings.TrimSpace(c.FolderID) != "" {
 		out["folder_id_configured"] = true
 		out["folder_id_fingerprint"] = secretFingerprint(c.FolderID)
+	}
+	if strings.TrimSpace(c.SharedDriveID) != "" {
+		out["shared_drive_id_configured"] = true
 	}
 	if strings.TrimSpace(c.ClientID) != "" {
 		out["client_id_configured"] = true
@@ -76,32 +77,26 @@ func (c GoogleDriveConfig) SafeSummary() map[string]any {
 
 func GoogleDriveConfigFromEnv() GoogleDriveConfig {
 	return GoogleDriveConfig{
-		AuthMode:              os.Getenv("GOOGLE_DRIVE_AUTH_MODE"),
-		ApplicationCredential: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
-		FolderID:              os.Getenv("GOOGLE_DRIVE_FOLDER_ID"),
-		BasePath:              envDefault("GDRIVE_BASE_PATH", "AutoStream"),
-		SharedDrive:           envBool("GOOGLE_DRIVE_SHARED_DRIVE", false),
+		BasePath:    envDefault("GDRIVE_BASE_PATH", "AutoStream"),
+		SharedDrive: envBool("GOOGLE_DRIVE_SHARED_DRIVE", false),
 	}
 }
 
 func (c GoogleDriveConfig) Validate() error {
-	switch c.AuthMode {
-	case "service_account":
-		if c.ApplicationCredential == "" && strings.TrimSpace(c.ServiceAccountJSON) == "" {
-			return errors.New("GOOGLE_APPLICATION_CREDENTIALS or service_account_json is required for service_account")
-		}
-	case "oauth2":
-		if c.ClientID == "" || c.ClientSecret == "" || c.RefreshToken == "" {
-			return errors.New("client_id, client_secret, and refresh_token are required for oauth2")
-		}
-	default:
-		return errors.New("unsupported GOOGLE_DRIVE_AUTH_MODE")
+	if strings.TrimSpace(c.ApplicationCredential) != "" || strings.TrimSpace(c.ServiceAccountJSON) != "" || c.AuthMode == "service_account" {
+		return errors.New("service_account authentication is not supported; configure archive OAuth in Control Panel")
+	}
+	if c.AuthMode != "oauth2" {
+		return errors.New("unsupported google drive auth mode")
+	}
+	if c.ClientID == "" || c.ClientSecret == "" || c.RefreshToken == "" {
+		return errors.New("client_id, client_secret, and refresh_token are required for oauth2")
 	}
 	if c.FolderID == "" {
-		return errors.New("GOOGLE_DRIVE_FOLDER_ID is required")
+		return errors.New("folder_id is required")
 	}
 	if c.BasePath == "" {
-		return errors.New("GDRIVE_BASE_PATH is required")
+		return errors.New("base_path is required")
 	}
 	return nil
 }
@@ -140,51 +135,41 @@ func (u GoogleDriveAPIUploader) driveService(ctx context.Context) (*drive.Servic
 }
 
 func (u GoogleDriveAPIUploader) driveServiceWithOptions(ctx context.Context, oauthEndpoint oauth2.Endpoint, options ...option.ClientOption) (*drive.Service, error) {
-	switch u.Config.AuthMode {
-	case "service_account":
-		options = append(options, option.WithScopes(drive.DriveFileScope))
-		if strings.TrimSpace(u.Config.ServiceAccountJSON) != "" {
-			options = append(options, option.WithCredentialsJSON([]byte(u.Config.ServiceAccountJSON)))
-			return drive.NewService(ctx, options...)
-		}
-		options = append(options, option.WithCredentialsFile(u.Config.ApplicationCredential))
-		return drive.NewService(ctx, options...)
-	case "oauth2":
-		cfg := oauth2.Config{
-			ClientID:     u.Config.ClientID,
-			ClientSecret: u.Config.ClientSecret,
-			Scopes:       []string{drive.DriveFileScope},
-			Endpoint:     oauthEndpoint,
-		}
-		token := &oauth2.Token{RefreshToken: u.Config.RefreshToken}
-		options = append(options,
-			option.WithTokenSource(cfg.TokenSource(ctx, token)),
-			option.WithScopes(drive.DriveFileScope),
-		)
-		return drive.NewService(ctx, options...)
-	default:
-		return nil, errors.New("unsupported GOOGLE_DRIVE_AUTH_MODE")
+	if u.Config.AuthMode != "oauth2" {
+		return nil, errors.New("unsupported google drive auth mode")
 	}
+	cfg := oauth2.Config{
+		ClientID:     u.Config.ClientID,
+		ClientSecret: u.Config.ClientSecret,
+		Scopes:       []string{drive.DriveFileScope},
+		Endpoint:     oauthEndpoint,
+	}
+	token := &oauth2.Token{RefreshToken: u.Config.RefreshToken}
+	options = append(options,
+		option.WithTokenSource(cfg.TokenSource(ctx, token)),
+		option.WithScopes(drive.DriveFileScope),
+	)
+	return drive.NewService(ctx, options...)
 }
 
 func (u GoogleDriveAPIUploader) ensureArchiveFolder(ctx context.Context, svc *drive.Service, streamName, streamID string, startedAtJST time.Time) (string, error) {
 	parentID := u.Config.FolderID
 	for _, segment := range splitBasePath(u.Config.BasePath) {
-		id, err := ensureDriveFolder(ctx, svc, parentID, segment, u.Config.SharedDrive)
+		id, err := ensureDriveFolder(ctx, svc, parentID, segment, u.Config.SharedDrive, u.Config.SharedDriveID)
 		if err != nil {
 			return "", err
 		}
 		parentID = id
 	}
-	streamFolder, err := ensureDriveFolder(ctx, svc, parentID, safeDriveName(streamName), u.Config.SharedDrive)
+	streamFolder, err := ensureDriveFolder(ctx, svc, parentID, safeDriveName(streamName), u.Config.SharedDrive, u.Config.SharedDriveID)
 	if err != nil {
 		return "", err
 	}
 	archiveFolderName := startedAtJST.Format("20060102_150405") + "_JST_" + safeDriveName(streamID)
-	return ensureDriveFolder(ctx, svc, streamFolder, archiveFolderName, u.Config.SharedDrive)
+	return ensureDriveFolder(ctx, svc, streamFolder, archiveFolderName, u.Config.SharedDrive, u.Config.SharedDriveID)
 }
 
-func ensureDriveFolder(ctx context.Context, svc *drive.Service, parentID, name string, sharedDrive bool) (string, error) {
+func ensureDriveFolder(ctx context.Context, svc *drive.Service, parentID, name string, sharedDrive bool, sharedDriveID string) (string, error) {
 	q := "mimeType = 'application/vnd.google-apps.folder' and trashed = false and name = '" + driveQueryLiteral(name) + "' and '" + driveQueryLiteral(parentID) + "' in parents"
 	listCall := svc.Files.List().
 		Q(q).
@@ -194,6 +179,9 @@ func ensureDriveFolder(ctx context.Context, svc *drive.Service, parentID, name s
 		Context(ctx)
 	if sharedDrive {
 		listCall = listCall.IncludeItemsFromAllDrives(true)
+		if strings.TrimSpace(sharedDriveID) != "" {
+			listCall = listCall.Corpora("drive").DriveId(strings.TrimSpace(sharedDriveID))
+		}
 	}
 	list, err := listCall.Do()
 	if err != nil {

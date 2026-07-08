@@ -59,6 +59,7 @@ var (
 	errRawArchiveSecretFieldsNotAllowed   = errors.New("raw_archive_secret_fields_not_allowed")
 	errRawYouTubeSecretFieldNotAllowed    = errors.New("raw_youtube_secret_field_not_allowed")
 	errRuntimeSecretResolverNotConfigured = errors.New("runtime_secret_resolver_not_configured")
+	errUnsupportedArchiveAuthMode         = errors.New("unsupported_archive_auth_mode")
 )
 
 func TokenVerifierFromEnv() TokenVerifier {
@@ -281,8 +282,8 @@ func buildPreflight(verifier TokenVerifier) preflightResponse {
 		Summary: map[string]any{
 			"ffmpeg_bin":                  envDefault("FFMPEG_BIN", "ffmpeg"),
 			"archive_root_configured":     strings.TrimSpace(envDefault("AUTOSTREAM_ARCHIVE_DIR", "/var/lib/autostream/archives")) != "",
-			"google_drive_auth_mode":      safeConfigValue(os.Getenv("GOOGLE_DRIVE_AUTH_MODE")),
-			"google_drive_upload_dry_run": os.Getenv("GOOGLE_DRIVE_AUTH_MODE") == "",
+			"google_drive_runtime_config": "control_panel_required",
+			"google_drive_env_fallback":   false,
 			"observability_configured":    observabilityDirectConfigured() || observabilityControlPanelProxyConfigured(),
 		},
 	}
@@ -383,20 +384,10 @@ func youtubeRuntimeConfigPreflight(id, key, label string) preflightCheck {
 }
 
 func googleDrivePreflight() preflightCheck {
-	mode := strings.TrimSpace(os.Getenv("GOOGLE_DRIVE_AUTH_MODE"))
-	if mode == "" {
-		return preflightCheck{ID: "google_drive", Status: "dry_run", Severity: "warning", Message: "Google Drive auth mode is not configured; archive upload will use dry-run uploader."}
+	if strings.TrimSpace(os.Getenv("GOOGLE_DRIVE_AUTH_MODE")) != "" || strings.TrimSpace(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")) != "" {
+		return preflightCheck{ID: "google_drive", Status: "unsupported_env_fallback", Severity: "warning", Message: "Google Drive env fallback is no longer supported; configure archive OAuth per stream in Control Panel."}
 	}
-	if mode != "service_account" {
-		return preflightCheck{ID: "google_drive", Status: "runtime_config_required", Severity: "warning", Message: "OAuth2 Drive upload must be supplied by Control Panel archive runtime config; env fallback only supports service_account."}
-	}
-	if strings.TrimSpace(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")) == "" || strings.TrimSpace(os.Getenv("GOOGLE_DRIVE_FOLDER_ID")) == "" {
-		return preflightCheck{ID: "google_drive", Status: "missing_config", Severity: "warning", Message: "Service Account mode requires GOOGLE_APPLICATION_CREDENTIALS and GOOGLE_DRIVE_FOLDER_ID."}
-	}
-	if _, err := os.Stat(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")); err != nil {
-		return preflightCheck{ID: "google_drive", Status: "credential_file_unavailable", Severity: "warning", Message: "Google credential file is not readable by this process."}
-	}
-	return preflightCheck{ID: "google_drive", Status: "ok", Severity: "warning", Message: "Google Drive Service Account upload is configured."}
+	return preflightCheck{ID: "google_drive", Status: "runtime_config_required", Severity: "warning", Message: "Google Drive upload is supplied by Control Panel archive runtime config."}
 }
 
 func observabilityPreflight() preflightCheck {
@@ -424,17 +415,6 @@ func observabilityDirectConfigured() bool {
 func observabilityControlPanelProxyConfigured() bool {
 	cfg := control.ConfigFromEnv()
 	return strings.TrimSpace(cfg.ControlPanelURL) != "" && strings.TrimSpace(cfg.Token) != "" && strings.TrimSpace(cfg.ConfigError) == ""
-}
-
-func safeConfigValue(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "dry_run"
-	}
-	if value == "service_account" || value == "oauth2" {
-		return value
-	}
-	return "custom"
 }
 
 func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) http.HandlerFunc {
@@ -614,12 +594,12 @@ func mergeRuntimeArchiveConfig(dst *lifecycle.ArchiveConfig, src control.Runtime
 	setStringIfEmpty(&dst.OAuthAccountID, src.OAuthAccountID())
 	setStringIfEmpty(&dst.OAuthProviderID, src.OAuthProviderID())
 	setStringIfEmpty(&dst.FolderIDSecretName, src.FolderIDSecretName())
-	setStringIfEmpty(&dst.ServiceAccountSecretName, src.ServiceAccountSecretName())
-	setStringIfEmpty(&dst.ServiceAccountCredentialsSecretName, src.ServiceAccountCredentialsSecretName())
 	setStringIfEmpty(&dst.BasePath, src.BasePath())
 	if value, ok := src.SharedDrive(); ok && value {
 		dst.SharedDrive = true
 	}
+	setStringIfEmpty(&dst.SharedDriveID, src.SharedDriveID())
+	setStringIfEmpty(&dst.ArchiveFileName, src.ArchiveFileName())
 	setStringIfEmpty(&dst.ClientID, src.ClientID())
 	setStringIfEmpty(&dst.ClientSecretSecretName, src.ClientSecretSecretName())
 	setStringIfEmpty(&dst.RefreshTokenSecretName, src.RefreshTokenSecretName())
@@ -702,6 +682,9 @@ func resolveArchiveRuntimeSecrets(ctx context.Context, job *lifecycle.StreamJob,
 	if archiveConfigHasRawSecretFields(*cfg) {
 		return errRawArchiveSecretFieldsNotAllowed
 	}
+	if unsupportedServiceAccountArchiveConfig(*cfg) || (strings.TrimSpace(cfg.AuthMode) != "" && cfg.AuthMode != "oauth2") {
+		return errUnsupportedArchiveAuthMode
+	}
 	if cfg.AuthMode == "" || resolver == nil {
 		return nil
 	}
@@ -711,20 +694,6 @@ func resolveArchiveRuntimeSecrets(ctx context.Context, job *lifecycle.StreamJob,
 			return err
 		}
 		cfg.FolderID = value
-	}
-	if cfg.ServiceAccountJSON == "" && cfg.ServiceAccountSecretName != "" {
-		value, err := resolver(ctx, job.StreamID, cfg.ArchiveProfileID, cfg.ServiceAccountSecretName)
-		if err != nil {
-			return err
-		}
-		cfg.ServiceAccountJSON = value
-	}
-	if cfg.ServiceAccountJSON == "" && cfg.ServiceAccountCredentialsSecretName != "" {
-		value, err := resolver(ctx, job.StreamID, cfg.ArchiveProfileID, cfg.ServiceAccountCredentialsSecretName)
-		if err != nil {
-			return err
-		}
-		cfg.ServiceAccountJSON = value
 	}
 	if cfg.ClientSecret == "" && cfg.ClientSecretSecretName != "" {
 		value, err := resolver(ctx, job.StreamID, cfg.ArchiveProfileID, cfg.ClientSecretSecretName)
@@ -748,6 +717,11 @@ func archiveConfigHasRawSecretFields(cfg lifecycle.ArchiveConfig) bool {
 		strings.TrimSpace(cfg.ServiceAccountJSON) != "" ||
 		strings.TrimSpace(cfg.ClientSecret) != "" ||
 		strings.TrimSpace(cfg.RefreshToken) != ""
+}
+
+func unsupportedServiceAccountArchiveConfig(cfg lifecycle.ArchiveConfig) bool {
+	return strings.TrimSpace(cfg.ServiceAccountSecretName) != "" ||
+		strings.TrimSpace(cfg.ServiceAccountCredentialsSecretName) != ""
 }
 
 func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Manager, verifier TokenVerifier) http.HandlerFunc {
@@ -919,6 +893,10 @@ func writeRuntimeSecretResolveError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, errRuntimeSecretResolverNotConfigured) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "runtime_secret_resolver_not_configured"})
+		return
+	}
+	if errors.Is(err, errUnsupportedArchiveAuthMode) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "unsupported_archive_auth_mode"})
 		return
 	}
 	writeJSON(w, http.StatusBadRequest, map[string]string{"code": "archive_secret_resolve_failed"})
@@ -1180,10 +1158,7 @@ func packageFailureResponse(err error, dryRun bool) map[string]any {
 }
 
 func uploaderFromEnv(dryRun bool) archive.ArchiveUploader {
-	if dryRun || os.Getenv("GOOGLE_DRIVE_AUTH_MODE") == "" {
-		return archive.DryRunUploader{}
-	}
-	return archive.GoogleDriveAPIUploader{Config: archive.GoogleDriveConfigFromEnv()}
+	return archive.DryRunUploader{}
 }
 
 func envInt(key string, fallback int) int {

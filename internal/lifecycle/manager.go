@@ -59,6 +59,8 @@ type ArchiveConfig struct {
 	ServiceAccountCredentialsSecretName string `json:"service_account_credentials_secret_name,omitempty"`
 	BasePath                            string `json:"base_path,omitempty"`
 	SharedDrive                         bool   `json:"shared_drive,omitempty"`
+	SharedDriveID                       string `json:"shared_drive_id,omitempty"`
+	ArchiveFileName                     string `json:"archive_file_name,omitempty"`
 	ClientID                            string `json:"client_id,omitempty"`
 	ClientSecret                        string `json:"client_secret,omitempty"`
 	ClientSecretSecretName              string `json:"client_secret_secret_name,omitempty"`
@@ -235,7 +237,7 @@ func (m Manager) DryRun(ctx context.Context, job StreamJob) (Result, error) {
 		metadata.Commands = RedactCommandsForLayout(layout, dryRunner.Commands, job.StreamKey, job.InputURL, job.RTMPURL)
 	}
 	files := []archive.File{
-		{LocalPath: layout.FinalMP4(), DrivePath: "final.mp4"},
+		{LocalPath: layout.FinalMP4(), DrivePath: archiveUploadFileName(job.ArchiveConfig, "final.mp4")},
 		{LocalPath: layout.FinalLogs(), DrivePath: "logs.jsonl"},
 	}
 	upload, err := uploadArchiveFiles(ctx, uploader, job.Name, job.StreamID, startedAt.In(jst), files, layout.FinalMetadata(), &metadata)
@@ -332,7 +334,7 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 	if dryRunner, ok := runner.(*ffmpeg.DryRunRunner); ok {
 		metadata.Commands = RedactCommandsForLayout(layout, dryRunner.Commands)
 	}
-	files, err := collectArchiveFiles(layout)
+	files, err := collectArchiveFiles(layout, job.ArchiveConfig)
 	if err != nil {
 		return Result{}, PackageError{Phase: "package", Err: err}
 	}
@@ -371,14 +373,14 @@ func googleDriveConfigFromArchiveConfig(cfg ArchiveConfig) archive.GoogleDriveCo
 		basePath = "AutoStream"
 	}
 	return archive.GoogleDriveConfig{
-		AuthMode:           cfg.AuthMode,
-		ServiceAccountJSON: cfg.ServiceAccountJSON,
-		FolderID:           cfg.FolderID,
-		BasePath:           basePath,
-		SharedDrive:        cfg.SharedDrive,
-		ClientID:           cfg.ClientID,
-		ClientSecret:       cfg.ClientSecret,
-		RefreshToken:       cfg.RefreshToken,
+		AuthMode:      cfg.AuthMode,
+		FolderID:      cfg.FolderID,
+		BasePath:      basePath,
+		SharedDrive:   cfg.SharedDrive,
+		SharedDriveID: cfg.SharedDriveID,
+		ClientID:      cfg.ClientID,
+		ClientSecret:  cfg.ClientSecret,
+		RefreshToken:  cfg.RefreshToken,
 	}
 }
 
@@ -413,11 +415,14 @@ func archiveConfigMetadata(cfg ArchiveConfig) map[string]any {
 	if cfg.SharedDrive {
 		out["shared_drive"] = true
 	}
+	if cfg.SharedDriveID != "" {
+		out["shared_drive_id_configured"] = true
+	}
+	if cfg.ArchiveFileName != "" {
+		out["archive_file_name"] = archiveUploadFileName(cfg, "final.mp4")
+	}
 	if cfg.FolderID != "" || cfg.FolderIDSecretName != "" {
 		out["folder_id_configured"] = true
-	}
-	if cfg.ServiceAccountJSON != "" || cfg.ServiceAccountSecretName != "" || cfg.ServiceAccountCredentialsSecretName != "" {
-		out["service_account_json_configured"] = true
 	}
 	if cfg.ClientID != "" {
 		out["client_id_configured"] = true
@@ -504,22 +509,23 @@ func mergeUploadResults(primary, metadata archive.UploadResult) archive.UploadRe
 	return merged
 }
 
-func collectArchiveFiles(layout archive.Layout) ([]archive.File, error) {
+func collectArchiveFiles(layout archive.Layout, cfg ArchiveConfig) ([]archive.File, error) {
 	candidates := []struct {
-		local string
-		drive string
+		local    string
+		drive    string
+		required bool
 	}{
-		{layout.FinalMP4(), "final.mp4"},
-		{layout.FinalCaptions(), "captions.vtt"},
-		{layout.FinalTranscript(), "transcript.json"},
-		{layout.FinalMetadata(), "metadata.json"},
-		{layout.FinalLogs(), "logs.jsonl"},
+		{layout.FinalMP4(), archiveUploadFileName(cfg, "final.mp4"), true},
+		{layout.FinalCaptions(), "captions.vtt", false},
+		{layout.FinalTranscript(), "transcript.json", false},
+		{layout.FinalMetadata(), "metadata.json", false},
+		{layout.FinalLogs(), "logs.jsonl", false},
 	}
 	files := make([]archive.File, 0, len(candidates))
 	for _, candidate := range candidates {
 		info, err := safeRegularFileInfo(candidate.local)
 		if err != nil {
-			if candidate.drive == "final.mp4" {
+			if candidate.required {
 				return nil, err
 			}
 			continue
@@ -527,6 +533,29 @@ func collectArchiveFiles(layout archive.Layout) ([]archive.File, error) {
 		files = append(files, archive.File{LocalPath: candidate.local, DrivePath: candidate.drive, SizeBytes: info.Size()})
 	}
 	return files, nil
+}
+
+func archiveUploadFileName(cfg ArchiveConfig, fallback string) string {
+	value := strings.TrimSpace(cfg.ArchiveFileName)
+	if value == "" {
+		value = fallback
+	}
+	value = strings.ReplaceAll(value, "/", "_")
+	value = strings.ReplaceAll(value, "\\", "_")
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '_'
+		}
+		return r
+	}, value)
+	value = strings.Trim(value, " .")
+	if value == "" {
+		value = fallback
+	}
+	if !strings.HasSuffix(strings.ToLower(value), ".mp4") {
+		value += ".mp4"
+	}
+	return value
 }
 
 func copyIfExists(src, dst string) error {

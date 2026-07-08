@@ -46,17 +46,15 @@ func TestResolveArchiveRuntimeSecrets(t *testing.T) {
 	job := lifecycle.StreamJob{
 		StreamID: "stream-01",
 		ArchiveConfig: lifecycle.ArchiveConfig{
-			ArchiveProfileID:                    "archive-profile-01",
-			AuthMode:                            "oauth2",
-			FolderIDSecretName:                  "drive_destination:dest-01:folder_id",
-			ServiceAccountCredentialsSecretName: "google_drive_credentials",
-			ClientSecretSecretName:              "oauth_provider:provider-01:client_secret",
-			RefreshTokenSecretName:              "oauth_account:account-01:refresh_token",
+			ArchiveProfileID:       "archive-profile-01",
+			AuthMode:               "oauth2",
+			FolderIDSecretName:     "drive_destination:dest-01:folder_id",
+			ClientSecretSecretName: "oauth_provider:provider-01:client_secret",
+			RefreshTokenSecretName: "oauth_account:account-01:refresh_token",
 		},
 	}
 	resolved := map[string]string{
 		"drive_destination:dest-01:folder_id":      "drive-folder-id",
-		"google_drive_credentials":                 `{"type":"service_account","client_email":"svc@example.com"}`,
 		"oauth_provider:provider-01:client_secret": "google-client-secret",
 		"oauth_account:account-01:refresh_token":   "google-refresh-token",
 	}
@@ -73,7 +71,7 @@ func TestResolveArchiveRuntimeSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job.ArchiveConfig.FolderID != "drive-folder-id" || job.ArchiveConfig.ServiceAccountJSON == "" || job.ArchiveConfig.ClientSecret != "google-client-secret" || job.ArchiveConfig.RefreshToken != "google-refresh-token" {
+	if job.ArchiveConfig.FolderID != "drive-folder-id" || job.ArchiveConfig.ServiceAccountJSON != "" || job.ArchiveConfig.ClientSecret != "google-client-secret" || job.ArchiveConfig.RefreshToken != "google-refresh-token" {
 		t.Fatalf("archive secrets were not resolved: %#v", job.ArchiveConfig)
 	}
 }
@@ -116,17 +114,15 @@ func TestResolvePackageArchiveRuntimeSecrets(t *testing.T) {
 	job := lifecycle.PackageJob{
 		StreamID: "stream-01",
 		ArchiveConfig: lifecycle.ArchiveConfig{
-			ArchiveProfileID:                    "archive-profile-01",
-			AuthMode:                            "oauth2",
-			FolderIDSecretName:                  "drive_destination:dest-01:folder_id",
-			ServiceAccountCredentialsSecretName: "google_drive_credentials",
-			ClientSecretSecretName:              "oauth_provider:provider-01:client_secret",
-			RefreshTokenSecretName:              "oauth_account:account-01:refresh_token",
+			ArchiveProfileID:       "archive-profile-01",
+			AuthMode:               "oauth2",
+			FolderIDSecretName:     "drive_destination:dest-01:folder_id",
+			ClientSecretSecretName: "oauth_provider:provider-01:client_secret",
+			RefreshTokenSecretName: "oauth_account:account-01:refresh_token",
 		},
 	}
 	resolved := map[string]string{
 		"drive_destination:dest-01:folder_id":      "drive-folder-id",
-		"google_drive_credentials":                 `{"type":"service_account","client_email":"svc@example.com"}`,
 		"oauth_provider:provider-01:client_secret": "google-client-secret",
 		"oauth_account:account-01:refresh_token":   "google-refresh-token",
 	}
@@ -143,7 +139,7 @@ func TestResolvePackageArchiveRuntimeSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job.ArchiveConfig.FolderID != "drive-folder-id" || job.ArchiveConfig.ServiceAccountJSON == "" || job.ArchiveConfig.ClientSecret != "google-client-secret" || job.ArchiveConfig.RefreshToken != "google-refresh-token" {
+	if job.ArchiveConfig.FolderID != "drive-folder-id" || job.ArchiveConfig.ServiceAccountJSON != "" || job.ArchiveConfig.ClientSecret != "google-client-secret" || job.ArchiveConfig.RefreshToken != "google-refresh-token" {
 		t.Fatalf("package archive secrets were not resolved: %#v", job.ArchiveConfig)
 	}
 }
@@ -400,7 +396,7 @@ func TestPreflightEndpointReportsReadinessWithoutLeakingSecrets(t *testing.T) {
 			t.Fatalf("preflight leaked secret/config value %q: %s", secret, res.Body.String())
 		}
 	}
-	if !hasPreflightCheck(body.Checks, "ffmpeg_binary", "ok") || !hasPreflightCheck(body.Checks, "archive_root", "ok") || !hasPreflightCheck(body.Checks, "google_drive", "ok") {
+	if !hasPreflightCheck(body.Checks, "ffmpeg_binary", "ok") || !hasPreflightCheck(body.Checks, "archive_root", "ok") || !hasPreflightCheck(body.Checks, "google_drive", "unsupported_env_fallback") {
 		t.Fatalf("missing expected checks: %#v", body.Checks)
 	}
 }
@@ -738,8 +734,10 @@ func TestPackageEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 			switch secretName {
 			case "drive_destination:dest-01:folder_id":
 				return "raw-drive-folder-id", nil
-			case "drive_destination:dest-01:service_account_json":
-				return `{"type":"service_account","client_email":"svc@example.com","private_key":"raw-private-key"}`, nil
+			case "oauth_provider:provider-01:client_secret":
+				return "raw-client-secret", nil
+			case "oauth_account:account-01:refresh_token":
+				return "raw-refresh-token", nil
 			default:
 				return "", errors.New("unexpected package archive runtime secret")
 			}
@@ -752,14 +750,16 @@ func TestPackageEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 					ArchiveProfileID: "archive-profile-01",
 					Ready:            true,
 					ArchiveConfig: map[string]any{
-						"drive_destination_id":                    "dest-01",
-						"auth_mode":                               "service_account",
-						"folder_id_secret_name":                   "drive_destination:dest-01:folder_id",
-						"service_account_credentials_secret_name": "drive_destination:dest-01:service_account_json",
-						"base_path":                               "AutoStream/Archives",
-						"shared_drive":                            true,
-						"refresh_token":                           "raw-refresh-token-must-not-be-used",
-						"client_secret":                           "raw-client-secret-must-not-be-used",
+						"drive_destination_id":      "dest-01",
+						"auth_mode":                 "oauth2",
+						"oauth_account_id":          "account-01",
+						"oauth_provider_id":         "provider-01",
+						"folder_id_secret_name":     "drive_destination:dest-01:folder_id",
+						"base_path":                 "AutoStream/Archives",
+						"shared_drive":              true,
+						"client_id":                 "google-client-id",
+						"client_secret_secret_name": "oauth_provider:provider-01:client_secret",
+						"refresh_token_secret_name": "oauth_account:account-01:refresh_token",
 					},
 				}},
 			}, nil
@@ -776,18 +776,19 @@ func TestPackageEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 	}
 	for _, secretName := range []string{
 		"drive_destination:dest-01:folder_id",
-		"drive_destination:dest-01:service_account_json",
+		"oauth_provider:provider-01:client_secret",
+		"oauth_account:account-01:refresh_token",
 	} {
 		if resolvedSecrets[secretName] != "archive-profile-01" {
 			t.Fatalf("expected package runtime archive secret %q to be resolved, got %#v", secretName, resolvedSecrets)
 		}
 	}
-	for _, expected := range []string{`"auth_mode":"service_account"`, `"shared_drive":true`, `"folder_id_configured":true`, `"service_account_json_configured":true`} {
+	for _, expected := range []string{`"auth_mode":"oauth2"`, `"shared_drive":true`, `"folder_id_configured":true`, `"client_secret_configured":true`, `"refresh_token_configured":true`} {
 		if !strings.Contains(res.Body.String(), expected) {
 			t.Fatalf("expected safe archive config summary %q in response: %s", expected, res.Body.String())
 		}
 	}
-	for _, leaked := range []string{"raw-drive-folder-id", "raw-private-key", "drive_destination:dest-01:folder_id", "drive_destination:dest-01:service_account_json", "raw-refresh-token-must-not-be-used", "raw-client-secret-must-not-be-used"} {
+	for _, leaked := range []string{"raw-drive-folder-id", "raw-client-secret", "raw-refresh-token", "drive_destination:dest-01:folder_id", "oauth_provider:provider-01:client_secret", "oauth_account:account-01:refresh_token"} {
 		if strings.Contains(res.Body.String(), leaked) {
 			t.Fatalf("package response leaked archive runtime config detail %q: %s", leaked, res.Body.String())
 		}
@@ -1084,18 +1085,16 @@ func TestStartEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 					ArchiveProfileID: "archive-profile-01",
 					Ready:            true,
 					ArchiveConfig: map[string]any{
-						"drive_destination_id":             "dest-01",
-						"auth_mode":                        "oauth2",
-						"oauth_account_id":                 "account-01",
-						"oauth_provider_id":                "provider-01",
-						"folder_id_secret_name":            "drive_destination:dest-01:folder_id",
-						"base_path":                        "AutoStream/Archives",
-						"shared_drive":                     true,
-						"client_id":                        "google-client-id",
-						"client_secret_secret_name":        "oauth_provider:provider-01:client_secret",
-						"refresh_token_secret_name":        "oauth_account:account-01:refresh_token",
-						"service_account_json":             "raw-service-account-json-must-not-be-used",
-						"service_account_json_secret_name": "",
+						"drive_destination_id":      "dest-01",
+						"auth_mode":                 "oauth2",
+						"oauth_account_id":          "account-01",
+						"oauth_provider_id":         "provider-01",
+						"folder_id_secret_name":     "drive_destination:dest-01:folder_id",
+						"base_path":                 "AutoStream/Archives",
+						"shared_drive":              true,
+						"client_id":                 "google-client-id",
+						"client_secret_secret_name": "oauth_provider:provider-01:client_secret",
+						"refresh_token_secret_name": "oauth_account:account-01:refresh_token",
 					},
 				}},
 			}, nil
@@ -1607,13 +1606,13 @@ auth:
 	}
 }
 
-func TestUploaderFromEnvSelectsGoogleDriveUploaderWhenConfigured(t *testing.T) {
+func TestUploaderFromEnvIgnoresLegacyGoogleDriveEnvFallback(t *testing.T) {
 	t.Setenv("GOOGLE_DRIVE_AUTH_MODE", "service_account")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/etc/autostream/google-service-account.json")
 	t.Setenv("GOOGLE_DRIVE_FOLDER_ID", "folder-id")
 
-	if _, ok := uploaderFromEnv(false).(archive.GoogleDriveAPIUploader); !ok {
-		t.Fatal("expected GoogleDriveAPIUploader when configured")
+	if _, ok := uploaderFromEnv(false).(archive.DryRunUploader); !ok {
+		t.Fatal("expected DryRunUploader because env fallback is unsupported")
 	}
 	if _, ok := uploaderFromEnv(true).(archive.DryRunUploader); !ok {
 		t.Fatal("expected DryRunUploader for dry-run packaging")

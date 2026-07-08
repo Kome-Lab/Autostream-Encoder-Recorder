@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,9 @@ func TestRegisterPostsServiceRegistration(t *testing.T) {
 	if got.ServiceType != ServiceType || got.ServiceID != "enc-01" || got.Capabilities["remux_final_mp4"] != true {
 		t.Fatalf("unexpected registration: %#v", got)
 	}
+	if got.OS != runtime.GOOS || got.Arch != runtime.GOARCH {
+		t.Fatalf("registration did not include runtime platform: %#v", got)
+	}
 }
 
 func TestHeartbeatPostsStatus(t *testing.T) {
@@ -58,6 +62,9 @@ func TestHeartbeatPostsStatus(t *testing.T) {
 	}
 	if got.Status != "online" || got.CurrentStreamID != "stream-01" || got.Metrics["encoder.process_alive"] != 1 {
 		t.Fatalf("unexpected heartbeat: %#v", got)
+	}
+	if got.OS != runtime.GOOS || got.Arch != runtime.GOARCH || got.Capabilities["package_endpoint"] != true {
+		t.Fatalf("heartbeat did not include platform/capabilities: %#v", got)
 	}
 }
 
@@ -133,7 +140,7 @@ func TestRuntimeConfigFetchesScopedServiceConfig(t *testing.T) {
 			"stream_youtube_configs":[{"stream_id":"stream-01","assignment_role":"primary","youtube_output_id":"youtube-output-01","ready":true,"youtube_config":{"mode":"stream_key","rtmp_url":"rtmps://a.rtmps.youtube.com/live2","stream_key_secret_name":"youtube_stream_key_youtube-output-01","complete_on_stop":true},"active_runtime":{"mode":"stream_key","stream_key_secret_name":"youtube_stream_key_runtime_stream-01","complete_on_stop":true}}],
 			"stream_archive_configs":[
 				{"stream_id":"stream-01","assignment_role":"standby","archive_profile_id":"archive-profile-standby","ready":true,"archive_config":{"auth_mode":"service_account","folder_id_secret_name":"drive_destination:standby:folder_id"}},
-				{"stream_id":"stream-01","assignment_role":"primary","archive_profile_id":"archive-profile-01","ready":true,"archive_config":{"drive_destination_id":"drive-destination-01","archive_profile_id":"archive-profile-01","auth_mode":"oauth2","oauth_account_id":"account-01","oauth_provider_id":"provider-01","folder_id_secret_name":"drive_destination:drive-destination-01:folder_id","base_path":"AutoStream/Archives","shared_drive":true,"client_id":"google-client-id","client_secret_secret_name":"oauth_provider:provider-01:client_secret","refresh_token_secret_name":"oauth_account:account-01:refresh_token"}}
+				{"stream_id":"stream-01","assignment_role":"primary","archive_profile_id":"archive-profile-01","ready":true,"archive_config":{"drive_destination_id":"drive-destination-01","archive_profile_id":"archive-profile-01","auth_mode":"oauth2","oauth_account_id":"account-01","oauth_provider_id":"provider-01","folder_id_secret_name":"drive_destination:drive-destination-01:folder_id","base_path":"AutoStream/Archives","shared_drive":true,"shared_drive_id":"shared-drive-01","archive_file_name":"Council Meeting.mp4","client_id":"google-client-id","client_secret_secret_name":"oauth_provider:provider-01:client_secret","refresh_token_secret_name":"oauth_account:account-01:refresh_token"}}
 			]
 		}`))
 	}))
@@ -181,6 +188,9 @@ func TestRuntimeConfigFetchesScopedServiceConfig(t *testing.T) {
 	}
 	if sharedDrive, ok := archiveConfig.SharedDrive(); !ok || !sharedDrive {
 		t.Fatalf("expected shared drive archive runtime config: %#v", archiveConfig)
+	}
+	if archiveConfig.SharedDriveID() != "shared-drive-01" || archiveConfig.ArchiveFileName() != "Council Meeting.mp4" {
+		t.Fatalf("unexpected archive runtime file/shared drive id config: %#v", archiveConfig)
 	}
 	body, _ := json.Marshal(cfg)
 	for _, rawSecret := range []string{`"stream_key":`, "raw-youtube-stream-key", "raw-drive-folder-id", "raw-google-client-secret", "raw-google-refresh-token"} {

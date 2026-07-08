@@ -10,7 +10,7 @@ AutoStream の Encoder/Recorder service です。Control Panel から stream job
 - Worker event の sidecar 保存
 - FFmpeg による live output と MKV 録画
 - `final.mkv -> final.mp4` packaging
-- Google Drive Service Account / OAuth destination への upload
+- Google Drive OAuth destination への upload
 - Observability への metric / event / failure signal 送信
 
 ## Control Panel 管理
@@ -45,7 +45,7 @@ runtime secret reference の解決には service token の `service.secret.resol
 Control Panel runtime config が必須の環境で `rtmp_url` / `stream_key` / archive config が不足している start / package request は `youtube_runtime_config_required` として拒否します。
 `archive_config.auth_mode` が stream job に含まれる場合も、Google Drive / OAuth の不足値を env から補完しません。
 
-Control Panel runtime config includes `stream_archive_configs` for Drive destination and archive profile binding. Encoder/Recorder applies the ready primary entry for `/streams/start`, `/streams/dry-run`, and `/streams/package`; it copies only non-secret fields and secret reference names such as `folder_id_secret_name`, `service_account_credentials_secret_name`, `client_secret_secret_name`, and `refresh_token_secret_name`. Raw Drive folder IDs, service account JSON, OAuth client secrets, and refresh tokens must be resolved through `/services/runtime-secrets/resolve` and must not be sent in request bodies, env fallback, logs, metadata, or API responses.
+Control Panel runtime config includes `stream_archive_configs` for Drive destination and archive profile binding. Encoder/Recorder applies the ready primary entry for `/streams/start`, `/streams/dry-run`, and `/streams/package`; it copies only non-secret fields and secret reference names such as `folder_id_secret_name`, `client_secret_secret_name`, and `refresh_token_secret_name`. Raw Drive folder IDs, OAuth client secrets, and refresh tokens must be resolved through `/services/runtime-secrets/resolve` and must not be sent in request bodies, env fallback, logs, metadata, or API responses. Service Account authentication is not supported.
 
 ## Production Output Relay
 
@@ -66,13 +66,9 @@ local/dev または移行期間だけ、次の env fallback を使えます。�
 ```text
 YOUTUBE_RTMP_URL=rtmps://a.rtmps.youtube.com/live2
 YOUTUBE_STREAM_KEY=<YOUTUBE_STREAM_KEY>
-GOOGLE_DRIVE_AUTH_MODE=service_account
-GOOGLE_APPLICATION_CREDENTIALS=/etc/autostream/google-service-account.json
-GOOGLE_DRIVE_FOLDER_ID=<DRIVE_FOLDER_ID>
-GDRIVE_BASE_PATH=AutoStream
 ```
 
-共有ドライブの folder ID を使う場合は Control Panel の Drive destination で `shared_drive=true` を設定します。Uploader は Drive API に `supportsAllDrives=true` を付けて folder / file 操作を行います。
+Google Drive archive upload には env fallback を使いません。Control Panel の配信枠設定で OAuth account、folder ID、shared drive ID、archive file name を指定します。共有ドライブの folder ID を使う場合は stream archive settings で shared drive を有効化します。Uploader は Drive API に `supportsAllDrives=true` を付けて folder / file 操作を行います。
 
 ## Input Policy
 
