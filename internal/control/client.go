@@ -67,6 +67,8 @@ type Registration struct {
 	ServiceName  string         `json:"service_name"`
 	PublicURL    string         `json:"public_url"`
 	Version      string         `json:"version"`
+	Commit       string         `json:"commit,omitempty"`
+	BuildDate    string         `json:"build_date,omitempty"`
 	Capabilities map[string]any `json:"capabilities"`
 	Hostname     string         `json:"hostname,omitempty"`
 	OS           string         `json:"os,omitempty"`
@@ -78,6 +80,8 @@ type Heartbeat struct {
 	Status          string             `json:"status"`
 	CurrentStreamID string             `json:"current_stream_id,omitempty"`
 	Version         string             `json:"version,omitempty"`
+	Commit          string             `json:"commit,omitempty"`
+	BuildDate       string             `json:"build_date,omitempty"`
 	Capabilities    map[string]any     `json:"capabilities,omitempty"`
 	Hostname        string             `json:"hostname,omitempty"`
 	OS              string             `json:"os,omitempty"`
@@ -458,6 +462,8 @@ func (c Client) Register(ctx context.Context) error {
 		ServiceName:  c.Config.ServiceName,
 		PublicURL:    c.Config.ServicePublicURL,
 		Version:      c.Config.Version,
+		Commit:       version.Commit,
+		BuildDate:    version.BuildDate,
 		Capabilities: serviceCapabilities(),
 		Hostname:     reportHostname(),
 		OS:           runtime.GOOS,
@@ -479,6 +485,8 @@ func (c Client) HeartbeatWithMetrics(ctx context.Context, status, currentStreamI
 		Status:          status,
 		CurrentStreamID: currentStreamID,
 		Version:         c.Config.Version,
+		Commit:          version.Commit,
+		BuildDate:       version.BuildDate,
 		Capabilities:    serviceCapabilities(),
 		Hostname:        reportHostname(),
 		OS:              runtime.GOOS,
