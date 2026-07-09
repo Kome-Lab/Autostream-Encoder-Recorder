@@ -63,6 +63,9 @@ func TestHeartbeatPostsStatus(t *testing.T) {
 	if got.Status != "online" || got.CurrentStreamID != "stream-01" || got.Metrics["encoder.process_alive"] != 1 {
 		t.Fatalf("unexpected heartbeat: %#v", got)
 	}
+	if got.Metrics["node.cpu_count"] <= 0 || got.Metrics["process.heap_alloc_bytes"] <= 0 || got.Metrics["process.uptime_seconds"] < 0 {
+		t.Fatalf("heartbeat did not include host/process metrics: %#v", got.Metrics)
+	}
 	if got.OS != runtime.GOOS || got.Arch != runtime.GOARCH || got.Capabilities["package_endpoint"] != true {
 		t.Fatalf("heartbeat did not include platform/capabilities: %#v", got)
 	}
