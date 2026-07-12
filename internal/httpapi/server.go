@@ -70,7 +70,7 @@ func TokenVerifierFromEnv() TokenVerifier {
 		WorkerEventsSHA256Hex:  os.Getenv("ENCODER_WORKER_EVENTS_TOKEN_SHA256"),
 		DiscordAudioPlainToken: os.Getenv("ENCODER_DISCORD_AUDIO_TOKEN"),
 		DiscordAudioSHA256Hex:  os.Getenv("ENCODER_DISCORD_AUDIO_TOKEN_SHA256"),
-		IngestTokenSigningKey:  os.Getenv("AUTOSTREAM_STREAM_INGEST_SIGNING_KEY"),
+		IngestTokenSigningKey:  control.StreamIngestSigningKey(),
 		RequireSignedIngest:    envBool("AUTOSTREAM_REQUIRE_SIGNED_INGEST_TOKENS", true),
 	}
 	if verifier.PlainToken == "" && verifier.SHA256Hex == "" {
@@ -124,10 +124,14 @@ func (v TokenVerifier) DiscordAudioClaims(header, streamID string) (ingesttoken.
 
 func (v TokenVerifier) verifySignedIngest(header string, expected ingesttoken.Expected) (ingesttoken.Claims, bool) {
 	token := bearerToken(header)
-	if token == "" || !ingesttoken.IsSigned(token) || strings.TrimSpace(v.IngestTokenSigningKey) == "" {
+	signingKey := strings.TrimSpace(v.IngestTokenSigningKey)
+	if signingKey == "" {
+		signingKey = control.StreamIngestSigningKey()
+	}
+	if token == "" || !ingesttoken.IsSigned(token) || signingKey == "" {
 		return ingesttoken.Claims{}, false
 	}
-	claims, err := ingesttoken.Verify(v.IngestTokenSigningKey, token, expected)
+	claims, err := ingesttoken.Verify(signingKey, token, expected)
 	return claims, err == nil
 }
 
