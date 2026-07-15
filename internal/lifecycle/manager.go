@@ -91,6 +91,7 @@ func ArchiveArtifacts(streamID string) map[string]string {
 		"tmp_artifact_set":   "tmp/" + streamID,
 		"final_artifact_set": "final/" + streamID,
 		"recording_mkv":      "final.mkv",
+		"preview_playlist":   "preview/index.m3u8",
 		"final_mp4":          "final.mp4",
 		"metadata":           "metadata.json",
 		"logs":               "logs.jsonl",
@@ -451,13 +452,14 @@ func BuildLiveArgs(job StreamJob, archivePath, progressPath, audioStatsPath stri
 }
 
 func BuildLiveArgsToOutputTarget(job StreamJob, outputTarget, archivePath, progressPath, audioStatsPath string, profile ffmpeg.EncoderProfile) []string {
+	return BuildLiveArgsToOutputTargetWithPreview(job, outputTarget, archivePath, "", progressPath, audioStatsPath, profile)
+}
+
+func BuildLiveArgsToOutputTargetWithPreview(job StreamJob, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath string, profile ffmpeg.EncoderProfile) []string {
 	if job.InputMode == "discord_opus_rtp" {
-		return ffmpeg.BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetry(job.InputURL, outputTarget, archivePath, progressPath, audioStatsPath, profile)
+		return ffmpeg.BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, profile)
 	}
-	if progressPath != "" || audioStatsPath != "" {
-		return ffmpeg.BuildLiveArchiveArgsToOutputTargetWithTelemetry(job.InputURL, outputTarget, archivePath, progressPath, audioStatsPath, profile)
-	}
-	return ffmpeg.BuildLiveArchiveArgsToOutputTargetWithTelemetry(job.InputURL, outputTarget, archivePath, progressPath, audioStatsPath, profile)
+	return ffmpeg.BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, profile)
 }
 
 func uploadArchiveFiles(ctx context.Context, uploader archive.ArchiveUploader, streamName, streamID string, startedAtJST time.Time, files []archive.File, metadataPath string, metadata *Metadata) (archive.UploadResult, error) {
@@ -677,7 +679,17 @@ func copyIfExists(src, dst string) error {
 func RedactCommandsForLayout(layout archive.Layout, commands []ffmpeg.Command, secrets ...string) []ffmpeg.Command {
 	out := make([]ffmpeg.Command, 0, len(commands))
 	for _, command := range commands {
-		redacted := ffmpeg.Command{Bin: command.Bin, Args: redactArchivePaths(layout, redaction.Args(command.Args, secrets...))}
+		args := redaction.Args(command.Args, secrets...)
+		for i := range args {
+			for _, secret := range secrets {
+				replacement := "<REDACTED>"
+				if masked, ok := redaction.MaskSensitiveURL(secret); ok {
+					replacement = masked
+				}
+				args[i] = ffmpeg.RedactTeeValue(args[i], strings.TrimSpace(secret), replacement)
+			}
+		}
+		redacted := ffmpeg.Command{Bin: command.Bin, Args: redactArchivePaths(layout, args)}
 		out = append(out, redacted)
 	}
 	return out
@@ -688,6 +700,9 @@ func redactArchivePaths(layout archive.Layout, args []string) []string {
 		from string
 		to   string
 	}{
+		{layout.PreviewSegmentPattern(), "preview/segment-%06d.ts"},
+		{layout.PreviewPlaylist(), "preview/index.m3u8"},
+		{layout.PreviewDir(), "preview"},
 		{layout.TmpFFmpegAudioStats(), "ffmpeg-audio-stats.txt"},
 		{layout.TmpFFmpegProgress(), "ffmpeg-progress.txt"},
 		{layout.TmpDiscordOpusSDP(), "discord-opus.sdp"},
@@ -709,8 +724,7 @@ func redactArchivePaths(layout archive.Layout, args []string) []string {
 	out := append([]string(nil), args...)
 	for i := range out {
 		for _, replacement := range replacements {
-			out[i] = strings.ReplaceAll(out[i], replacement.from, replacement.to)
-			out[i] = strings.ReplaceAll(out[i], filepath.ToSlash(replacement.from), replacement.to)
+			out[i] = ffmpeg.RedactTeePath(out[i], replacement.from, replacement.to)
 		}
 	}
 	return out

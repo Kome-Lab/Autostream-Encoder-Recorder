@@ -34,6 +34,18 @@ func (l Layout) FinalMKV() string {
 	return filepath.Join(l.TmpDir(), "final.mkv")
 }
 
+func (l Layout) PreviewDir() string {
+	return filepath.Join(l.TmpDir(), "preview")
+}
+
+func (l Layout) PreviewPlaylist() string {
+	return filepath.Join(l.PreviewDir(), PreviewPlaylistName)
+}
+
+func (l Layout) PreviewSegmentPattern() string {
+	return filepath.Join(l.PreviewDir(), "segment-%06d.ts")
+}
+
 func (l Layout) FinalMP4() string {
 	return filepath.Join(l.FinalDir(), "final.mp4")
 }

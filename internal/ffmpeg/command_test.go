@@ -3,6 +3,7 @@ package ffmpeg
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -84,6 +85,118 @@ func TestBuildDiscordAudioLiveArchiveArgsResolvesInternalInputTarget(t *testing.
 	if !strings.Contains(joined, "discord-opus.sdp") {
 		t.Fatalf("resolved SDP input missing: %#v", args)
 	}
+}
+
+func TestBuildLiveArchiveArgsWithPreviewAddsBoundedIsolatedHLS(t *testing.T) {
+	preview := `C:\Auto Stream\preview\index.m3u8`
+	args := BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(
+		"srt://input.example.com:9000",
+		"rtmp://127.0.0.1/autostream/stream-01",
+		`C:\Auto Stream\final.mkv`,
+		preview,
+		"",
+		"",
+		DefaultProfile(),
+	)
+	teeOutput := args[len(args)-1]
+	for _, want := range []string{
+		"[f=flv]",
+		"[f=matroska]",
+		"f=hls",
+		"onfail=ignore",
+		"use_fifo=1",
+		"fifo_options=",
+		"queue_size=1200",
+		"drop_pkts_on_overflow=1",
+		"hls_time=2",
+		"hls_list_size=6",
+		"hls_delete_threshold=1",
+		"hls_flags=delete_segments+independent_segments+temp_file",
+		"hls_segment_filename=",
+		"segment-%06d.ts",
+	} {
+		if !strings.Contains(teeOutput, want) {
+			t.Fatalf("missing %q in tee output: %s", want, teeOutput)
+		}
+	}
+	if strings.Count(teeOutput, "onfail=ignore") != 1 {
+		t.Fatalf("only the preview slave may ignore failures: %s", teeOutput)
+	}
+	if strings.Contains(teeOutput, "omit_endlist") {
+		t.Fatalf("preview must allow ENDLIST on graceful shutdown: %s", teeOutput)
+	}
+}
+
+func TestBuildDiscordAudioLiveArchiveArgsWithPreviewAddsHLS(t *testing.T) {
+	args := BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(
+		`C:\tmp\discord-opus.sdp`,
+		"rtmp://127.0.0.1/autostream/stream-01",
+		`C:\archives\final.mkv`,
+		`C:\archives\preview\index.m3u8`,
+		"",
+		"",
+		DefaultProfile(),
+	)
+	if teeOutput := args[len(args)-1]; !strings.Contains(teeOutput, "[f=hls:onfail=ignore:") {
+		t.Fatalf("discord audio output is missing isolated HLS preview: %s", teeOutput)
+	}
+}
+
+func TestTeeEscapingSurvivesBothParserLevels(t *testing.T) {
+	value := `C:/Auto Stream/[preview]/O'Brien/segment-%06d.ts`
+	encoded := escapeTeeOptionValue(value)
+	if got := decodeBackslashEscapes(t, decodeBackslashEscapes(t, encoded)); got != value {
+		t.Fatalf("second-level tee option escaping changed path: got %q want %q (encoded %q)", got, value, encoded)
+	}
+	if strings.Contains(encoded, "C:/") || strings.Contains(encoded, "O'Brien") {
+		t.Fatalf("tee option special characters were not escaped at both levels: %q", encoded)
+	}
+
+	urlEncoded := escapeTeeSlaveURL(value)
+	if got := decodeBackslashEscapes(t, urlEncoded); got != value {
+		t.Fatalf("tee slave URL escaping changed path: got %q want %q (encoded %q)", got, value, urlEncoded)
+	}
+}
+
+func TestRedactTeePathHandlesWindowsAndSecondLevelEscaping(t *testing.T) {
+	path := `C:\Auto Stream\preview\segment-%06d.ts`
+	argument := "prefix=" + escapeTeeOptionValue(filepath.ToSlash(filepath.Clean(path)))
+	redacted := RedactTeePath(argument, path, "segment-%06d.ts")
+	if strings.Contains(redacted, "Auto") || strings.Contains(redacted, "C:") {
+		t.Fatalf("tee-escaped absolute path leaked after redaction: %q", redacted)
+	}
+	if !strings.Contains(redacted, "segment-%06d.ts") {
+		t.Fatalf("logical preview name missing after redaction: %q", redacted)
+	}
+}
+
+func TestRedactTeeValueHandlesEscapedQuote(t *testing.T) {
+	sensitive := "stream-key-with-'quote"
+	argument := "[f=flv]rtmps://youtube.example.com/live2/" + escapeTeeSlaveURL(sensitive)
+	redacted := RedactTeeValue(argument, sensitive, "<REDACTED>")
+	if strings.Contains(redacted, "stream-key") || strings.Contains(redacted, "quote") {
+		t.Fatalf("tee-escaped sensitive value leaked after redaction: %q", redacted)
+	}
+	if !strings.Contains(redacted, "<REDACTED>") {
+		t.Fatalf("redaction marker missing: %q", redacted)
+	}
+}
+
+func decodeBackslashEscapes(t *testing.T, value string) string {
+	t.Helper()
+	var decoded strings.Builder
+	for index := 0; index < len(value); index++ {
+		if value[index] != '\\' {
+			decoded.WriteByte(value[index])
+			continue
+		}
+		index++
+		if index >= len(value) {
+			t.Fatalf("dangling escape in %q", value)
+		}
+		decoded.WriteByte(value[index])
+	}
+	return decoded.String()
 }
 
 func TestValidateInputTargetAllowsExpectedProtocols(t *testing.T) {

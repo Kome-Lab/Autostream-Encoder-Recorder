@@ -205,10 +205,18 @@ func NewServerWithManagersAndSecretResolver(serviceType string, processManager *
 }
 
 func NewServerWithManagersAndRuntimeConfig(serviceType string, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver, runtimeConfig RuntimeConfigProvider) http.Handler {
-	if eventManager == nil {
-		eventManager = workerevents.NewManager("/var/lib/autostream/archives")
+	processArchiveRoot := "/var/lib/autostream/archives"
+	if processManager != nil && strings.TrimSpace(processManager.ArchiveRoot) != "" {
+		processArchiveRoot = processManager.ArchiveRoot
 	}
-	audioManager := audioingest.NewManager(eventManager.ArchiveRoot)
+	if eventManager == nil {
+		eventManager = workerevents.NewManager(processArchiveRoot)
+	}
+	eventArchiveRoot := processArchiveRoot
+	if strings.TrimSpace(eventManager.ArchiveRoot) != "" {
+		eventArchiveRoot = eventManager.ArchiveRoot
+	}
+	audioManager := audioingest.NewManager(eventArchiveRoot)
 	audioManager.MaxPackets = envInt("AUDIO_INGEST_MAX_PACKETS", defaultDiscordAudioMaxPackets)
 	audioManager.MaxOpusSize = envInt("AUDIO_INGEST_MAX_OPUS_BYTES", defaultDiscordAudioMaxOpusBytes)
 	mux := http.NewServeMux()
@@ -229,6 +237,7 @@ func NewServerWithManagersAndRuntimeConfig(serviceType string, processManager *s
 	mux.HandleFunc("POST /streams/start", startStream(processManager, audioManager, verifier, resolver, runtimeConfig))
 	mux.HandleFunc("POST /streams/{id}/stop", stopStream(processManager, audioManager, verifier))
 	mux.HandleFunc("GET /streams/{id}/process-status", streamProcessStatus(processManager, verifier))
+	mux.HandleFunc("GET /streams/{id}/preview/{name}", streamPreview(processArchiveRoot, verifier))
 	mux.HandleFunc("GET /streams/{id}/audio-status", discordAudioStatus(audioManager, verifier))
 	mux.HandleFunc("POST /streams/package", packageStream(verifier, resolver, runtimeConfig))
 	mux.HandleFunc("GET /streams/{id}/artifacts/{name}", downloadArchiveArtifact(eventManager.ArchiveRoot, verifier))
@@ -800,6 +809,39 @@ func publicProcessSnapshot(snapshot streamproc.Snapshot) processSnapshotResponse
 		StoppedAtJST: snapshot.StoppedAtJST,
 		Archive:      snapshot.Archive,
 		Error:        snapshot.Error,
+	}
+}
+
+func streamPreview(archiveRoot string, verifier TokenVerifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		layout, err := archive.NewLayout(archiveRoot, r.PathValue("id"))
+		if err != nil || !archive.IsPreviewFileName(r.PathValue("name")) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_preview_path"})
+			return
+		}
+		file, info, err := archive.OpenPreviewFile(layout, r.PathValue("name"))
+		if errors.Is(err, os.ErrNotExist) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"code": "preview_not_found"})
+			return
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_preview_file"})
+			return
+		}
+		defer file.Close()
+
+		w.Header().Set("Vary", "Authorization")
+		if r.PathValue("name") == archive.PreviewPlaylistName {
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			w.Header().Set("Cache-Control", "no-store")
+		} else {
+			w.Header().Set("Content-Type", "video/mp2t")
+			w.Header().Set("Cache-Control", "private, max-age=30")
+		}
+		http.ServeContent(w, r, r.PathValue("name"), info.ModTime(), file)
 	}
 }
 

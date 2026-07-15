@@ -100,6 +100,11 @@ func TestManagerStartWritesMetadataAndMasksStreamKey(t *testing.T) {
 	if !strings.Contains(joinedArgs, "ffmpeg-progress.txt") {
 		t.Fatalf("expected ffmpeg progress file in args: %s", joinedArgs)
 	}
+	for _, want := range []string{"f=hls", "onfail=ignore", "hls_time=2", "hls_list_size=6", "segment-%06d.ts"} {
+		if !strings.Contains(joinedArgs, want) {
+			t.Fatalf("expected HLS preview option %q in args: %s", want, joinedArgs)
+		}
+	}
 	layout, err := archive.NewLayout(root, "stream-01")
 	if err != nil {
 		t.Fatal(err)
@@ -114,11 +119,17 @@ func TestManagerStartWritesMetadataAndMasksStreamKey(t *testing.T) {
 	if !strings.Contains(string(body), `rtsp://input.example.com/\u003cREDACTED\u003e`) {
 		t.Fatalf("expected masked input URL in metadata: %s", string(body))
 	}
+	if !strings.Contains(string(body), "preview/index.m3u8") || !strings.Contains(string(body), "preview/segment-%06d.ts") {
+		t.Fatalf("expected logical preview paths in metadata: %s", string(body))
+	}
 	if strings.Contains(string(body), root) || strings.Contains(string(body), `\tmp\`) || strings.Contains(string(body), `/tmp/`) {
 		t.Fatalf("local archive path leaked in start metadata: %s", string(body))
 	}
-	if snapshot.Archive["recording_mkv"] != "final.mkv" || strings.Contains(snapshot.Archive["recording_mkv"], root) {
+	if snapshot.Archive["recording_mkv"] != "final.mkv" || snapshot.Archive["preview_playlist"] != "preview/index.m3u8" || strings.Contains(snapshot.Archive["recording_mkv"], root) {
 		t.Fatalf("snapshot archive should expose logical artifact names only: %#v", snapshot.Archive)
+	}
+	if info, err := os.Lstat(layout.PreviewDir()); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("expected non-symlink preview directory before FFmpeg start: info=%v err=%v", info, err)
 	}
 	if _, err := os.Stat(layout.TmpLogs()); err != nil {
 		t.Fatalf("expected logs: %v", err)
@@ -319,6 +330,39 @@ func TestManagerRejectsFinalMKVSymlinkBeforeStartingFFmpeg(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsPreviewDirectorySymlinkBeforeStartingFFmpeg(t *testing.T) {
+	root := t.TempDir()
+	layout, err := archive.NewLayout(root, "stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.EnsureDirNoSymlinks(root, layout.TmpDir()); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside-preview")
+	if err := os.MkdirAll(outside, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, layout.PreviewDir()); err != nil {
+		t.Skipf("symlink creation is not available in this environment: %v", err)
+	}
+	starter := &fakeStarter{}
+	manager := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	_, err = manager.Start(lifecycle.StreamJob{
+		StreamID:  "stream-01",
+		Name:      "Morning Stream",
+		InputURL:  "srt://input.example.com:9000",
+		RTMPURL:   "rtmps://youtube.example.com/live2",
+		StreamKey: "key",
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected preview directory symlink rejection, got %v", err)
+	}
+	if starter.process != nil {
+		t.Fatalf("ffmpeg should not start with a symlinked preview directory: %#v", starter.process)
+	}
+}
+
 func TestManagerReservesFinalMKVBeforeStartingFFmpeg(t *testing.T) {
 	root := t.TempDir()
 	starter := &fakeStarter{}
@@ -431,13 +475,25 @@ func TestNewManagerFromEnvAllowsConfiguredInputAllowedHosts(t *testing.T) {
 }
 
 func TestManagerRejectsDuplicateRunningStream(t *testing.T) {
-	manager := &Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: &fakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	root := t.TempDir()
+	manager := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &fakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
 	job := lifecycle.StreamJob{StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key"}
 	if _, err := manager.Start(job); err != nil {
 		t.Fatal(err)
 	}
+	layout, err := archive.NewLayout(root, job.StreamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activePlaylist := []byte("#EXTM3U\n#EXTINF:2,\nsegment-000001.ts\n")
+	if err := os.WriteFile(layout.PreviewPlaylist(), activePlaylist, 0o640); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := manager.Start(job); !errors.Is(err, ErrAlreadyRunning) {
 		t.Fatalf("expected ErrAlreadyRunning, got %v", err)
+	}
+	if body, err := os.ReadFile(layout.PreviewPlaylist()); err != nil || string(body) != string(activePlaylist) {
+		t.Fatalf("duplicate start modified active preview: body=%q err=%v", body, err)
 	}
 }
 

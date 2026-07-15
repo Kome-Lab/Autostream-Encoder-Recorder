@@ -218,7 +218,41 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	if err := m.validateInputForLayout(job, layout); err != nil {
 		return Snapshot{}, err
 	}
+	startedAt := job.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	job.StartedAt = startedAt
+
+	m.mu.Lock()
+	if m.processes == nil {
+		m.processes = map[string]*trackedProcess{}
+	}
+	if existing, ok := m.processes[job.StreamID]; ok {
+		switch existing.snapshot.Status {
+		case "starting", "running", "stopping", "packaging":
+			m.mu.Unlock()
+			return Snapshot{}, ErrAlreadyRunning
+		}
+	}
+	m.processes[job.StreamID] = &trackedProcess{snapshot: Snapshot{StreamID: job.StreamID, Name: job.Name, Status: "starting", StartedAtJST: startedAt.In(jst()).Format(time.RFC3339)}, job: job}
+	m.mu.Unlock()
+	reservationActive := true
+	defer func() {
+		if !reservationActive {
+			return
+		}
+		m.mu.Lock()
+		if tracked, ok := m.processes[job.StreamID]; ok && tracked.snapshot.Status == "starting" {
+			delete(m.processes, job.StreamID)
+		}
+		m.mu.Unlock()
+	}()
+
 	if err := ensureLiveArchiveDir(layout.RootDir, filepath.Join(layout.RootDir, "tmp"), layout.TmpDir()); err != nil {
+		return Snapshot{}, err
+	}
+	if err := archive.PreparePreviewDir(layout); err != nil {
 		return Snapshot{}, err
 	}
 	if err := archive.ReserveOutputFileNoSymlink(layout.RootDir, layout.FinalMKV()); err != nil {
@@ -233,33 +267,14 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	if profile.Width == 0 {
 		profile = ffmpeg.DefaultProfile()
 	}
-	args := lifecycle.BuildLiveArgsToOutputTarget(job, outputTarget, layout.FinalMKV(), layout.TmpFFmpegProgress(), layout.TmpFFmpegAudioStats(), profile)
+	args := lifecycle.BuildLiveArgsToOutputTargetWithPreview(job, outputTarget, layout.FinalMKV(), layout.PreviewPlaylist(), layout.TmpFFmpegProgress(), layout.TmpFFmpegAudioStats(), profile)
 	starter := m.Starter
 	if starter == nil {
 		starter = ExecStarter{}
 	}
-	startedAt := job.StartedAt
-	if startedAt.IsZero() {
-		startedAt = time.Now().UTC()
-	}
-	job.StartedAt = startedAt
-
-	m.mu.Lock()
-	if m.processes == nil {
-		m.processes = map[string]*trackedProcess{}
-	}
-	if existing, ok := m.processes[job.StreamID]; ok && (existing.snapshot.Status == "starting" || existing.snapshot.Status == "running") {
-		m.mu.Unlock()
-		return Snapshot{}, ErrAlreadyRunning
-	}
-	m.processes[job.StreamID] = &trackedProcess{snapshot: Snapshot{StreamID: job.StreamID, Name: job.Name, Status: "starting", StartedAtJST: startedAt.In(jst()).Format(time.RFC3339)}, job: job}
-	m.mu.Unlock()
 
 	process, err := starter.Start(context.Background(), m.ffmpegBin(), args)
 	if err != nil {
-		m.mu.Lock()
-		delete(m.processes, job.StreamID)
-		m.mu.Unlock()
 		return Snapshot{}, err
 	}
 	snapshot := Snapshot{
@@ -272,9 +287,6 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	}
 	if err := writeStartMetadata(layout, job, snapshot, args, m.ffmpegBin()); err != nil {
 		_ = process.Kill()
-		m.mu.Lock()
-		delete(m.processes, job.StreamID)
-		m.mu.Unlock()
 		return Snapshot{}, err
 	}
 
@@ -282,6 +294,7 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	m.mu.Lock()
 	m.processes[job.StreamID] = &trackedProcess{snapshot: snapshot, process: process, job: job, done: done}
 	m.mu.Unlock()
+	reservationActive = false
 
 	m.report(observability.Signal{
 		Type:      "event",
@@ -290,7 +303,8 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 		Status:    "running",
 		Timestamp: time.Now().UTC(),
 		Attributes: map[string]any{
-			"recording_mkv": "final.mkv",
+			"recording_mkv":    "final.mkv",
+			"preview_playlist": "preview/index.m3u8",
 		},
 	})
 	go m.wait(job.StreamID, process, done)

@@ -16,6 +16,12 @@ func TestLayout(t *testing.T) {
 	if layout.FinalMP4() != filepath.Clean("/var/lib/autostream/archives/final/stream-01/final.mp4") {
 		t.Fatalf("unexpected final mp4: %s", layout.FinalMP4())
 	}
+	if layout.PreviewPlaylist() != filepath.Clean("/var/lib/autostream/archives/tmp/stream-01/preview/index.m3u8") {
+		t.Fatalf("unexpected preview playlist: %s", layout.PreviewPlaylist())
+	}
+	if layout.PreviewSegmentPattern() != filepath.Clean("/var/lib/autostream/archives/tmp/stream-01/preview/segment-%06d.ts") {
+		t.Fatalf("unexpected preview segment pattern: %s", layout.PreviewSegmentPattern())
+	}
 }
 
 func TestLayoutRejectsUnsafeStreamID(t *testing.T) {

@@ -8,7 +8,7 @@ AutoStream の Encoder/Recorder service です。Control Panel から stream job
 - stream job の start / stop / retry-upload
 - Discord Opus audio ingest bridge
 - Worker event の sidecar 保存
-- FFmpeg による live output と MKV 録画
+- FFmpeg の同一 encode による live output、MKV 録画、HLS preview
 - `final.mkv -> final.mp4` packaging
 - Google Drive OAuth destination への upload
 - Control Panel からの local archive artifact download / rename / delete
@@ -74,6 +74,14 @@ Google Drive archive upload には env fallback を使いません。Control Pan
 
 Encoder/Recorder は Control Panel へ報告した final artifact を `AUTOSTREAM_ARCHIVE_DIR/final/<stream_id>/` 配下に一定期間保持します。Control Panel は割り当て済みの primary encoder に service token 付きで接続し、録画ファイルの download、rename、delete を行います。対象ファイル名は安全な basename と `.mp4`、`.mkv`、`.json`、`.jsonl`、`.vtt` に限定し、symlink と archive root 外への移動は拒否します。
 
+## HLS Preview
+
+live FFmpeg process は RTMP と `final.mkv` に使う同一 encode packet を tee し、`AUTOSTREAM_ARCHIVE_DIR/tmp/<stream_id>/preview/` に約 2 秒単位、最大 6 segment の rolling HLS preview を生成します。preview slave だけを有限 FIFO queue に分離し、`onfail=ignore` と queue overflow 時の packet drop を設定するため、preview の stall/open/write 障害では RTMP と録画を停止しません。正常終了時は playlist に `#EXT-X-ENDLIST` を書きます。
+
+Control Panel は service token を付けて `GET /streams/{id}/preview/index.m3u8` と、playlist 内の相対 URL が指す `GET /streams/{id}/preview/segment-NNNNNN.ts` を proxy できます。playlist は `Cache-Control: no-store`、segment は `Cache-Control: private, max-age=30` です。segment endpoint は byte range に対応するため、Control Panel の proxy でも `Authorization` と `Range` を転送し、playlist と segment の同じ相対 path 構造を維持してください。VLC などの player にはこの Control Panel proxy URL を渡します。
+
+preview endpoint は `Authorization: Bearer <service-token>` を必須とし、上記 2 種類以外の名前、path traversal、symlink、非 regular file を拒否します。process status と start metadata にはローカル絶対 path を返さず、`preview/index.m3u8` だけを論理名として公開します。
+
 ## Input Policy
 
 HLS direct input は既定で無効です。必要な場合だけ明示的に opt-in し、入力 URL の allowlist と DNS 解決後の private network 拒否を維持してください。
@@ -100,6 +108,7 @@ Detailed deployment, archive, and security documentation is maintained in the `a
 - stream key、OAuth refresh token、Drive credential、webhook URL は raw でログに出しません。
 - Google Drive config を表示する場合も configured status と fingerprint だけを使います。
 - FFmpeg は shell string ではなく argument array で起動します。
+- HLS preview の playlist と segment は stream 固有の `tmp` directory に限定し、open 前後に regular file と symlink の状態を再検証します。
 - archive path は `AUTOSTREAM_ARCHIVE_DIR` 配下に制限し、Control Panel からの録画ファイル操作も `final/<stream_id>/<file>` だけを対象にします。
 - service token は Control Panel 側で hash 保存し、再表示しません。
 - runtime config は service assignment と service type を検証してから取得します。

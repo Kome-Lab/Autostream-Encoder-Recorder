@@ -106,6 +106,178 @@ func TestArchiveArtifactEndpointsRequireTokenAndSafeFinalFile(t *testing.T) {
 	}
 }
 
+func TestPreviewEndpointRequiresTokenAndServesHLSWithSafeHeaders(t *testing.T) {
+	root := t.TempDir()
+	layout, err := archive.NewLayout(root, "stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.PreparePreviewDir(layout); err != nil {
+		t.Fatal(err)
+	}
+	playlist := []byte("#EXTM3U\n#EXTINF:2.0,\nsegment-000001.ts\n")
+	segment := []byte{0, 1, 2, 3, 4, 5}
+	if err := os.WriteFile(layout.PreviewPlaylist(), playlist, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout.PreviewDir(), "segment-000001.ts"), segment, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServerWithManagers(
+		"encoder_recorder",
+		&streamproc.Manager{ArchiveRoot: root},
+		nil,
+		TokenVerifier{PlainToken: "preview-token"},
+	)
+
+	unauthorized := httptest.NewRecorder()
+	server.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/streams/stream-01/preview/index.m3u8", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("expected preview auth failure, got %d: %s", unauthorized.Code, unauthorized.Body.String())
+	}
+	invalidTokenRequest := httptest.NewRequest(http.MethodGet, "/streams/stream-01/preview/index.m3u8", nil)
+	invalidTokenRequest.Header.Set("Authorization", "Bearer wrong-token")
+	invalidTokenResponse := httptest.NewRecorder()
+	server.ServeHTTP(invalidTokenResponse, invalidTokenRequest)
+	if invalidTokenResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("expected invalid preview token rejection, got %d: %s", invalidTokenResponse.Code, invalidTokenResponse.Body.String())
+	}
+
+	playlistRequest := httptest.NewRequest(http.MethodGet, "/streams/stream-01/preview/index.m3u8", nil)
+	playlistRequest.Header.Set("Authorization", "Bearer preview-token")
+	playlistResponse := httptest.NewRecorder()
+	server.ServeHTTP(playlistResponse, playlistRequest)
+	if playlistResponse.Code != http.StatusOK || playlistResponse.Body.String() != string(playlist) {
+		t.Fatalf("unexpected playlist response: status=%d body=%q", playlistResponse.Code, playlistResponse.Body.String())
+	}
+	if got := playlistResponse.Header().Get("Content-Type"); got != "application/vnd.apple.mpegurl" {
+		t.Fatalf("unexpected playlist Content-Type: %q", got)
+	}
+	if got := playlistResponse.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("unexpected playlist Cache-Control: %q", got)
+	}
+	if got := playlistResponse.Header().Get("Vary"); got != "Authorization" {
+		t.Fatalf("unexpected playlist Vary: %q", got)
+	}
+
+	segmentRequest := httptest.NewRequest(http.MethodGet, "/streams/stream-01/preview/segment-000001.ts", nil)
+	segmentRequest.Header.Set("Authorization", "Bearer preview-token")
+	segmentRequest.Header.Set("Range", "bytes=1-3")
+	segmentResponse := httptest.NewRecorder()
+	server.ServeHTTP(segmentResponse, segmentRequest)
+	if segmentResponse.Code != http.StatusPartialContent || !bytes.Equal(segmentResponse.Body.Bytes(), segment[1:4]) {
+		t.Fatalf("unexpected ranged segment response: status=%d body=%v", segmentResponse.Code, segmentResponse.Body.Bytes())
+	}
+	if got := segmentResponse.Header().Get("Content-Type"); got != "video/mp2t" {
+		t.Fatalf("unexpected segment Content-Type: %q", got)
+	}
+	if got := segmentResponse.Header().Get("Cache-Control"); got != "private, max-age=30" {
+		t.Fatalf("unexpected segment Cache-Control: %q", got)
+	}
+	if got := segmentResponse.Header().Get("Content-Range"); got != "bytes 1-3/6" {
+		t.Fatalf("unexpected segment Content-Range: %q", got)
+	}
+}
+
+func TestPreviewEndpointUsesProcessManagerArchiveRoot(t *testing.T) {
+	processRoot := t.TempDir()
+	eventRoot := t.TempDir()
+	layout, err := archive.NewLayout(processRoot, "stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.PreparePreviewDir(layout); err != nil {
+		t.Fatal(err)
+	}
+	playlist := []byte("#EXTM3U\n#EXTINF:2.0,\nsegment-000001.ts\n")
+	if err := os.WriteFile(layout.PreviewPlaylist(), playlist, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServerWithManagersAndRuntimeConfig(
+		"encoder_recorder",
+		&streamproc.Manager{ArchiveRoot: processRoot},
+		workerevents.NewManager(eventRoot),
+		TokenVerifier{PlainToken: "preview-token"},
+		nil,
+		nil,
+	)
+	req := httptest.NewRequest(http.MethodGet, "/streams/stream-01/preview/index.m3u8", nil)
+	req.Header.Set("Authorization", "Bearer preview-token")
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK || !bytes.Equal(res.Body.Bytes(), playlist) {
+		t.Fatalf("preview did not use process manager archive root: status=%d body=%q", res.Code, res.Body.String())
+	}
+}
+
+func TestPreviewEndpointRejectsNamesTraversalAndMissingFiles(t *testing.T) {
+	root := t.TempDir()
+	verifier := TokenVerifier{PlainToken: "preview-token"}
+	handler := streamPreview(root, verifier)
+
+	request := func(streamID, name, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/preview", nil)
+		req.SetPathValue("id", streamID)
+		req.SetPathValue("name", name)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+
+	if response := request("../outside", "index.m3u8", ""); response.Code != http.StatusUnauthorized {
+		t.Fatalf("authorization must run before path validation, got %d", response.Code)
+	}
+	for _, test := range []struct {
+		streamID string
+		name     string
+	}{
+		{streamID: "../outside", name: "index.m3u8"},
+		{streamID: "stream-01", name: "../index.m3u8"},
+		{streamID: "stream-01", name: "other.m3u8"},
+		{streamID: "stream-01", name: "segment-00001.ts"},
+		{streamID: "stream-01", name: "segment-000001.ts.tmp"},
+	} {
+		if response := request(test.streamID, test.name, "preview-token"); response.Code != http.StatusBadRequest {
+			t.Errorf("expected invalid preview path rejection for stream=%q name=%q, got %d", test.streamID, test.name, response.Code)
+		}
+	}
+	if response := request("stream-01", "segment-000001.ts", "preview-token"); response.Code != http.StatusNotFound {
+		t.Fatalf("expected missing preview file response, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPreviewEndpointRejectsSymlinkFile(t *testing.T) {
+	root := t.TempDir()
+	layout, err := archive.NewLayout(root, "stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.PreparePreviewDir(layout); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside.ts")
+	if err := os.WriteFile(outside, []byte("outside"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(layout.PreviewDir(), "segment-000001.ts")); err != nil {
+		t.Skipf("symlink creation is not available in this environment: %v", err)
+	}
+	server := NewServerWithManagers("encoder_recorder", &streamproc.Manager{ArchiveRoot: root}, nil, TokenVerifier{PlainToken: "preview-token"})
+	req := httptest.NewRequest(http.MethodGet, "/streams/stream-01/preview/segment-000001.ts", nil)
+	req.Header.Set("Authorization", "Bearer preview-token")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, req)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected preview symlink rejection, got %d: %s", response.Code, response.Body.String())
+	}
+	if body, readErr := os.ReadFile(outside); readErr != nil || string(body) != "outside" {
+		t.Fatalf("symlink target must not be served or modified: body=%q err=%v", body, readErr)
+	}
+}
+
 func TestResolveArchiveRuntimeSecrets(t *testing.T) {
 	job := lifecycle.StreamJob{
 		StreamID: "stream-01",
