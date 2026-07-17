@@ -401,13 +401,13 @@ func (c Config) Validate() error {
 	if err := validateHTTPURL(c.ControlPanelURL, "CONTROL_PANEL_URL"); err != nil {
 		return err
 	}
-	if err := validateHTTPURL(c.ServicePublicURL, "SERVICE_PUBLIC_URL"); err != nil {
+	if err := validateHTTPURL(c.ServicePublicURL, "SERVICE_PUBLIC_URL", "encoder-recorder"); err != nil {
 		return err
 	}
 	return nil
 }
 
-func validateHTTPURL(raw, name string) error {
+func validateHTTPURL(raw, name string, allowedHTTPHosts ...string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return errors.New(name + " must be an absolute URL")
@@ -421,10 +421,20 @@ func validateHTTPURL(raw, name string) error {
 	if parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New(name + " must not include query or fragment")
 	}
-	if parsed.Scheme == "http" && !isLocalDevHost(parsed.Hostname()) {
+	if parsed.Scheme == "http" && !isLocalDevHost(parsed.Hostname()) && !isAllowedHTTPHost(parsed.Hostname(), allowedHTTPHosts) {
 		return errors.New(name + " must use https for remote hosts")
 	}
 	return nil
+}
+
+func isAllowedHTTPHost(host string, allowed []string) bool {
+	normalized := strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	for _, candidate := range allowed {
+		if normalized == strings.Trim(strings.ToLower(strings.TrimSpace(candidate)), "[]") {
+			return true
+		}
+	}
+	return false
 }
 
 func isLocalDevHost(host string) bool {

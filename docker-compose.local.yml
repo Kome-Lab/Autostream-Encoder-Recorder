@@ -2,27 +2,15 @@ services:
   encoder-recorder:
     environment:
       AUTOSTREAM_NODE_CONFIG: /etc/autostream-encoder-recorder/config.yml
+      AUTOSTREAM_ENV: development
+      AUTOSTREAM_OUTPUT_RELAY_URL: ""
       SERVICE_VERSION: 0.1.0-local
       CONTROL_PANEL_HEARTBEAT_INTERVAL_SEC: 5
-      ENCODER_WORKER_EVENTS_TOKEN_SHA256: a0e6041a5315ef8d9da50741b123686402c79144c799a54cec74e4caf51f734e
-      ENCODER_DISCORD_AUDIO_TOKEN_SHA256: 5080094e5681df3c6959ee8c8110a1aa94bb5bcaa340977438cc21ed7cb6b5c5
-      AUTOSTREAM_REQUIRE_SIGNED_INGEST_TOKENS: "true"
-      AUTOSTREAM_ALLOW_HOSTNAME_INPUTS: "false"
       AUTOSTREAM_BIND_ADDR: 0.0.0.0:8080
-      AUTOSTREAM_DATA_DIR: /var/lib/autostream/encoder-recorder
-      AUTOSTREAM_ARCHIVE_DIR: /var/lib/autostream/archives
-      FFMPEG_BIN: ffmpeg
-      YOUTUBE_RTMP_URL: rtmps://example.youtube.com/live2
-      YOUTUBE_STREAM_KEY: dev-only-youtube-stream-key
-      GOOGLE_DRIVE_AUTH_MODE: ""
-      GOOGLE_APPLICATION_CREDENTIALS: ""
-      GOOGLE_DRIVE_FOLDER_ID: ""
-      GDRIVE_BASE_PATH: AutoStream
-      TZ: Asia/Tokyo
     ports: !override
       - "8081:8080"
     volumes:
-      - ./config/config.yml:/etc/autostream-encoder-recorder/config.yml:ro
+      - ./config:/etc/autostream-encoder-recorder
       - encoder-archives:/var/lib/autostream/archives
 
 volumes:

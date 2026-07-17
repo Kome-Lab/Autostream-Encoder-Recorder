@@ -1,5 +1,8 @@
 bin/
 coverage.out
+.codex-go-cache/
+.code-go*/
 .env
 *.log
 relay/nginx-rtmp.conf
+config/config.yml

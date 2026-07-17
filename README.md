@@ -16,28 +16,22 @@ AutoStream の Encoder/Recorder service です。Control Panel から stream job
 
 ## Control Panel 管理
 
-本番運用では YouTube output、Google Drive destination、Archive profile、OAuth connected account、runtime secret は Control Panel で管理します。env は service が Control Panel へ接続するための bootstrap に限定します。
+本番運用では Node のID、Control Panel接続先、Node Runtime Token、stream ingest署名鍵、YouTube output、Google Drive destination、Archive profile、OAuth connected account、runtime secretをControl Panelで管理します。Node登録後に表示されるAuto Configureコマンドを対象hostで一度実行すると、Node固有値は`config.yml`へ保存されます。tokenをenvへ転記する必要はありません。
+
+Nodeを作る前に、Control Panel envの`AUTOSTREAM_SECRET_ENCRYPTION_KEY`と`AUTOSTREAM_STREAM_INGEST_SIGNING_KEY`へ、それぞれ32 byte以上のrandom値を設定してください。短い値やplaceholderのままではNode作成・再設定を拒否します。
 
 ```text
-SERVICE_ID=encoder-main-1
-SERVICE_NAME=Encoder Main 1
-SERVICE_PUBLIC_URL=https://encoder-1.example.com
-CONTROL_PANEL_URL=https://control.example.com
-CONTROL_PANEL_TOKEN=<SERVICE_TOKEN>
-SERVICE_CONTROL_TOKEN_SHA256=<SHA256_FOR_INBOUND_CONTROL>
-AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG=true
+AUTOSTREAM_NODE_CONFIG=/etc/autostream-encoder-recorder/config.yml
 AUTOSTREAM_ENV=production
-AUTOSTREAM_REQUIRE_OUTPUT_RELAY=true
+AUTOSTREAM_BIND_ADDR=127.0.0.1:8081
 AUTOSTREAM_OUTPUT_RELAY_URL=rtmp://127.0.0.1/autostream/{stream_id}
-AUTOSTREAM_DATA_DIR=/var/lib/autostream/encoder-recorder
-AUTOSTREAM_ARCHIVE_DIR=/var/lib/autostream/archives
-FFMPEG_BIN=ffmpeg
-TZ=Asia/Tokyo
 ```
 
-`AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG=true` の場合、YouTube stream key、RTMPS URL、Drive folder ID などの operational secret は env fallback から読みません。Control Panel から受け取った stream runtime config だけを使います。
+`AUTOSTREAM_ARCHIVE_DIR=/var/lib/autostream/archives`、`FFMPEG_BIN=ffmpeg`、`TZ`は必要なhostだけで上書きします。上記はコード既定値と重複するため標準envには不要です。
 
-`AUTOSTREAM_ENV=production` または `AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG=true` の起動では、`CONTROL_PANEL_URL` と `CONTROL_PANEL_TOKEN` が未設定、service registration が失敗、または runtime config fetch が失敗した場合に process を fail closed します。handler で request を拒否するだけでなく、事前登録、heartbeat、runtime config の Control Panel 境界が成立しない service を production ready として起動しません。
+`AUTOSTREAM_ENV=production`ではControl Panel runtime configとoutput relayが自動的に必須になります。signed ingest tokenは環境に関係なく既定で必須です。YouTube stream key、RTMPS URL、Drive folder IDなどのoperational secretはenv fallbackから読まず、Control Panelから受け取ったstream runtime configだけを使います。
+
+`AUTOSTREAM_NODE_CONFIG`が未作成の間はNode Agentがpendingとして待機します。Auto Configure後に`config.yml`が不正、service registrationが失敗、またはruntime config fetchが失敗した場合はfail closedします。
 
 Production mode では `/streams/start` と `/streams/dry-run` の request body に raw `stream_key` を含めると `raw_youtube_stream_key_not_allowed` で拒否します。Control Panel からは `stream_key_secret_name` と runtime secret resolve を使い、Encoder/Recorder の env や API response に YouTube stream key を残しません。
 
@@ -58,6 +52,16 @@ AUTOSTREAM_OUTPUT_RELAY_URL=rtmp://127.0.0.1/autostream/{stream_id}
 ```
 
 Docker production compose では `output-relay` sidecar を Encoder/Recorder と同じ network namespace で起動します。`relay/nginx-rtmp.conf.example` を `relay/nginx-rtmp.conf` にコピーし、YouTube stream key を置き換えてください。`relay/nginx-rtmp.conf` は `.gitignore` 済みです。
+
+Dockerでは先に`config` directoryを作成してcontainer userが書き込めるようにし、PanelのAuto Configure commandと同じ引数をone-shot containerで実行します。host向けの`sudo autostream-encoder-recorder`とDocker one-shotは代替手段であり、両方は実行しません。
+
+```bash
+cp .env.example .env
+mkdir -p config
+sudo chown 65532:65532 config
+docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm --no-deps encoder-recorder configure --panel-url "https://control.example.com" --token "<CONFIGURE_TOKEN>" --node "encoder-01" --config "/etc/autostream-encoder-recorder/config.yml"
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d encoder-recorder output-relay
+```
 
 host 配置では、同一 host の nginx-rtmp、SRS、または同等の relay を loopback だけで待ち受けさせてください。relay 設定ファイルは Git 管理外に置き、owner/read permission を限定します。
 
@@ -110,5 +114,5 @@ Detailed deployment, archive, and security documentation is maintained in the `a
 - FFmpeg は shell string ではなく argument array で起動します。
 - HLS preview の playlist と segment は stream 固有の `tmp` directory に限定し、open 前後に regular file と symlink の状態を再検証します。
 - archive path は `AUTOSTREAM_ARCHIVE_DIR` 配下に制限し、Control Panel からの録画ファイル操作も `final/<stream_id>/<file>` だけを対象にします。
-- service token は Control Panel 側で hash 保存し、再表示しません。
+- Configure TokenはControl Panel側でhash保存し、Node Runtime Tokenは暗号化保存します。どちらも通常画面では再表示しません。
 - runtime config は service assignment と service type を検証してから取得します。

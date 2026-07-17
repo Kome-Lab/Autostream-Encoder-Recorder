@@ -1787,12 +1787,32 @@ func TestTokenVerifierReadsNodeRuntimeTokenAfterStartup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	t.Setenv("AUTOSTREAM_NODE_CONFIG", path)
 	verifier := TokenVerifierFromEnv()
+	if !verifier.UseNodeRuntimeToken || verifier.PlainToken != "" || verifier.SHA256Hex != "" {
+		t.Fatalf("expected config-backed runtime token verifier: %#v", verifier)
+	}
 	if verifier.Verify("Bearer runtime-secret") {
 		t.Fatal("runtime token should not verify before config exists")
+	}
+	if check := serviceTokenPreflight(verifier); check.Status != "missing" || !strings.Contains(check.Message, "Auto Configure") {
+		t.Fatalf("pending node config should be actionable in preflight: %#v", check)
 	}
 	writeNodeConfigForVerifierTest(t, path, "encoder_recorder")
 	if !verifier.Verify("Bearer runtime-secret") {
 		t.Fatal("runtime token should verify after config is written")
+	}
+	if check := serviceTokenPreflight(verifier); check.Status != "ok" || !strings.Contains(check.Message, "Node Runtime Token") || strings.Contains(check.Message, "SERVICE_CONTROL_TOKEN") {
+		t.Fatalf("node runtime token should be identified accurately in preflight: %#v", check)
+	}
+	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), verifier)
+	statusReq := httptest.NewRequest(http.MethodGet, "/status", nil)
+	statusRes := httptest.NewRecorder()
+	handler.ServeHTTP(statusRes, statusReq)
+	var status Status
+	if err := json.NewDecoder(statusRes.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if statusRes.Code != http.StatusOK || status.ServiceID != "encoder-recorder-01" {
+		t.Fatalf("status should use node config identity: status=%d body=%s", statusRes.Code, statusRes.Body.String())
 	}
 	signedToken, err := ingesttoken.Issue("node-config-signing-key", ingesttoken.Claims{StreamID: "stream-01", ServiceID: "worker-01", ServiceType: "worker", Purpose: "worker_events", Audience: "encoder_recorder", ExpiresAt: time.Now().Add(time.Hour).Unix()})
 	if err != nil {
@@ -1800,6 +1820,46 @@ func TestTokenVerifierReadsNodeRuntimeTokenAfterStartup(t *testing.T) {
 	}
 	if !verifier.VerifyWorkerEvents("Bearer "+signedToken, "stream-01") {
 		t.Fatal("stream ingest signing key should be reloaded from node config")
+	}
+	writeNodeConfigForVerifierTestWithValues(t, path, "encoder_recorder", "rotated-runtime-secret", "rotated-node-config-signing-key")
+	if verifier.Verify("Bearer runtime-secret") || !verifier.Verify("Bearer rotated-runtime-secret") {
+		t.Fatal("Node Runtime Token rotation should take effect without accepting the previous token")
+	}
+	if verifier.VerifyWorkerEvents("Bearer "+signedToken, "stream-01") {
+		t.Fatal("previous stream ingest signing key must stop working after config rotation")
+	}
+	rotatedSignedToken, err := ingesttoken.Issue("rotated-node-config-signing-key", ingesttoken.Claims{StreamID: "stream-01", ServiceID: "worker-01", ServiceType: "worker", Purpose: "worker_events", Audience: "encoder_recorder", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verifier.VerifyWorkerEvents("Bearer "+rotatedSignedToken, "stream-01") {
+		t.Fatal("rotated stream ingest signing key should be loaded from node config")
+	}
+}
+
+func TestNodeConfigPathDisablesLegacyControlTokenEvenWhilePending(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	t.Setenv("AUTOSTREAM_NODE_CONFIG", path)
+	t.Setenv("SERVICE_CONTROL_TOKEN", "legacy-control-token")
+	verifier := TokenVerifierFromEnv()
+	if !verifier.UseNodeRuntimeToken || verifier.Verify("Bearer legacy-control-token") {
+		t.Fatal("configured node path must fail closed instead of accepting the legacy control token")
+	}
+	if check := serviceTokenPreflight(verifier); check.Status != "missing" || !strings.Contains(check.Message, "Auto Configure") {
+		t.Fatalf("pending node config must not report the legacy token as ready: %#v", check)
+	}
+	writeNodeConfigForVerifierTest(t, path, "encoder_recorder")
+	if verifier.Verify("Bearer legacy-control-token") {
+		t.Fatal("legacy control token must be disabled after node config becomes available")
+	}
+	if !verifier.Verify("Bearer runtime-secret") {
+		t.Fatal("Node Runtime Token should take precedence after Auto Configure")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if verifier.Verify("Bearer legacy-control-token") {
+		t.Fatal("legacy control token must not reactivate when node config disappears")
 	}
 }
 
@@ -1831,6 +1891,11 @@ func getAudioStatus(t *testing.T, handler http.Handler) struct {
 
 func writeNodeConfigForVerifierTest(t *testing.T, path, nodeType string) {
 	t.Helper()
+	writeNodeConfigForVerifierTestWithValues(t, path, nodeType, "runtime-secret", "node-config-signing-key")
+}
+
+func writeNodeConfigForVerifierTestWithValues(t *testing.T, path, nodeType, runtimeToken, signingKey string) {
+	t.Helper()
 	body := `panel:
   url: "https://panel.example.jp"
 node:
@@ -1843,9 +1908,9 @@ api:
   ssl_enabled: true
 auth:
   token_id: "token-id"
-  token: "runtime-secret"
+  token: "` + runtimeToken + `"
 stream_ingest:
-  signing_key: "node-config-signing-key"
+  signing_key: "` + signingKey + `"
 `
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)

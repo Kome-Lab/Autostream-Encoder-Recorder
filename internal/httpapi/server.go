@@ -39,6 +39,7 @@ type Status struct {
 type TokenVerifier struct {
 	PlainToken             string
 	SHA256Hex              string
+	UseNodeRuntimeToken    bool
 	WorkerEventsPlainToken string
 	WorkerEventsSHA256Hex  string
 	DiscordAudioPlainToken string
@@ -73,21 +74,21 @@ func TokenVerifierFromEnv() TokenVerifier {
 		IngestTokenSigningKey:  control.StreamIngestSigningKey(),
 		RequireSignedIngest:    envBool("AUTOSTREAM_REQUIRE_SIGNED_INGEST_TOKENS", true),
 	}
-	if verifier.PlainToken == "" && verifier.SHA256Hex == "" {
-		if token := control.NodeRuntimeTokenFromEnv(); token != "" {
-			sum := sha256.Sum256([]byte(token))
-			verifier.SHA256Hex = hex.EncodeToString(sum[:])
-		}
+	verifier.UseNodeRuntimeToken = control.NodeConfigPathFromEnv() != ""
+	if verifier.UseNodeRuntimeToken {
+		// Read the signing key from config.yml for each verification so a
+		// Panel-issued config rotation takes effect without a process restart.
+		verifier.IngestTokenSigningKey = ""
 	}
 	return verifier
 }
 
 func (v TokenVerifier) Verify(header string) bool {
+	if v.UseNodeRuntimeToken {
+		return verifyBearerToken(header, control.NodeRuntimeTokenFromEnv(), "")
+	}
 	if verifyBearerToken(header, v.PlainToken, v.SHA256Hex) {
 		return true
-	}
-	if v.PlainToken == "" && v.SHA256Hex == "" {
-		return verifyBearerToken(header, control.NodeRuntimeTokenFromEnv(), "")
 	}
 	return false
 }
@@ -224,7 +225,7 @@ func NewServerWithManagersAndRuntimeConfig(serviceType string, processManager *s
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, Status{ServiceType: serviceType, ServiceID: os.Getenv("SERVICE_ID"), Status: "ready", CheckedAt: time.Now().UTC()})
+		writeJSON(w, http.StatusOK, Status{ServiceType: serviceType, ServiceID: control.ConfigFromEnv().ServiceID, Status: "ready", CheckedAt: time.Now().UTC()})
 	})
 	mux.HandleFunc("GET /preflight", servicePreflight(verifier))
 	mux.HandleFunc("POST /heartbeat", func(w http.ResponseWriter, r *http.Request) {
@@ -306,6 +307,15 @@ func buildPreflight(verifier TokenVerifier) preflightResponse {
 }
 
 func serviceTokenPreflight(verifier TokenVerifier) preflightCheck {
+	if verifier.UseNodeRuntimeToken {
+		if strings.TrimSpace(control.NodeRuntimeTokenFromEnv()) != "" {
+			return preflightCheck{ID: "service_control_token", Status: "ok", Severity: "critical", Message: "Node Runtime Token from AUTOSTREAM_NODE_CONFIG is configured."}
+		}
+		if control.NodeConfigPendingFromEnv() {
+			return preflightCheck{ID: "service_control_token", Status: "missing", Severity: "critical", Message: "Node Runtime Token is not available yet; run the Panel-generated Auto Configure command."}
+		}
+		return preflightCheck{ID: "service_control_token", Status: "missing", Severity: "critical", Message: "AUTOSTREAM_NODE_CONFIG exists but does not contain a usable Node Runtime Token."}
+	}
 	if strings.TrimSpace(verifier.SHA256Hex) != "" {
 		return preflightCheck{ID: "service_control_token", Status: "ok", Severity: "critical", Message: "SERVICE_CONTROL_TOKEN_SHA256 is configured."}
 	}

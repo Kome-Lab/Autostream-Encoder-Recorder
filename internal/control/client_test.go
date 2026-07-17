@@ -362,6 +362,26 @@ func TestValidateRejectsRemoteHTTPServicePublicURL(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsComposeServiceHTTPPublicURL(t *testing.T) {
+	cfg := Config{ControlPanelURL: "https://control.example.com", Token: "<SERVICE_TOKEN>", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: "http://encoder-recorder:8080"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("compose service URL rejected: %v", err)
+	}
+}
+
+func TestValidateDoesNotAllowComposeServiceNameForControlPanelHTTP(t *testing.T) {
+	cfg := Config{
+		ControlPanelURL:  "http://encoder-recorder:8080",
+		Token:            "<SERVICE_TOKEN>",
+		ServiceID:        "enc-01",
+		ServiceName:      "Encoder 01",
+		ServicePublicURL: "http://encoder-recorder:8080",
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "CONTROL_PANEL_URL") {
+		t.Fatalf("expected compose service exception to be limited to SERVICE_PUBLIC_URL, got %v", err)
+	}
+}
+
 func TestValidateRejectsControlPanelURLQueryOrFragment(t *testing.T) {
 	cfg := Config{ControlPanelURL: "https://control.example.com?token=bad", Token: "<SERVICE_TOKEN>", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: "https://encoder.example.com"}
 	err := cfg.Validate()
