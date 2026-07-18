@@ -45,13 +45,13 @@ The non-secret `retention_days` archive config controls local final archive clea
 
 ## Production Output Relay
 
-本番では FFmpeg argv に YouTube stream key と upstream RTMPS URL を出しません。FFmpeg は loopback relay にだけ出力します。
+本番では FFmpeg argv に YouTube stream key と upstream RTMPS URL を出しません。host配置ではFFmpegをloopback relayへ、Docker配置では通常のCompose network上の`output-relay:1935`へ出力します。
 
 ```text
 AUTOSTREAM_OUTPUT_RELAY_URL=rtmp://127.0.0.1/autostream/{stream_id}
 ```
 
-Docker production compose では `output-relay` sidecar を Encoder/Recorder と同じ network namespace で起動します。`relay/nginx-rtmp.conf.example` を `relay/nginx-rtmp.conf` にコピーし、YouTube stream key を置き換えてください。`relay/nginx-rtmp.conf` は `.gitignore` 済みです。
+Docker production composeではEncoder/Recorderと`output-relay`を通常のCompose networkへ接続し、`AUTOSTREAM_OUTPUT_RELAY_URL=rtmp://output-relay:1935/autostream/{stream_id}`でservice DNSを使います。network namespaceは共有しません。`relay/nginx-rtmp.conf.example`を`relay/nginx-rtmp.conf`にコピーし、YouTube stream keyを置き換えてください。`relay/nginx-rtmp.conf`は`.gitignore`済みです。
 
 Dockerでは先に`config` directoryを作成してcontainer userが書き込めるようにし、PanelのAuto Configure commandと同じ引数をone-shot containerで実行します。host向けの`sudo autostream-encoder-recorder`とDocker one-shotは代替手段であり、両方は実行しません。
 
@@ -59,9 +59,11 @@ Dockerでは先に`config` directoryを作成してcontainer userが書き込め
 cp .env.example .env
 mkdir -p config
 sudo chown 65532:65532 config
-docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm --no-deps encoder-recorder configure --panel-url "https://control.example.com" --token "<CONFIGURE_TOKEN>" --node "encoder-01" --config "/etc/autostream-encoder-recorder/config.yml"
+docker compose -f docker-compose.yml run --rm --no-deps encoder-recorder configure --panel-url "https://control.example.com" --token "<CONFIGURE_TOKEN>" --node "encoder-01" --config "/etc/autostream-encoder-recorder/config.yml"
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d encoder-recorder output-relay
 ```
+
+one-shot configureではbase composeの書き込み可能mountを使い、生成後のproduction起動では`docker-compose.prod.yml`のread-only mountを使います。
 
 host 配置では、同一 host の nginx-rtmp、SRS、または同等の relay を loopback だけで待ち受けさせてください。relay 設定ファイルは Git 管理外に置き、owner/read permission を限定します。
 

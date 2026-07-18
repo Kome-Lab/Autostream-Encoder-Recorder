@@ -1,5 +1,6 @@
 bin/
 coverage.out
+/.gocache*/
 .codex-go-cache/
 .code-go*/
 .env

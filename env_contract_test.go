@@ -36,7 +36,7 @@ func TestBaseComposeOverridesHostOnlyBindAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	compose := string(body)
+	compose := strings.ReplaceAll(string(body), "\r\n", "\n")
 	for _, required := range []string{"AUTOSTREAM_BIND_ADDR: 0.0.0.0:8080", `- "8081:8080"`, "./config:/etc/autostream-encoder-recorder"} {
 		if !strings.Contains(compose, required) {
 			t.Errorf("base compose is missing %q", required)
@@ -73,22 +73,35 @@ func TestLocalComposeDoesNotRestoreLegacyCredentialInputs(t *testing.T) {
 	}
 }
 
-func TestProductionComposeReplacesBasePortAndStartsLoopbackRelay(t *testing.T) {
+func TestProductionComposeUsesRelayServiceDNSOnDefaultNetwork(t *testing.T) {
 	body, err := os.ReadFile("docker-compose.prod.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	compose := string(body)
+	compose := strings.ReplaceAll(string(body), "\r\n", "\n")
 	for _, required := range []string{
 		"ports: !override",
 		`- "127.0.0.1:8081:8080"`,
 		"AUTOSTREAM_ENV: production",
-		"AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://127.0.0.1/autostream/{stream_id}",
-		`network_mode: "service:encoder-recorder"`,
+		"AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://output-relay:1935/autostream/{stream_id}",
+		"\n    depends_on:\n      output-relay:\n        condition: service_started\n",
+		"./config:/etc/autostream-encoder-recorder:ro",
 		"encoder-archives:/var/lib/autostream/archives",
+		"\n  output-relay:\n",
+		"image: tiangolo/nginx-rtmp:latest",
 	} {
 		if !strings.Contains(compose, required) {
 			t.Errorf("production compose is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"network_mode:",
+		"\n    networks:",
+		"AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://127.0.0.1",
+		"./config:/etc/autostream-encoder-recorder\n",
+	} {
+		if strings.Contains(compose, forbidden) {
+			t.Errorf("production compose must not contain %q", forbidden)
 		}
 	}
 }

@@ -1,22 +1,24 @@
 services:
   encoder-recorder:
-    image: encoder-recorder:latest
+    image: ${AUTOSTREAM_IMAGE_REGISTRY:-ghcr.io/kome-lab/autostream-docker}/encoder-recorder:${AUTOSTREAM_DOCKER_VERSION:-latest}
     restart: unless-stopped
     env_file: .env
     environment:
       AUTOSTREAM_ENV: production
       AUTOSTREAM_NODE_CONFIG: /etc/autostream-encoder-recorder/config.yml
       AUTOSTREAM_BIND_ADDR: 0.0.0.0:8080
-      AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://127.0.0.1/autostream/{stream_id}
+      AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://output-relay:1935/autostream/{stream_id}
+    depends_on:
+      output-relay:
+        condition: service_started
     ports: !override
       - "127.0.0.1:8081:8080"
     volumes:
-      - ./config:/etc/autostream-encoder-recorder
+      - ./config:/etc/autostream-encoder-recorder:ro
       - encoder-archives:/var/lib/autostream/archives
   output-relay:
     image: tiangolo/nginx-rtmp:latest
     restart: unless-stopped
-    network_mode: "service:encoder-recorder"
     volumes:
       - ./relay/nginx-rtmp.conf:/etc/nginx/nginx.conf:ro
 
