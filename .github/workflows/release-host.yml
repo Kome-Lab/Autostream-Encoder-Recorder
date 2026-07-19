@@ -24,7 +24,7 @@ permissions:
 jobs:
   release-host:
     name: Build Linux host artifacts
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     env:
       SERVICE_NAME: encoder-recorder
       ARTIFACT_PREFIX: autostream-encoder-recorder
