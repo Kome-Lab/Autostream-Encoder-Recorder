@@ -26,6 +26,7 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
 	"github.com/example/autostream-encoder-recorder/internal/observability"
 	"github.com/example/autostream-encoder-recorder/internal/streamproc"
+	"github.com/example/autostream-encoder-recorder/internal/version"
 	"github.com/example/autostream-encoder-recorder/internal/workerevents"
 )
 
@@ -223,6 +224,9 @@ func NewServerWithManagersAndRuntimeConfig(serviceType string, processManager *s
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /updater/version", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"version": version.Current()})
 	})
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, Status{ServiceType: serviceType, ServiceID: control.ConfigFromEnv().ServiceID, Status: "ready", CheckedAt: time.Now().UTC()})

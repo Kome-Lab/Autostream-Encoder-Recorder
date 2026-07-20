@@ -6,7 +6,7 @@ This archive contains the Linux binary, systemd example, and placeholder environ
 
 - Linux amd64 or arm64 matching the archive name.
 - A dedicated `autostream` user and group.
-- Authenticated `gh`, `jq`, and `sha256sum` for release verification.
+- Authenticated `gh`, `jq`, `sha256sum`, and `curl` for release verification.
 - `ffmpeg` installed on the host and available on `PATH`.
 - Writable archive and runtime directories.
 - Network access to the Control Panel, output relay, and configured providers.
@@ -89,13 +89,22 @@ Then start the service:
 
 ```bash
 set -euo pipefail
+VERSION="${VERSION:?export VERSION=vX.Y.Z before continuing}"
 sudo systemctl daemon-reload
 sudo systemctl enable autostream-encoder-recorder
 sudo systemctl restart autostream-encoder-recorder
 PID="$(sudo systemctl show --property=MainPID --value autostream-encoder-recorder)"
 EXPECTED="$(sudo readlink -f /opt/autostream/encoder-recorder/current/bin/autostream-encoder-recorder)"
 test "$(sudo readlink -f "/proc/$PID/exe")" = "$EXPECTED"
+curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8081/health >/dev/null
+test "$(curl --fail --silent --show-error --max-time 10 \
+  http://127.0.0.1:8081/updater/version | jq -r '.version')" = "$VERSION"
 ```
+
+Use the host's configured loopback port if it differs from `8081`.
+`/updater/version` is the unauthenticated, minimal endpoint used only to prove
+the running binary's embedded release version to the update helper. Block this
+exact path at any public reverse proxy.
 
 Do not fabricate `.artifact-sha256` or `.version` from an unverified local
 binary. Releases without `release-manifest.json` remain manual-only; publish a

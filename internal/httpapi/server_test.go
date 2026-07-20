@@ -21,6 +21,7 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/ingesttoken"
 	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
 	"github.com/example/autostream-encoder-recorder/internal/streamproc"
+	"github.com/example/autostream-encoder-recorder/internal/version"
 	"github.com/example/autostream-encoder-recorder/internal/workerevents"
 )
 
@@ -29,6 +30,40 @@ func testInputResolver(ctx context.Context, host string) ([]net.IP, error) {
 		return nil, err
 	}
 	return []net.IP{net.ParseIP("93.184.216.34")}, nil
+}
+
+func TestUpdaterVersionEndpointIsUnauthenticated(t *testing.T) {
+	originalVersion := version.Version
+	version.Version = "v1.2.3"
+	t.Cleanup(func() {
+		version.Version = originalVersion
+	})
+	t.Setenv("SERVICE_VERSION", "v9.9.9")
+
+	handler := NewServerWithManagers(
+		"encoder_recorder",
+		nil,
+		workerevents.NewManager(t.TempDir()),
+		TokenVerifier{PlainToken: "service-token"},
+	)
+	req := httptest.NewRequest(http.MethodGet, "/updater/version", nil)
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body) != 1 || body["version"] != version.Current() {
+		t.Fatalf("body = %#v, want only version %q", body, version.Current())
+	}
 }
 
 func TestDryRunEndpointRequiresAuthorization(t *testing.T) {
