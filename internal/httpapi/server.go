@@ -37,6 +37,13 @@ type Status struct {
 	CheckedAt   time.Time `json:"checked_at"`
 }
 
+type updaterVersionResponse struct {
+	Version        string `json:"version"`
+	ServiceID      string `json:"service_id"`
+	ServiceType    string `json:"service_type"`
+	ConfigRevision int64  `json:"config_revision"`
+}
+
 type TokenVerifier struct {
 	PlainToken             string
 	SHA256Hex              string
@@ -207,6 +214,16 @@ func NewServerWithManagersAndSecretResolver(serviceType string, processManager *
 }
 
 func NewServerWithManagersAndRuntimeConfig(serviceType string, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver, runtimeConfig RuntimeConfigProvider) http.Handler {
+	return NewServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType, processManager, eventManager, verifier, resolver, runtimeConfig, NewUpdaterIdentityLatch(serviceType))
+}
+
+func NewServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver, runtimeConfig RuntimeConfigProvider, updaterIdentity *UpdaterIdentityLatch) http.Handler {
+	if updaterIdentity == nil {
+		panic("encoder recorder updater identity latch is required")
+	}
+	if _, err := updaterIdentity.ResolveFromEnv(); err != nil && !errors.Is(err, ErrUpdaterIdentityPending) {
+		panic(err)
+	}
 	processArchiveRoot := "/var/lib/autostream/archives"
 	if processManager != nil && strings.TrimSpace(processManager.ArchiveRoot) != "" {
 		processArchiveRoot = processManager.ArchiveRoot
@@ -226,7 +243,21 @@ func NewServerWithManagersAndRuntimeConfig(serviceType string, processManager *s
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /updater/version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"version": version.Current()})
+		identity, err := updaterIdentity.ResolveFromEnv()
+		if err != nil {
+			code := "updater_identity_invalid"
+			if errors.Is(err, ErrUpdaterIdentityPending) {
+				code = "updater_identity_pending"
+			}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"code": code})
+			return
+		}
+		writeJSON(w, http.StatusOK, updaterVersionResponse{
+			Version:        version.Current(),
+			ServiceID:      identity.ServiceID,
+			ServiceType:    identity.ServiceType,
+			ConfigRevision: identity.ConfigRevision,
+		})
 	})
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, Status{ServiceType: serviceType, ServiceID: control.ConfigFromEnv().ServiceID, Status: "ready", CheckedAt: time.Now().UTC()})

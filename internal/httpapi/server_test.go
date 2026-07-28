@@ -38,7 +38,12 @@ func TestUpdaterVersionEndpointIsUnauthenticated(t *testing.T) {
 	t.Cleanup(func() {
 		version.Version = originalVersion
 	})
+	configPath := filepath.Join(t.TempDir(), "config.yml")
+	writeNodeConfigForVerifierTest(t, configPath, control.ServiceType)
+	t.Setenv("AUTOSTREAM_NODE_CONFIG", configPath)
+	t.Setenv("SERVICE_ID", "legacy-env-service-id")
 	t.Setenv("SERVICE_VERSION", "v9.9.9")
+	t.Setenv("AUTOSTREAM_CONFIG_REVISION", "7")
 
 	handler := NewServerWithManagers(
 		"encoder_recorder",
@@ -57,12 +62,70 @@ func TestUpdaterVersionEndpointIsUnauthenticated(t *testing.T) {
 	if got := res.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("Content-Type = %q", got)
 	}
-	var body map[string]string
+	var body map[string]any
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(body) != 1 || body["version"] != version.Current() {
-		t.Fatalf("body = %#v, want only version %q", body, version.Current())
+	if len(body) != 4 ||
+		body["version"] != version.Current() ||
+		body["service_id"] != "encoder-recorder-01" ||
+		body["service_type"] != control.ServiceType ||
+		body["config_revision"] != float64(7) {
+		t.Fatalf("body = %#v, want updater identity for configured service", body)
+	}
+}
+
+func TestNewServerFailsClosedForInvalidConfigRevision(t *testing.T) {
+	t.Setenv("AUTOSTREAM_CONFIG_REVISION", "0")
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewServer must reject an invalid AUTOSTREAM_CONFIG_REVISION")
+		}
+	}()
+	_ = NewServerWithManagers(
+		control.ServiceType,
+		nil,
+		workerevents.NewManager(t.TempDir()),
+		TokenVerifier{},
+	)
+}
+
+func TestNewServerFailsClosedForInvalidNodeIdentity(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yml")
+	writeNodeConfigForVerifierTest(t, configPath, "worker")
+	t.Setenv("AUTOSTREAM_NODE_CONFIG", configPath)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewServer must reject a node config for a different service type")
+		}
+	}()
+	_ = NewServer(control.ServiceType)
+}
+
+func TestUpdaterVersionFailsClosedWhenIdentityDriftsAfterConstruction(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yml")
+	writeNodeConfigForVerifierTest(t, configPath, control.ServiceType)
+	t.Setenv("AUTOSTREAM_NODE_CONFIG", configPath)
+	t.Setenv("AUTOSTREAM_CONFIG_REVISION", "7")
+	handler := NewServerWithManagers(
+		control.ServiceType,
+		nil,
+		workerevents.NewManager(t.TempDir()),
+		TokenVerifier{},
+	)
+	t.Setenv("AUTOSTREAM_NODE_CONFIG", "")
+	t.Setenv("SERVICE_ID", "changed-after-start")
+	t.Setenv("AUTOSTREAM_CONFIG_REVISION", "8")
+
+	req := httptest.NewRequest(http.MethodGet, "/updater/version", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body = %s, want 503", res.Code, res.Body.String())
+	}
+	if strings.Contains(res.Body.String(), "service_id") {
+		t.Fatalf("drift response leaked service identity: %s", res.Body.String())
 	}
 }
 

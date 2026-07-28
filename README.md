@@ -24,7 +24,55 @@ Nodeを作る前に、Control Panel envの`AUTOSTREAM_SECRET_ENCRYPTION_KEY`と`
 AUTOSTREAM_NODE_CONFIG=/etc/autostream-encoder-recorder/config.yml
 AUTOSTREAM_ENV=production
 AUTOSTREAM_BIND_ADDR=127.0.0.1:8081
+AUTOSTREAM_CONFIG_REVISION=1
 AUTOSTREAM_OUTPUT_RELAY_URL=rtmp://127.0.0.1/autostream/{stream_id}
+```
+
+`AUTOSTREAM_CONFIG_REVISION` is a root-owned positive integer used by the local
+executor to bind `/updater/version` to the applied service configuration.
+It defaults to `1`; increment it after a configuration change. Invalid, signed,
+fractional, padded, zero, or negative values stop Encoder/Recorder before it
+starts serving HTTP.
+
+The Control Panel local executor writes managed bind/revision overrides to
+`/opt/autostream/local-executor/ports/encoder-recorder.env`. systemd loads this optional
+root-owned sidecar after `encoder-recorder.env`, so managed values win without
+breaking existing hosts where the sidecar does not exist.
+
+systemd 版の待受ポートは `/etc/autostream/encoder-recorder.env` の
+`AUTOSTREAM_BIND_ADDR` で変更できます。ポートは非特権範囲の
+`1024`～`65535` を指定してください。標準の env ファイルは IPv4
+loopback の `127.0.0.1:8081` を明示します。変数自体がない既存環境では、
+アップグレードだけでポートを移動しないようバイナリの従来値
+`127.0.0.1:8080` を維持します。
+例えば `127.0.0.1:18081` に変更した場合、`/health` と
+`/updater/version` も同じ `18081` で待ち受けます。不正な形式、範囲外、
+または特権ポートを指定した場合は Encoder/Recorder が起動時に停止します。
+IPv6 loopback を明示的に使う場合は `[::1]:18081` のように角括弧を含めて
+指定し、プローブURLも `http://[::1]:18081/...` とします。
+
+Docker 版ではホスト公開ポートを `AUTOSTREAM_ENCODER_RECORDER_PORT`、
+コンテナ内の待受ポートを `AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT`
+で個別に変更できます。既定値はそれぞれ `8081` と `8080` で、どちらも
+`1024`～`65535` を使用してください。
+
+Compose published ports are a host/reverse-proxy responsibility. The Control
+Panel Updater manages only host ports `1024` through `65535`; manually
+publishing a privileged or conflicting Docker host port is outside the managed
+update contract.
+
+The production health authority is the host Local Executor. These Compose files
+intentionally omit an in-container `healthcheck`: the runtime image has no
+purpose-built HTTP probe client, and the image contract does not add or repurpose `curl`, `wget`, or another unrelated executable solely for container health.
+For managed Docker changes, the Local Executor probes the loopback published port for both `/health` and `/updater/version`; the published port is the health port.
+A recreate is accepted only when health, service identity, version, and
+`AUTOSTREAM_CONFIG_REVISION` match; otherwise the executor rolls back or reports
+`rollback_failed`.
+
+```powershell
+$env:AUTOSTREAM_ENCODER_RECORDER_PORT = "18081"
+$env:AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT = "18080"
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
 `AUTOSTREAM_ARCHIVE_DIR=/var/lib/autostream/archives`、`FFMPEG_BIN=ffmpeg`、`TZ`は必要なhostだけで上書きします。上記はコード既定値と重複するため標準envには不要です。

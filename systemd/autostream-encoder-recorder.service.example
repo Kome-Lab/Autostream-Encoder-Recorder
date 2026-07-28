@@ -6,7 +6,11 @@ Wants=network-online.target
 [Service]
 User=autostream
 Group=autostream
+# AUTOSTREAM_CONFIG_REVISION is read from this root-owned file and must be an integer >= 1.
 EnvironmentFile=/etc/autostream/encoder-recorder.env
+# Optional root-owned Control Panel managed bind/revision override. It is loaded
+# after encoder-recorder.env so AUTOSTREAM_BIND_ADDR and AUTOSTREAM_CONFIG_REVISION win.
+EnvironmentFile=-/opt/autostream/local-executor/ports/encoder-recorder.env
 ExecStart=/opt/autostream/encoder-recorder/current/bin/autostream-encoder-recorder
 Restart=on-failure
 NoNewPrivileges=true
