@@ -58,6 +58,8 @@ readonly LEGACY_CONFIG_CONTENT="encoder-recorder-installer-integration-config-pr
 
 created_autostream_user=false
 old_pid=""
+original_opt_mode=""
+opt_mode_normalized=false
 original_usr_local_bin_mode=""
 usr_local_bin_mode_normalized=false
 
@@ -98,6 +100,13 @@ cleanup() {
       exit_code=1
     fi
   fi
+  if [[ ${opt_mode_normalized} == true ]]; then
+    if ! chmod "${original_opt_mode}" /opt ||
+      [[ $(stat -c '%a' -- /opt) != "${original_opt_mode}" ]]; then
+      printf '%s\n' "encoder-recorder installer integration test: failed to restore /opt mode" >&2
+      exit_code=1
+    fi
+  fi
   exit "${exit_code}"
 }
 trap cleanup EXIT
@@ -118,6 +127,25 @@ if id autostream >/dev/null 2>&1 || getent group autostream >/dev/null 2>&1; the
   die "runner already has an autostream account"
 fi
 [[ ! -e /unpack && ! -L /unpack ]] || die "runner is not clean at /unpack"
+
+[[ -d /opt && ! -L /opt &&
+  $(readlink -f -- /opt) == "/opt" &&
+  $(stat -c '%U:%G' -- /opt) == "root:root" ]] || \
+  die "runner /opt boundary is unsafe"
+original_opt_mode="$(stat -c '%a' -- /opt)"
+[[ ${original_opt_mode} =~ ^[0-7]{3,4}$ ]] || \
+  die "runner /opt mode is invalid"
+(( (8#${original_opt_mode} & 07000) == 0 )) || \
+  die "runner /opt has unexpected special mode bits"
+if (( (8#${original_opt_mode} & 0022) != 0 )); then
+  printf 'Normalizing /opt mode %s for the isolated integration fixture.\n' \
+    "${original_opt_mode}"
+  chmod go-w /opt
+  opt_mode_normalized=true
+fi
+normalized_opt_mode="$(stat -c '%a' -- /opt)"
+(( (8#${normalized_opt_mode} & 07022) == 0 )) || \
+  die "runner /opt could not be normalized safely"
 
 [[ -d /usr/local/bin && ! -L /usr/local/bin &&
   $(readlink -f -- /usr/local/bin) == "/usr/local/bin" &&
@@ -290,6 +318,9 @@ Description=${LEGACY_UNIT_CONTENT}
 Type=simple
 ExecStart=/usr/bin/sleep infinity
 Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
 EOF
 chmod 0644 "${UNIT_PATH}"
 systemctl daemon-reload
@@ -297,7 +328,9 @@ systemctl start "${UNIT}"
 old_pid="$(systemctl show --property MainPID --value "${UNIT}")"
 [[ ${old_pid} =~ ^[1-9][0-9]*$ ]] || die "legacy service did not start"
 kill -0 "${old_pid}" || die "legacy service PID is not alive"
-assert_not_enabled
+legacy_unit_file_state="$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"
+[[ ${legacy_unit_file_state} == "disabled" ]] || \
+  die "legacy fixture must begin disabled, got ${legacy_unit_file_state:-unknown}"
 
 env_before="$(sha256sum "${ENV_PATH}" | awk 'NR == 1 { print $1 }')"
 config_before="$(sha256sum "${CONFIG_PATH}" | awk 'NR == 1 { print $1 }')"

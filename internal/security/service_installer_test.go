@@ -84,13 +84,21 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		"idempotent reinstall",
 		"managed current link must be owned by root:root",
 		"another privileged update is already active",
+		"original_opt_mode",
+		"chmod go-w /opt",
+		`chmod "${original_opt_mode}" /opt`,
 		"original_usr_local_bin_mode",
 		"chmod go-w /usr/local/bin",
 		`chmod "${original_usr_local_bin_mode}" /usr/local/bin`,
+		`legacy_unit_file_state="$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"`,
+		"legacy fixture must begin disabled",
 	} {
 		if !strings.Contains(integration, marker) {
 			t.Fatalf("installer integration fixture is missing scenario marker %q", marker)
 		}
+	}
+	if count := strings.Count(integration, "[Install]\nWantedBy=multi-user.target"); count != 2 {
+		t.Fatalf("integration fixture must define two enable-capable but disabled units, got %d", count)
 	}
 
 	unitBytes, err := os.ReadFile(filepath.Join(root, "systemd", "autostream-encoder-recorder.service.example"))
