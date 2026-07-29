@@ -19,6 +19,24 @@ assert_not_enabled() {
 [[ ${EUID} -eq 0 ]] || die "must run as root"
 [[ $(uname -m) == "x86_64" ]] || die "this integration fixture requires an amd64 Linux runner"
 
+if [[ ${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS:-} != "1" ]]; then
+  exec unshare --mount --propagation private bash -c '
+    mount -t tmpfs -o nodev,nosuid,mode=0755,uid=0,gid=0 \
+      autostream-encoder-recorder-installer-test-bin /usr/local/bin
+    mount -t tmpfs -o nodev,nosuid,mode=0755,uid=0,gid=0 \
+      autostream-encoder-recorder-installer-test-opt /opt
+    exec env AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS=1 bash "$1"
+  ' autostream-encoder-recorder-installer-test-mount "$0"
+fi
+grep -Eq ' /usr/local/bin .* - tmpfs autostream-encoder-recorder-installer-test-bin ' \
+  /proc/self/mountinfo || die "isolated /usr/local/bin mount is missing"
+grep -Eq ' /opt .* - tmpfs autostream-encoder-recorder-installer-test-opt ' \
+  /proc/self/mountinfo || die "isolated /opt mount is missing"
+[[ $(stat -c '%U:%G:%a' -- /usr/local/bin) == "root:root:755" ]] || \
+  die "could not create an isolated safe /usr/local/bin fixture"
+[[ $(stat -c '%U:%G:%a' -- /opt) == "root:root:755" ]] || \
+  die "could not create an isolated safe /opt fixture"
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 [[ ${SCRIPT_DIR} == /* && -d ${SCRIPT_DIR} ]] || die "could not resolve the fixture directory"
 readonly SCRIPT_DIR
@@ -58,10 +76,6 @@ readonly LEGACY_CONFIG_CONTENT="encoder-recorder-installer-integration-config-pr
 
 created_autostream_user=false
 old_pid=""
-original_opt_mode=""
-opt_mode_normalized=false
-original_usr_local_bin_mode=""
-usr_local_bin_mode_normalized=false
 
 cleanup() {
   local exit_code=$?
@@ -93,20 +107,6 @@ cleanup() {
     userdel autostream >/dev/null 2>&1
     groupdel autostream >/dev/null 2>&1
   fi
-  if [[ ${usr_local_bin_mode_normalized} == true ]]; then
-    if ! chmod "${original_usr_local_bin_mode}" /usr/local/bin ||
-      [[ $(stat -c '%a' -- /usr/local/bin) != "${original_usr_local_bin_mode}" ]]; then
-      printf '%s\n' "encoder-recorder installer integration test: failed to restore /usr/local/bin mode" >&2
-      exit_code=1
-    fi
-  fi
-  if [[ ${opt_mode_normalized} == true ]]; then
-    if ! chmod "${original_opt_mode}" /opt ||
-      [[ $(stat -c '%a' -- /opt) != "${original_opt_mode}" ]]; then
-      printf '%s\n' "encoder-recorder installer integration test: failed to restore /opt mode" >&2
-      exit_code=1
-    fi
-  fi
   exit "${exit_code}"
 }
 trap cleanup EXIT
@@ -127,44 +127,6 @@ if id autostream >/dev/null 2>&1 || getent group autostream >/dev/null 2>&1; the
   die "runner already has an autostream account"
 fi
 [[ ! -e /unpack && ! -L /unpack ]] || die "runner is not clean at /unpack"
-
-[[ -d /opt && ! -L /opt &&
-  $(readlink -f -- /opt) == "/opt" &&
-  $(stat -c '%U:%G' -- /opt) == "root:root" ]] || \
-  die "runner /opt boundary is unsafe"
-original_opt_mode="$(stat -c '%a' -- /opt)"
-[[ ${original_opt_mode} =~ ^[0-7]{3,4}$ ]] || \
-  die "runner /opt mode is invalid"
-(( (8#${original_opt_mode} & 07000) == 0 )) || \
-  die "runner /opt has unexpected special mode bits"
-if (( (8#${original_opt_mode} & 0022) != 0 )); then
-  printf 'Normalizing /opt mode %s for the isolated integration fixture.\n' \
-    "${original_opt_mode}"
-  chmod go-w /opt
-  opt_mode_normalized=true
-fi
-normalized_opt_mode="$(stat -c '%a' -- /opt)"
-(( (8#${normalized_opt_mode} & 07022) == 0 )) || \
-  die "runner /opt could not be normalized safely"
-
-[[ -d /usr/local/bin && ! -L /usr/local/bin &&
-  $(readlink -f -- /usr/local/bin) == "/usr/local/bin" &&
-  $(stat -c '%U:%G' -- /usr/local/bin) == "root:root" ]] || \
-  die "runner /usr/local/bin boundary is unsafe"
-original_usr_local_bin_mode="$(stat -c '%a' -- /usr/local/bin)"
-[[ ${original_usr_local_bin_mode} =~ ^[0-7]{3,4}$ ]] || \
-  die "runner /usr/local/bin mode is invalid"
-(( (8#${original_usr_local_bin_mode} & 07000) == 0 )) || \
-  die "runner /usr/local/bin has unexpected special mode bits"
-if (( (8#${original_usr_local_bin_mode} & 0022) != 0 )); then
-  printf 'Normalizing /usr/local/bin mode %s for the isolated integration fixture.\n' \
-    "${original_usr_local_bin_mode}"
-  chmod go-w /usr/local/bin
-  usr_local_bin_mode_normalized=true
-fi
-normalized_usr_local_bin_mode="$(stat -c '%a' -- /usr/local/bin)"
-(( (8#${normalized_usr_local_bin_mode} & 07022) == 0 )) || \
-  die "runner /usr/local/bin could not be normalized safely"
 
 install -d -o root -g root -m 0755 \
   "${ARTIFACTS_DIR}" \

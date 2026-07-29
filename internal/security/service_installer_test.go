@@ -84,18 +84,27 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		"idempotent reinstall",
 		"managed current link must be owned by root:root",
 		"another privileged update is already active",
-		"original_opt_mode",
-		"chmod go-w /opt",
-		`chmod "${original_opt_mode}" /opt`,
-		"original_usr_local_bin_mode",
-		"chmod go-w /usr/local/bin",
-		`chmod "${original_usr_local_bin_mode}" /usr/local/bin`,
+		"AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS",
+		"autostream-encoder-recorder-installer-test-bin /usr/local/bin",
+		"autostream-encoder-recorder-installer-test-opt /opt",
+		"isolated /usr/local/bin mount is missing",
+		"isolated /opt mount is missing",
+		"could not create an isolated safe /usr/local/bin fixture",
+		"could not create an isolated safe /opt fixture",
 		`legacy_unit_file_state="$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"`,
 		"legacy fixture must begin disabled",
 	} {
 		if !strings.Contains(integration, marker) {
 			t.Fatalf("installer integration fixture is missing scenario marker %q", marker)
 		}
+	}
+	namespaceIndex := strings.Index(
+		integration,
+		`if [[ ${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS:-} != "1" ]]; then`,
+	)
+	workDirIndex := strings.Index(integration, `WORK_DIR="$(mktemp`)
+	if namespaceIndex < 0 || workDirIndex < 0 || namespaceIndex >= workDirIndex {
+		t.Fatal("installer integration fixture must enter its isolated mount namespace before creating mutable state")
 	}
 	if count := strings.Count(integration, "[Install]\nWantedBy=multi-user.target"); count != 2 {
 		t.Fatalf("integration fixture must define two enable-capable but disabled units, got %d", count)
