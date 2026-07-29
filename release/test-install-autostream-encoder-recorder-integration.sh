@@ -58,6 +58,8 @@ readonly LEGACY_CONFIG_CONTENT="encoder-recorder-installer-integration-config-pr
 
 created_autostream_user=false
 old_pid=""
+original_usr_local_bin_mode=""
+usr_local_bin_mode_normalized=false
 
 cleanup() {
   local exit_code=$?
@@ -89,6 +91,13 @@ cleanup() {
     userdel autostream >/dev/null 2>&1
     groupdel autostream >/dev/null 2>&1
   fi
+  if [[ ${usr_local_bin_mode_normalized} == true ]]; then
+    if ! chmod "${original_usr_local_bin_mode}" /usr/local/bin ||
+      [[ $(stat -c '%a' -- /usr/local/bin) != "${original_usr_local_bin_mode}" ]]; then
+      printf '%s\n' "encoder-recorder installer integration test: failed to restore /usr/local/bin mode" >&2
+      exit_code=1
+    fi
+  fi
   exit "${exit_code}"
 }
 trap cleanup EXIT
@@ -109,6 +118,25 @@ if id autostream >/dev/null 2>&1 || getent group autostream >/dev/null 2>&1; the
   die "runner already has an autostream account"
 fi
 [[ ! -e /unpack && ! -L /unpack ]] || die "runner is not clean at /unpack"
+
+[[ -d /usr/local/bin && ! -L /usr/local/bin &&
+  $(readlink -f -- /usr/local/bin) == "/usr/local/bin" &&
+  $(stat -c '%U:%G' -- /usr/local/bin) == "root:root" ]] || \
+  die "runner /usr/local/bin boundary is unsafe"
+original_usr_local_bin_mode="$(stat -c '%a' -- /usr/local/bin)"
+[[ ${original_usr_local_bin_mode} =~ ^[0-7]{3,4}$ ]] || \
+  die "runner /usr/local/bin mode is invalid"
+(( (8#${original_usr_local_bin_mode} & 07000) == 0 )) || \
+  die "runner /usr/local/bin has unexpected special mode bits"
+if (( (8#${original_usr_local_bin_mode} & 0022) != 0 )); then
+  printf 'Normalizing /usr/local/bin mode %s for the isolated integration fixture.\n' \
+    "${original_usr_local_bin_mode}"
+  chmod go-w /usr/local/bin
+  usr_local_bin_mode_normalized=true
+fi
+normalized_usr_local_bin_mode="$(stat -c '%a' -- /usr/local/bin)"
+(( (8#${normalized_usr_local_bin_mode} & 07022) == 0 )) || \
+  die "runner /usr/local/bin could not be normalized safely"
 
 install -d -o root -g root -m 0755 \
   "${ARTIFACTS_DIR}" \

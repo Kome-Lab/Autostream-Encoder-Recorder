@@ -31,6 +31,7 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		".artifact-sha256",
 		".version",
 		`flock -n 9`,
+		"root anchor directory has unsafe write or special mode bits",
 		`[[ ${version_first_line} == "autostream-encoder-recorder ${VERSION}" ]]`,
 		`[[ ${managed_version_first_line} == "autostream-encoder-recorder ${VERSION}" ]]`,
 		"root-only recovery evidence preserved at",
@@ -83,6 +84,9 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		"idempotent reinstall",
 		"managed current link must be owned by root:root",
 		"another privileged update is already active",
+		"original_usr_local_bin_mode",
+		"chmod go-w /usr/local/bin",
+		`chmod "${original_usr_local_bin_mode}" /usr/local/bin`,
 	} {
 		if !strings.Contains(integration, marker) {
 			t.Fatalf("installer integration fixture is missing scenario marker %q", marker)
