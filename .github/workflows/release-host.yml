@@ -61,7 +61,7 @@ jobs:
             echo "Version must look like v1.2.3, not ${version}. Remove the dot after v." >&2
             exit 1
           fi
-          if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+          if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
             echo "Version must look like v1.2.3; got ${version}" >&2
             exit 1
           fi
@@ -70,6 +70,18 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Validate installer syntax
+        shell: bash
+        run: bash -n release/install-autostream-encoder-recorder
+
+      - name: Validate installer integration fixture syntax
+        shell: bash
+        run: bash -n release/test-install-autostream-encoder-recorder-integration.sh
+
+      - name: Test installer integration scenarios
+        shell: bash
+        run: sudo bash release/test-install-autostream-encoder-recorder-integration.sh
 
       - name: Package linux artifacts
         shell: bash
@@ -89,6 +101,8 @@ jobs:
             cp .env.example "${root}/.env.example"
             cp systemd/*.service.example "${root}/systemd/"
             cp release/README.install.md "${root}/README.install.md"
+            cp release/install-autostream-encoder-recorder "${root}/install-autostream-encoder-recorder"
+            chmod 0755 "${root}/install-autostream-encoder-recorder"
             (cd "${root}" && find . -type f ! -path './checksums.txt' -print0 | sort -z | xargs -0 sha256sum > checksums.txt)
             tar -C staging -czf "artifacts/${artifact}.tar.gz" "${artifact}"
             (cd artifacts && sha256sum "${artifact}.tar.gz" > "${artifact}.tar.gz.sha256")
@@ -483,6 +497,14 @@ jobs:
           jq -S '[.[] | {name, size, digest}]' \
             "${uploaded_assets}" > "${uploaded_projection}"
           diff -u "${RUNNER_TEMP}/host-release-expected-assets.json" "${uploaded_projection}"
+
+      - name: Attest Encoder Recorder archives
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: |
+            artifacts/autostream-encoder-recorder_${{ needs.release-host.outputs.version }}_linux_amd64.tar.gz
+            artifacts/autostream-encoder-recorder_${{ needs.release-host.outputs.version }}_linux_arm64.tar.gz
+          create-storage-record: false
 
       - name: Attest release manifest
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0

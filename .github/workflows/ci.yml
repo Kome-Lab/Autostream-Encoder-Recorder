@@ -15,5 +15,14 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.mod
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Validate installer syntax
+        shell: bash
+        run: bash -n release/install-autostream-encoder-recorder
+      - name: Validate installer integration fixture syntax
+        shell: bash
+        run: bash -n release/test-install-autostream-encoder-recorder-integration.sh
+      - name: Test installer integration scenarios
+        shell: bash
+        run: sudo bash release/test-install-autostream-encoder-recorder-integration.sh
       - run: go test ./...
       - run: go build ./...
