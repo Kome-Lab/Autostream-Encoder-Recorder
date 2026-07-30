@@ -11,8 +11,10 @@ die() {
 }
 
 assert_not_enabled() {
-  systemctl is-enabled --quiet "${UNIT}" &&
+  if systemctl is-enabled --quiet "${UNIT}"; then
+    unit_enable_cleanup_needed=true
     die "installer unexpectedly enabled ${UNIT}"
+  fi
   return 0
 }
 
@@ -27,37 +29,145 @@ if [[ ${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS:-} != "1" ]]; then
     install -d -o root -g root -m 0755 /mnt/usr-lower
     mount --rbind /usr /mnt/usr-lower
     mount --make-rprivate /mnt/usr-lower
+    install -d -o root -g root -m 0755 /mnt/etc-lower
+    mount --rbind /etc /mnt/etc-lower
+    mount --make-rprivate /mnt/etc-lower
+    install -d -o root -g root -m 0755 /mnt/var-lower
+    mount --rbind /var /mnt/var-lower
+    mount --make-rprivate /mnt/var-lower
+    install -d -o root -g root -m 0755 /mnt/run-lower
+    mount --rbind /run /mnt/run-lower
+    mount --make-rprivate /mnt/run-lower
     install -d -o root -g root -m 0755 /mnt/usr-upper
     install -d -o root -g root -m 0755 /mnt/usr-upper/local
-    install -d -o root -g root -m 0700 /mnt/usr-work
+    install -d -o root -g root -m 0755 \
+      /mnt/etc-upper \
+      /mnt/etc-upper/systemd \
+      /mnt/etc-upper/systemd/system \
+      /mnt/var-upper \
+      /mnt/var-upper/lib \
+      /mnt/var-upper/backups \
+      /mnt/run-upper
+    install -d -o root -g root -m 1777 /mnt/var-upper/tmp
+    install -d -o root -g root -m 0700 \
+      /mnt/usr-work \
+      /mnt/etc-work \
+      /mnt/var-work \
+      /mnt/run-work
     mount -t overlay \
       -o nodev,nosuid,lowerdir=/mnt/usr-lower,upperdir=/mnt/usr-upper,workdir=/mnt/usr-work \
       autostream-encoder-recorder-installer-test-usr-overlay /usr
+    mount -t overlay \
+      -o nodev,nosuid,lowerdir=/mnt/etc-lower,upperdir=/mnt/etc-upper,workdir=/mnt/etc-work \
+      autostream-encoder-recorder-installer-test-etc-overlay /etc
+    mount -t overlay \
+      -o nodev,nosuid,lowerdir=/mnt/var-lower,upperdir=/mnt/var-upper,workdir=/mnt/var-work \
+      autostream-encoder-recorder-installer-test-var-overlay /var
+    mount -t overlay \
+      -o nodev,nosuid,lowerdir=/mnt/run-lower,upperdir=/mnt/run-upper,workdir=/mnt/run-work \
+      autostream-encoder-recorder-installer-test-run-overlay /run
+    host_run_systemd_identity="$(stat -c "%d:%i" -- /mnt/run-lower/systemd)"
+    mount --rbind /mnt/run-lower/systemd /run/systemd
+    mount --make-rprivate /run/systemd
+    [[ $(stat -c "%d:%i" -- /run/systemd) == "${host_run_systemd_identity}" ]]
     mount -t tmpfs -o nodev,nosuid,mode=0755,uid=0,gid=0 \
       autostream-encoder-recorder-installer-test-bin /usr/local/bin
     mount -t tmpfs -o nodev,nosuid,mode=0755,uid=0,gid=0 \
       autostream-encoder-recorder-installer-test-opt /opt
-    exec env AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS=1 bash "$1"
+    mount -t tmpfs -o ro,nodev,nosuid,noexec,mode=0555,uid=0,gid=0 \
+      autostream-encoder-recorder-installer-test-sealed-mnt /mnt
+    exec env \
+      AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS=1 \
+      AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_RUN_SYSTEMD_ID="${host_run_systemd_identity}" \
+      bash "$1"
   ' autostream-encoder-recorder-installer-test-mount "$0"
 fi
-grep -Eq ' /mnt .* - tmpfs autostream-encoder-recorder-installer-test-scratch ' \
-  /proc/self/mountinfo || die "isolated /mnt scratch mount is missing"
+
+assert_sealed_scratch_mount() {
+  local probe="/mnt/.autostream-installer-write-probe"
+
+  awk '
+    $5 == "/mnt" {
+      has_ro = 0
+      has_nodev = 0
+      has_nosuid = 0
+      has_noexec = 0
+      option_count = split($6, options, ",")
+      for (option = 1; option <= option_count; option++) {
+        has_ro = has_ro || options[option] == "ro"
+        has_nodev = has_nodev || options[option] == "nodev"
+        has_nosuid = has_nosuid || options[option] == "nosuid"
+        has_noexec = has_noexec || options[option] == "noexec"
+      }
+      if (!has_ro || !has_nodev || !has_nosuid || !has_noexec) {
+        next
+      }
+      for (field = 7; field <= NF; field++) {
+        if ($field == "-" &&
+            $(field + 1) == "tmpfs" &&
+            $(field + 2) == "autostream-encoder-recorder-installer-test-sealed-mnt") {
+          found = 1
+        }
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' /proc/self/mountinfo || die "effective /mnt is not the read-only sealed fixture mount"
+  [[ $(stat -f -c '%T' -- /mnt) == "tmpfs" ]] || \
+    die "effective /mnt is not backed by the sealed tmpfs"
+  [[ $(stat -c '%U:%G:%a' -- /mnt) == "root:root:555" ]] || \
+    die "effective /mnt seal has unsafe metadata"
+  if touch -- "${probe}" 2>/dev/null; then
+    rm -f -- "${probe}"
+    die "effective /mnt seal unexpectedly accepted a write"
+  fi
+}
+
+assert_sealed_scratch_mount
 grep -Eq ' /usr .* - overlay autostream-encoder-recorder-installer-test-usr-overlay ' \
   /proc/self/mountinfo || die "isolated /usr overlay mount is missing"
+grep -Eq ' /etc .* - overlay autostream-encoder-recorder-installer-test-etc-overlay ' \
+  /proc/self/mountinfo || die "isolated /etc overlay mount is missing"
+grep -Eq ' /var .* - overlay autostream-encoder-recorder-installer-test-var-overlay ' \
+  /proc/self/mountinfo || die "isolated /var overlay mount is missing"
+grep -Eq ' /run .* - overlay autostream-encoder-recorder-installer-test-run-overlay ' \
+  /proc/self/mountinfo || die "isolated /run overlay mount is missing"
+awk '$5 == "/run/systemd" { found=1 } END { exit found ? 0 : 1 }' \
+  /proc/self/mountinfo || die "host-backed /run/systemd bind mount is missing"
+[[ $(stat -c '%d:%i' -- /run/systemd) == \
+  "${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_RUN_SYSTEMD_ID:-}" ]] || \
+  die "host-backed /run/systemd mount does not match its lower source"
+awk '$5 == "/run/systemd" && $6 ~ /^rw(,|$)/ { found=1 } END { exit found ? 0 : 1 }' \
+  /proc/self/mountinfo || die "host-backed /run/systemd bind mount is not writable"
 grep -Eq ' /usr/local/bin .* - tmpfs autostream-encoder-recorder-installer-test-bin ' \
   /proc/self/mountinfo || die "isolated /usr/local/bin mount is missing"
 grep -Eq ' /opt .* - tmpfs autostream-encoder-recorder-installer-test-opt ' \
   /proc/self/mountinfo || die "isolated /opt mount is missing"
-[[ $(stat -c '%U:%G:%a' -- /mnt) == "root:root:755" ]] || \
-  die "could not create an isolated safe /mnt fixture"
+[[ $(stat -c '%U:%G:%a' -- /mnt) == "root:root:555" ]] || \
+  die "could not create an isolated sealed /mnt fixture"
 [[ $(stat -c '%U:%G:%a' -- /usr) == "root:root:755" ]] || \
   die "could not create an isolated safe /usr fixture"
+[[ $(stat -c '%U:%G:%a' -- /etc) == "root:root:755" ]] || \
+  die "could not create an isolated safe /etc fixture"
+[[ $(stat -c '%U:%G:%a' -- /etc/systemd) == "root:root:755" ]] || \
+  die "could not create an isolated safe /etc/systemd fixture"
+[[ $(stat -c '%U:%G:%a' -- /etc/systemd/system) == "root:root:755" ]] || \
+  die "could not create an isolated safe /etc/systemd/system fixture"
 [[ $(stat -c '%U:%G:%a' -- /usr/local) == "root:root:755" ]] || \
   die "could not create an isolated safe /usr/local fixture"
 [[ $(stat -c '%U:%G:%a' -- /usr/local/bin) == "root:root:755" ]] || \
   die "could not create an isolated safe /usr/local/bin fixture"
 [[ $(stat -c '%U:%G:%a' -- /opt) == "root:root:755" ]] || \
   die "could not create an isolated safe /opt fixture"
+[[ $(stat -c '%U:%G:%a' -- /var) == "root:root:755" ]] || \
+  die "could not create an isolated safe /var fixture"
+[[ $(stat -c '%U:%G:%a' -- /var/lib) == "root:root:755" ]] || \
+  die "could not create an isolated safe /var/lib fixture"
+[[ $(stat -c '%U:%G:%a' -- /var/backups) == "root:root:755" ]] || \
+  die "could not create an isolated safe /var/backups fixture"
+[[ $(stat -c '%U:%G:%a' -- /var/tmp) == "root:root:1777" ]] || \
+  die "could not create an isolated safe /var/tmp fixture"
+[[ $(stat -c '%U:%G:%a' -- /run) == "root:root:755" ]] || \
+  die "could not create an isolated safe /run fixture"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 [[ ${SCRIPT_DIR} == /* && -d ${SCRIPT_DIR} ]] || die "could not resolve the fixture directory"
@@ -65,18 +175,14 @@ readonly SCRIPT_DIR
 readonly INSTALLER_SOURCE="${SCRIPT_DIR}/install-autostream-encoder-recorder"
 readonly VERSION="v9.9.9"
 readonly ARTIFACT_ID="autostream-encoder-recorder_${VERSION}_linux_amd64"
-WORK_DIR="$(mktemp -d /var/tmp/autostream-encoder-recorder-installer-test.XXXXXXXX)"
-[[ ${WORK_DIR} == /var/tmp/autostream-encoder-recorder-installer-test.* &&
-  -d ${WORK_DIR} && ! -L ${WORK_DIR} &&
-  $(readlink -f -- "${WORK_DIR}") == "${WORK_DIR}" &&
-  $(stat -c '%U:%G:%a' -- "${WORK_DIR}") == "root:root:700" ]] || \
-  die "could not create a safe fixture work directory"
-readonly WORK_DIR
-readonly ARTIFACTS_DIR="${WORK_DIR}/artifacts"
-readonly EXTRACTED_ROOT="${ARTIFACTS_DIR}/${ARTIFACT_ID}"
-readonly ARCHIVE="${ARTIFACTS_DIR}/${ARTIFACT_ID}.tar.gz"
 readonly UNIT="autostream-encoder-recorder.service"
 readonly UNIT_PATH="/etc/systemd/system/${UNIT}"
+readonly RUNTIME_UNIT_DIR="/run/systemd/system"
+readonly RUNTIME_UNIT_PATH="${RUNTIME_UNIT_DIR}/${UNIT}"
+[[ -d ${RUNTIME_UNIT_DIR} && ! -L ${RUNTIME_UNIT_DIR} &&
+  $(readlink -f -- "${RUNTIME_UNIT_DIR}") == "${RUNTIME_UNIT_DIR}" &&
+  $(stat -c '%U:%G:%a' -- "${RUNTIME_UNIT_DIR}") == "root:root:755" ]] || \
+  die "systemd runtime unit directory is unsafe"
 readonly PUBLIC_BINARY="/usr/local/bin/autostream-encoder-recorder"
 readonly PUBLIC_ALIAS="/usr/local/bin/encoder-recorder"
 readonly ENV_PATH="/etc/autostream/encoder-recorder.env"
@@ -90,51 +196,383 @@ TARGET_LOCK_ID="$(printf '%s' "${UNIT}" | sha256sum | awk 'NR == 1 { print subst
 [[ ${TARGET_LOCK_ID} =~ ^[0-9a-f]{12}$ ]] || die "could not derive the updater target lock ID"
 readonly TARGET_LOCK_ID
 readonly TARGET_LOCK="/run/autostream-updater/.autostream-updater-${TARGET_LOCK_ID}.lock"
+WORK_DIR="$(mktemp -d /var/tmp/autostream-encoder-recorder-installer-test.XXXXXXXX)"
+[[ ${WORK_DIR} == /var/tmp/autostream-encoder-recorder-installer-test.* &&
+  -d ${WORK_DIR} && ! -L ${WORK_DIR} &&
+  $(readlink -f -- "${WORK_DIR}") == "${WORK_DIR}" &&
+  $(stat -c '%U:%G:%a' -- "${WORK_DIR}") == "root:root:700" ]] || \
+  die "could not create a safe fixture work directory"
+readonly WORK_DIR
+readonly ARTIFACTS_DIR="${WORK_DIR}/artifacts"
+readonly EXTRACTED_ROOT="${ARTIFACTS_DIR}/${ARTIFACT_ID}"
+readonly ARCHIVE="${ARTIFACTS_DIR}/${ARTIFACT_ID}.tar.gz"
 readonly LEGACY_UNIT_CONTENT="encoder-recorder-installer-integration-legacy-unit"
 readonly LEGACY_BINARY_CONTENT="encoder-recorder-installer-integration-legacy-binary"
 readonly LEGACY_ALIAS_CONTENT="encoder-recorder-installer-integration-legacy-alias"
 readonly LEGACY_ENV_CONTENT="ENCODER_RECORDER_INSTALLER_INTEGRATION_ENV=preserve-exactly"
 readonly LEGACY_CONFIG_CONTENT="encoder-recorder-installer-integration-config-preserve-exactly"
 
-created_autostream_user=false
+work_dir_owned=true
+preflight_complete=false
+autostream_account_owned=false
+unit_path_owned=false
+runtime_unit_path_owned=false
+runtime_unit_identity=""
+runtime_unit_temp_owned=false
+public_binary_owned=false
+public_alias_owned=false
+env_path_owned=false
+config_dir_owned=false
+state_dir_owned=false
+archive_dir_owned=false
+managed_root_owned=false
+install_backup_root_owned=false
+target_lock_owned=false
+root_unpack_owned=false
+recovery_path_owned=false
+service_start_attempted=false
+service_started_by_fixture=false
+unit_enable_cleanup_needed=false
+RUNTIME_UNIT_TEMP=""
+RECOVERY_PATH=""
 old_pid=""
+old_pid_start_time=""
+runtime_sync_precommit_hook=""
+cleanup_runtime_pre_remove_hook=""
+cleanup_runtime_race_report=""
+runtime_race_active=false
+runtime_race_backup=""
+runtime_race_foreign_stage=""
+runtime_race_foreign_identity=""
+runtime_race_foreign_hash=""
+
+adopt_installer_paths() {
+  [[ ${preflight_complete} == true ]] || die "cannot adopt paths before preflight completes"
+  [[ ! -e ${UNIT_PATH} && ! -L ${UNIT_PATH} ]] || unit_path_owned=true
+  [[ ! -e ${PUBLIC_BINARY} && ! -L ${PUBLIC_BINARY} ]] || public_binary_owned=true
+  [[ ! -e ${PUBLIC_ALIAS} && ! -L ${PUBLIC_ALIAS} ]] || public_alias_owned=true
+  [[ ! -e ${ENV_PATH} && ! -L ${ENV_PATH} ]] || env_path_owned=true
+  [[ ! -e ${STATE_DIR} && ! -L ${STATE_DIR} ]] || state_dir_owned=true
+  [[ ! -e ${ARCHIVE_DIR} && ! -L ${ARCHIVE_DIR} ]] || archive_dir_owned=true
+  [[ ! -e ${MANAGED_ROOT} && ! -L ${MANAGED_ROOT} ]] || managed_root_owned=true
+  [[ ! -e ${INSTALL_BACKUP_ROOT} && ! -L ${INSTALL_BACKUP_ROOT} ]] || \
+    install_backup_root_owned=true
+  [[ ! -e ${TARGET_LOCK} && ! -L ${TARGET_LOCK} ]] || target_lock_owned=true
+  [[ ! -e /unpack && ! -L /unpack ]] || root_unpack_owned=true
+  if id autostream >/dev/null 2>&1 || getent group autostream >/dev/null 2>&1; then
+    autostream_account_owned=true
+  fi
+}
+
+read_proc_pid_start_time() {
+  local pid=$1
+  local start_time
+  local stat_line
+  local stat_tail
+
+  [[ ${pid} =~ ^[1-9][0-9]*$ && -r /proc/${pid}/stat ]] || return 1
+  IFS= read -r stat_line < "/proc/${pid}/stat" || return 1
+  [[ ${stat_line} == *") "* ]] || return 1
+  stat_tail="${stat_line##*) }"
+  set -- ${stat_tail}
+  [[ $# -ge 20 ]] || return 1
+  start_time="${20}"
+  [[ ${start_time} =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${start_time}"
+}
+
+runtime_unit_identity_is_owned() {
+  [[ ${runtime_unit_path_owned} == true &&
+    -n ${runtime_unit_identity} &&
+    -f ${RUNTIME_UNIT_PATH} &&
+    ! -L ${RUNTIME_UNIT_PATH} &&
+    $(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}") == "${runtime_unit_identity}" ]]
+}
+
+restore_runtime_sync_race() {
+  local current_identity=""
+
+  [[ ${runtime_race_active} == true ]] || return 0
+  [[ -n ${runtime_race_backup} &&
+    -f ${runtime_race_backup} &&
+    ! -L ${runtime_race_backup} &&
+    $(stat -c '%d:%i' -- "${runtime_race_backup}") == "${runtime_unit_identity}" ]] || \
+    return 1
+  if [[ -f ${RUNTIME_UNIT_PATH} && ! -L ${RUNTIME_UNIT_PATH} ]]; then
+    current_identity="$(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}")"
+  fi
+  if [[ ${current_identity} == "${runtime_race_foreign_identity}" ]]; then
+    mv -Tf -- "${runtime_race_backup}" "${RUNTIME_UNIT_PATH}" || return 1
+    runtime_race_backup=""
+  elif [[ ${current_identity} == "${runtime_unit_identity}" ]]; then
+    rm -f -- "${runtime_race_backup}" || return 1
+    runtime_race_backup=""
+  else
+    return 1
+  fi
+  if [[ -n ${runtime_race_foreign_stage} ]]; then
+    [[ -f ${runtime_race_foreign_stage} &&
+      ! -L ${runtime_race_foreign_stage} &&
+      $(stat -c '%d:%i' -- "${runtime_race_foreign_stage}") == \
+        "${runtime_race_foreign_identity}" ]] || return 1
+    rm -f -- "${runtime_race_foreign_stage}" || return 1
+    runtime_race_foreign_stage=""
+  fi
+  sync -f "${RUNTIME_UNIT_DIR}" || return 1
+  runtime_unit_identity_is_owned || return 1
+  runtime_race_active=false
+  runtime_race_foreign_identity=""
+  runtime_race_foreign_hash=""
+}
+
+replace_runtime_unit_for_precommit_probe() {
+  runtime_unit_identity_is_owned || return 1
+  runtime_race_backup="$(
+    mktemp "${RUNTIME_UNIT_DIR}/.${UNIT}.race-backup.XXXXXXXX"
+  )" || return 1
+  rm -f -- "${runtime_race_backup}" || return 1
+  ln -- "${RUNTIME_UNIT_PATH}" "${runtime_race_backup}" || return 1
+  [[ $(stat -c '%d:%i' -- "${runtime_race_backup}") == \
+    "${runtime_unit_identity}" ]] || return 1
+  runtime_race_active=true
+
+  runtime_race_foreign_stage="$(
+    mktemp "${RUNTIME_UNIT_DIR}/.${UNIT}.race-foreign.XXXXXXXX"
+  )" || return 1
+  runtime_race_foreign_identity="$(
+    stat -c '%d:%i' -- "${runtime_race_foreign_stage}"
+  )" || return 1
+  cat > "${runtime_race_foreign_stage}" <<EOF
+[Unit]
+Description=encoder-recorder-installer-integration-foreign-runtime-unit
+
+[Service]
+Type=simple
+User=nobody
+ExecStart=/usr/bin/false
+
+[Install]
+# Keep enablement semantics equivalent while the foreign inode is present.
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "${runtime_race_foreign_stage}" || return 1
+  runtime_race_foreign_hash="$(
+    sha256sum "${runtime_race_foreign_stage}" | awk 'NR == 1 { print $1 }'
+  )" || return 1
+  sync -f "${runtime_race_foreign_stage}" || return 1
+  mv -Tf -- "${runtime_race_foreign_stage}" "${RUNTIME_UNIT_PATH}" || return 1
+  runtime_race_foreign_stage=""
+  sync -f "${RUNTIME_UNIT_DIR}" || return 1
+  [[ $(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}") == \
+    "${runtime_race_foreign_identity}" ]]
+}
+
+replace_runtime_unit_for_cleanup_probe() {
+  local report_parent=""
+
+  [[ -n ${cleanup_runtime_race_report} &&
+    ${cleanup_runtime_race_report} == \
+      /var/tmp/autostream-encoder-recorder-installer-test.*/* &&
+    ! -e ${cleanup_runtime_race_report} &&
+    ! -L ${cleanup_runtime_race_report} ]] || return 1
+  report_parent="$(dirname -- "${cleanup_runtime_race_report}")" || return 1
+  [[ -d ${report_parent} &&
+    ! -L ${report_parent} &&
+    $(stat -c '%U:%G:%a' -- "${report_parent}") == "root:root:700" ]] || \
+    return 1
+  replace_runtime_unit_for_precommit_probe || return 1
+  if ! install -o root -g root -m 0600 /dev/null \
+    "${cleanup_runtime_race_report}" ||
+    ! printf '%s\t%s\t%s\n' \
+      "${runtime_race_backup}" \
+      "${runtime_race_foreign_identity}" \
+      "${runtime_race_foreign_hash}" > "${cleanup_runtime_race_report}"; then
+    restore_runtime_sync_race
+    return 1
+  fi
+}
 
 cleanup() {
   local exit_code=$?
+  local cleanup_expected_unit_absent=false
+  local cleanup_failed=false
+  local cleanup_fragment_path=""
+  local cleanup_load_state=""
+  local current_pid_start_time=""
+  local runtime_unit_identity_matches=false
   set +e
-  systemctl stop "${UNIT}" >/dev/null 2>&1
-  systemctl disable "${UNIT}" >/dev/null 2>&1
-  rm -f -- "${UNIT_PATH}"
-  systemctl daemon-reload >/dev/null 2>&1
-  if [[ -n ${old_pid} ]]; then
-    kill "${old_pid}" >/dev/null 2>&1
+  if [[ ${runtime_unit_path_owned} == true ||
+    ${service_start_attempted} == true ]]; then
+    cleanup_expected_unit_absent=true
   fi
-  rm -f -- "${PUBLIC_BINARY}" "${PUBLIC_ALIAS}" "${ENV_PATH}" "${TARGET_LOCK}"
-  rm -rf -- \
-    "${CONFIG_DIR}" \
-    "${STATE_DIR}" \
-    "${ARCHIVE_DIR}" \
-    "${MANAGED_ROOT}" \
-    "${INSTALL_BACKUP_ROOT}" \
-    "${WORK_DIR}"
-  rmdir \
-    /unpack \
-    /run/autostream-updater \
-    /var/backups/autostream/install-migrations \
-    /var/backups/autostream \
-    /var/lib/autostream \
-    /opt/autostream \
-    /etc/autostream >/dev/null 2>&1
-  if [[ ${created_autostream_user} == true ]]; then
+  if [[ ${runtime_race_active} == true ]] &&
+    ! restore_runtime_sync_race; then
+    cleanup_failed=true
+  fi
+  if [[ ${runtime_unit_path_owned} == true &&
+    -n ${runtime_unit_identity} &&
+    -f ${RUNTIME_UNIT_PATH} &&
+    ! -L ${RUNTIME_UNIT_PATH} &&
+    $(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}") == "${runtime_unit_identity}" ]]; then
+    runtime_unit_identity_matches=true
+  fi
+  if [[ ${runtime_unit_path_owned} == true &&
+    ${runtime_unit_identity_matches} == false ]]; then
+    cleanup_failed=true
+    printf '%s\n' \
+      "encoder-recorder installer integration test: cleanup could not prove runtime unit ownership" >&2
+  fi
+  if [[ ${service_start_attempted} == true &&
+    ${runtime_unit_identity_matches} == true ]]; then
+    if systemctl stop "${UNIT}" >/dev/null 2>&1; then
+      service_started_by_fixture=false
+      old_pid=""
+      old_pid_start_time=""
+    else
+      cleanup_failed=true
+      printf '%s\n' \
+        "encoder-recorder installer integration test: cleanup failed to stop ${UNIT}" >&2
+    fi
+  fi
+  if [[ ${service_started_by_fixture} == true &&
+    -n ${old_pid} && -n ${old_pid_start_time} ]]; then
+    current_pid_start_time="$(read_proc_pid_start_time "${old_pid}" 2>/dev/null || true)"
+    if [[ -n ${current_pid_start_time} &&
+      ${current_pid_start_time} == "${old_pid_start_time}" ]]; then
+      if kill "${old_pid}" >/dev/null 2>&1; then
+        service_started_by_fixture=false
+        old_pid=""
+        old_pid_start_time=""
+      else
+        cleanup_failed=true
+      fi
+    elif [[ -n ${current_pid_start_time} ]]; then
+      cleanup_failed=true
+      printf '%s\n' \
+        "encoder-recorder installer integration test: cleanup fallback refused a reused PID ${old_pid}" >&2
+    fi
+  fi
+  if [[ -n ${cleanup_runtime_pre_remove_hook} ]]; then
+    if ! "${cleanup_runtime_pre_remove_hook}"; then
+      cleanup_failed=true
+      printf '%s\n' \
+        "encoder-recorder installer integration test: cleanup runtime race hook failed" >&2
+    fi
+    cleanup_runtime_pre_remove_hook=""
+  fi
+  if [[ ${unit_enable_cleanup_needed} == true &&
+    (${runtime_unit_path_owned} == false ||
+      ${runtime_unit_identity_matches} == true) ]]; then
+    if ! systemctl disable "${UNIT}" >/dev/null 2>&1; then
+      cleanup_failed=true
+    fi
+  fi
+  if [[ ${runtime_unit_temp_owned} == true && -n ${RUNTIME_UNIT_TEMP} ]]; then
+    if ! rm -f -- "${RUNTIME_UNIT_TEMP}"; then
+      cleanup_failed=true
+    fi
+  fi
+  if [[ ${runtime_unit_path_owned} == true &&
+    ${runtime_unit_identity_matches} == true ]]; then
+    if ! runtime_unit_identity_is_owned; then
+      cleanup_failed=true
+      runtime_unit_identity_matches=false
+      printf '%s\n' \
+        "encoder-recorder installer integration test: cleanup could not prove runtime unit ownership before removal" >&2
+    else
+      if ! rm -f -- "${RUNTIME_UNIT_PATH}"; then
+        cleanup_failed=true
+        printf '%s\n' \
+          "encoder-recorder installer integration test: cleanup failed to remove ${RUNTIME_UNIT_PATH}" >&2
+      fi
+      if ! systemctl daemon-reload >/dev/null 2>&1; then
+        cleanup_failed=true
+        printf '%s\n' \
+          "encoder-recorder installer integration test: cleanup daemon-reload failed" >&2
+      fi
+    fi
+  fi
+  if [[ ${unit_path_owned} == true ]]; then
+    rm -f -- "${UNIT_PATH}"
+  fi
+  if [[ ${public_binary_owned} == true ]]; then
+    rm -f -- "${PUBLIC_BINARY}"
+  fi
+  if [[ ${public_alias_owned} == true ]]; then
+    rm -f -- "${PUBLIC_ALIAS}"
+  fi
+  if [[ ${env_path_owned} == true ]]; then
+    rm -f -- "${ENV_PATH}"
+  fi
+  if [[ ${target_lock_owned} == true ]]; then
+    rm -f -- "${TARGET_LOCK}"
+  fi
+  if [[ ${config_dir_owned} == true ]]; then
+    rm -rf -- "${CONFIG_DIR}"
+  fi
+  if [[ ${state_dir_owned} == true ]]; then
+    rm -rf -- "${STATE_DIR}"
+  fi
+  if [[ ${archive_dir_owned} == true ]]; then
+    rm -rf -- "${ARCHIVE_DIR}"
+  fi
+  if [[ ${managed_root_owned} == true ]]; then
+    rm -rf -- "${MANAGED_ROOT}"
+  fi
+  if [[ ${install_backup_root_owned} == true ]]; then
+    rm -rf -- "${INSTALL_BACKUP_ROOT}"
+  fi
+  if [[ ${root_unpack_owned} == true ]]; then
+    rm -rf -- /unpack
+  fi
+  if [[ ${recovery_path_owned} == true && -n ${RECOVERY_PATH} ]]; then
+    rm -rf -- "${RECOVERY_PATH}"
+  fi
+  if [[ ${autostream_account_owned} == true ]]; then
     userdel autostream >/dev/null 2>&1
     groupdel autostream >/dev/null 2>&1
+  fi
+  if [[ ${work_dir_owned} == true ]]; then
+    rm -rf -- "${WORK_DIR}"
+  fi
+  if [[ ${cleanup_expected_unit_absent} == true ]]; then
+    if systemctl is-active --quiet "${UNIT}" >/dev/null 2>&1; then
+      cleanup_failed=true
+      printf '%s\n' \
+        "encoder-recorder installer integration test: cleanup left ${UNIT} active" >&2
+    fi
+    cleanup_load_state="$(systemctl show --property LoadState --value "${UNIT}" 2>/dev/null || true)"
+    cleanup_fragment_path="$(systemctl show --property FragmentPath --value "${UNIT}" 2>/dev/null || true)"
+    if [[ ${cleanup_load_state} != "not-found" || -n ${cleanup_fragment_path} ]]; then
+      cleanup_failed=true
+      printf '%s\n' \
+        "encoder-recorder installer integration test: cleanup left ${UNIT} loaded" >&2
+    fi
+  fi
+  if [[ ${cleanup_failed} == true && ${exit_code} -eq 0 ]]; then
+    exit_code=1
   fi
   exit "${exit_code}"
 }
 trap cleanup EXIT
 
+if [[ ${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_CLEANUP_RACE_PROBE:-} == "1" ]]; then
+  [[ -n ${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_CLEANUP_RACE_ID:-} &&
+    -f ${RUNTIME_UNIT_PATH} &&
+    ! -L ${RUNTIME_UNIT_PATH} &&
+    $(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}") == \
+      "${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_CLEANUP_RACE_ID}" ]] || \
+    die "cleanup race probe could not adopt the expected runtime unit"
+  runtime_unit_path_owned=true
+  runtime_unit_identity="${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_CLEANUP_RACE_ID}"
+  cleanup_runtime_race_report="${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_CLEANUP_RACE_REPORT:-}"
+  cleanup_runtime_pre_remove_hook=replace_runtime_unit_for_cleanup_probe
+  exit 0
+fi
+
 for path in \
   "${UNIT_PATH}" \
+  "${RUNTIME_UNIT_PATH}" \
   "${PUBLIC_BINARY}" \
   "${PUBLIC_ALIAS}" \
   "${ENV_PATH}" \
@@ -142,13 +580,289 @@ for path in \
   "${STATE_DIR}" \
   "${ARCHIVE_DIR}" \
   "${MANAGED_ROOT}" \
-  "${INSTALL_BACKUP_ROOT}"; do
+  "${INSTALL_BACKUP_ROOT}" \
+  "${TARGET_LOCK}"; do
   [[ ! -e ${path} && ! -L ${path} ]] || die "runner is not clean at ${path}"
 done
+preflight_load_state="$(systemctl show --property LoadState --value "${UNIT}" 2>/dev/null || true)"
+preflight_fragment_path="$(systemctl show --property FragmentPath --value "${UNIT}" 2>/dev/null || true)"
+[[ ${preflight_load_state} == "not-found" && -z ${preflight_fragment_path} ]] || \
+  die "runner already has a loaded ${UNIT}"
+systemctl is-active --quiet "${UNIT}" &&
+  die "runner already has an active ${UNIT}"
+preflight_enabled_state="$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"
+[[ -z ${preflight_enabled_state} ||
+  ${preflight_enabled_state} == "disabled" ||
+  ${preflight_enabled_state} == "not-found" ]] || \
+  die "runner already has an enabled ${UNIT}"
 if id autostream >/dev/null 2>&1 || getent group autostream >/dev/null 2>&1; then
   die "runner already has an autostream account"
 fi
 [[ ! -e /unpack && ! -L /unpack ]] || die "runner is not clean at /unpack"
+if [[ ${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_PREFLIGHT_PROBE:-} == "1" ]]; then
+  die "preflight ownership probe unexpectedly passed"
+fi
+preflight_complete=true
+
+assert_runtime_unit_file() {
+  [[ -f ${RUNTIME_UNIT_PATH} && ! -L ${RUNTIME_UNIT_PATH} ]] || \
+    die "runtime unit path is missing or unsafe"
+  [[ $(stat -c '%U:%G:%a' -- "${RUNTIME_UNIT_PATH}") == "root:root:644" ]] || \
+    die "runtime systemd unit ownership or mode is invalid"
+}
+
+assert_owned_runtime_unit_identity() {
+  runtime_unit_identity_is_owned || \
+    die "runtime unit identity changed or is not strictly fixture-owned"
+  assert_runtime_unit_file
+}
+
+create_legacy_runtime_unit() {
+  [[ ${runtime_unit_path_owned} == false ]] || \
+    die "legacy runtime unit path is already fixture-owned"
+  RUNTIME_UNIT_TEMP="$(mktemp "${RUNTIME_UNIT_DIR}/.${UNIT}.fixture.XXXXXXXX")"
+  runtime_unit_temp_owned=true
+  install -o root -g root -m 0644 "${UNIT_PATH}" "${RUNTIME_UNIT_TEMP}"
+  sync -f "${RUNTIME_UNIT_TEMP}"
+  if ! ln -- "${RUNTIME_UNIT_TEMP}" "${RUNTIME_UNIT_PATH}"; then
+    die "could not atomically claim the legacy runtime unit path"
+  fi
+  runtime_unit_path_owned=true
+  runtime_unit_identity="$(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}")"
+  rm -f -- "${RUNTIME_UNIT_TEMP}"
+  runtime_unit_temp_owned=false
+  RUNTIME_UNIT_TEMP=""
+  sync -f "${RUNTIME_UNIT_DIR}"
+  assert_owned_runtime_unit_identity
+  cmp -s -- "${UNIT_PATH}" "${RUNTIME_UNIT_PATH}" || \
+    die "atomic runtime unit creation changed the private unit"
+}
+
+sync_private_unit_to_runtime() {
+  [[ ${unit_path_owned} == true && ${runtime_unit_path_owned} == true ]] || \
+    die "cannot synchronize a runtime unit not owned by the fixture"
+  assert_owned_runtime_unit_identity
+  [[ -f ${UNIT_PATH} && ! -L ${UNIT_PATH} ]] || \
+    die "private systemd unit is missing or unsafe"
+  [[ -f ${RUNTIME_UNIT_PATH} && ! -L ${RUNTIME_UNIT_PATH} ]] || \
+    die "owned runtime systemd unit is missing or unsafe"
+  RUNTIME_UNIT_TEMP="$(mktemp "${RUNTIME_UNIT_DIR}/.${UNIT}.fixture.XXXXXXXX")"
+  runtime_unit_temp_owned=true
+  install -o root -g root -m 0644 "${UNIT_PATH}" "${RUNTIME_UNIT_TEMP}"
+  cmp -s -- "${UNIT_PATH}" "${RUNTIME_UNIT_TEMP}" || \
+    die "runtime unit staging changed the private unit"
+  sync -f "${RUNTIME_UNIT_TEMP}"
+  if [[ -n ${runtime_sync_precommit_hook} ]] &&
+    ! "${runtime_sync_precommit_hook}"; then
+    rm -f -- "${RUNTIME_UNIT_TEMP}"
+    runtime_unit_temp_owned=false
+    RUNTIME_UNIT_TEMP=""
+    return 76
+  fi
+  if ! runtime_unit_identity_is_owned; then
+    rm -f -- "${RUNTIME_UNIT_TEMP}"
+    runtime_unit_temp_owned=false
+    RUNTIME_UNIT_TEMP=""
+    return 75
+  fi
+  mv -Tf -- "${RUNTIME_UNIT_TEMP}" "${RUNTIME_UNIT_PATH}"
+  runtime_unit_temp_owned=false
+  RUNTIME_UNIT_TEMP=""
+  runtime_unit_identity="$(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}")"
+  sync -f "${RUNTIME_UNIT_DIR}"
+  assert_owned_runtime_unit_identity
+  cmp -s -- "${UNIT_PATH}" "${RUNTIME_UNIT_PATH}" || \
+    die "managed runtime unit does not match the private unit"
+  systemctl daemon-reload
+}
+
+assert_legacy_pid1_state() {
+  local scenario=$1
+  local runtime_unit_now fragment_now exec_start_now user_now pid_now
+
+  assert_owned_runtime_unit_identity
+  runtime_unit_now="$(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }')"
+  fragment_now="$(systemctl show --property FragmentPath --value "${UNIT}")"
+  exec_start_now="$(systemctl show --property ExecStart --value "${UNIT}")"
+  user_now="$(systemctl show --property User --value "${UNIT}")"
+  pid_now="$(systemctl show --property MainPID --value "${UNIT}")"
+
+  [[ ${runtime_unit_now} == "${legacy_runtime_unit_before}" ]] || \
+    die "${scenario} changed the legacy runtime unit shadow"
+  [[ ${fragment_now} == "${legacy_fragment_before}" ]] || \
+    die "${scenario} changed PID1 FragmentPath"
+  [[ ${exec_start_now} == "${legacy_exec_start_before}" ]] || \
+    die "${scenario} changed PID1 ExecStart"
+  [[ ${user_now} == "${legacy_user_before}" ]] || \
+    die "${scenario} changed PID1 User"
+  [[ ${pid_now} == "${old_pid}" ]] || \
+    die "${scenario} replaced the running legacy process"
+  kill -0 "${old_pid}" || die "${scenario} stopped the legacy process"
+}
+
+assert_migrated_pid1_state() {
+  local scenario=$1
+  local fragment_now exec_start_now user_now pid_now
+
+  assert_owned_runtime_unit_identity
+  fragment_now="$(systemctl show --property FragmentPath --value "${UNIT}")"
+  exec_start_now="$(systemctl show --property ExecStart --value "${UNIT}")"
+  user_now="$(systemctl show --property User --value "${UNIT}")"
+  pid_now="$(systemctl show --property MainPID --value "${UNIT}")"
+
+  [[ ${fragment_now} == "${RUNTIME_UNIT_PATH}" ]] || \
+    die "${scenario} PID1 FragmentPath does not use the owned runtime unit"
+  [[ ${exec_start_now} == *"path=${PUBLIC_BINARY}"* &&
+    ${exec_start_now} == *"argv[]=${PUBLIC_BINARY}"* ]] || \
+    die "${scenario} PID1 ExecStart does not use the stable public binary"
+  [[ ${user_now} == "autostream" ]] || \
+    die "${scenario} PID1 User is not autostream"
+  [[ ${pid_now} == "${old_pid}" ]] || \
+    die "${scenario} replaced the running legacy process"
+  [[ $(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }') == \
+    "$(sha256sum "${UNIT_PATH}" | awk 'NR == 1 { print $1 }')" ]] || \
+    die "${scenario} runtime unit does not match the private unit"
+  kill -0 "${old_pid}" || die "${scenario} stopped the legacy process"
+}
+
+unit_path_owned=true
+cat > "${UNIT_PATH}" <<EOF
+[Unit]
+Description=encoder-recorder-installer-integration-runtime-sentinel
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/sleep infinity
+Restart=no
+
+[Install]
+# Keep cleanup race enablement semantics equivalent to the foreign probe unit.
+WantedBy=multi-user.target
+EOF
+chmod 0644 "${UNIT_PATH}"
+create_legacy_runtime_unit
+systemctl daemon-reload
+service_start_attempted=true
+systemctl start "${UNIT}"
+service_started_by_fixture=true
+old_pid="$(systemctl show --property MainPID --value "${UNIT}")"
+[[ ${old_pid} =~ ^[1-9][0-9]*$ ]] || die "runtime sentinel service did not start"
+old_pid_start_time="$(read_proc_pid_start_time "${old_pid}")"
+[[ ${old_pid_start_time} =~ ^[0-9]+$ ]] || \
+  die "runtime sentinel PID start time is unavailable"
+runtime_sentinel_identity_before="${runtime_unit_identity}"
+runtime_sentinel_hash_before="$(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }')"
+runtime_sentinel_fragment_before="$(systemctl show --property FragmentPath --value "${UNIT}")"
+runtime_sentinel_exec_start_before="$(systemctl show --property ExecStart --value "${UNIT}")"
+runtime_sentinel_user_before="$(systemctl show --property User --value "${UNIT}")"
+runtime_sentinel_enabled_before="$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"
+rm -f -- "${UNIT_PATH}"
+unit_path_owned=false
+
+cleanup_race_report="${WORK_DIR}/cleanup-runtime-race.report"
+set +e
+AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS=1 \
+  AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_CLEANUP_RACE_PROBE=1 \
+  AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_CLEANUP_RACE_ID="${runtime_sentinel_identity_before}" \
+  AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_CLEANUP_RACE_REPORT="${cleanup_race_report}" \
+  bash "${SCRIPT_DIR}/test-install-autostream-encoder-recorder-integration.sh" \
+  > "${WORK_DIR}/cleanup-runtime-race.out" 2>&1
+cleanup_race_status=$?
+set -e
+[[ ${cleanup_race_status} -eq 1 ]] || \
+  die "cleanup runtime race did not promote a successful exit to failure"
+[[ -f ${cleanup_race_report} && ! -L ${cleanup_race_report} &&
+  $(stat -c '%U:%G:%a' -- "${cleanup_race_report}") == "root:root:600" ]] || \
+  die "cleanup runtime race report is missing or unsafe"
+IFS=$'\t' read -r \
+  cleanup_race_backup \
+  cleanup_race_foreign_identity \
+  cleanup_race_foreign_hash < "${cleanup_race_report}"
+[[ ${cleanup_race_backup} == \
+    "${RUNTIME_UNIT_DIR}/.${UNIT}.race-backup."* &&
+  -f ${cleanup_race_backup} &&
+  ! -L ${cleanup_race_backup} &&
+  $(stat -c '%d:%i' -- "${cleanup_race_backup}") == \
+    "${runtime_sentinel_identity_before}" ]] || \
+  die "cleanup runtime race did not preserve the owned inode for recovery"
+[[ $(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}") == \
+  "${cleanup_race_foreign_identity}" ]] || \
+  die "cleanup runtime race removed or replaced the foreign inode"
+[[ $(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }') == \
+  "${cleanup_race_foreign_hash}" ]] || \
+  die "cleanup runtime race changed the foreign runtime unit hash"
+[[ $(systemctl show --property FragmentPath --value "${UNIT}") == \
+  "${runtime_sentinel_fragment_before}" ]] || \
+  die "cleanup runtime race changed PID1 FragmentPath"
+[[ $(systemctl show --property ExecStart --value "${UNIT}") == \
+  "${runtime_sentinel_exec_start_before}" ]] || \
+  die "cleanup runtime race changed PID1 ExecStart"
+[[ $(systemctl show --property User --value "${UNIT}") == \
+  "${runtime_sentinel_user_before}" ]] || \
+  die "cleanup runtime race changed PID1 User"
+[[ $(systemctl show --property MainPID --value "${UNIT}") == "${old_pid}" ]] || \
+  die "cleanup runtime race changed the runtime sentinel PID"
+[[ $(systemctl is-enabled "${UNIT}" 2>/dev/null || true) == \
+  "${runtime_sentinel_enabled_before}" ]] || \
+  die "cleanup runtime race changed the runtime sentinel enabled state"
+kill -0 "${old_pid}" || die "cleanup runtime race stopped the runtime sentinel"
+mv -Tf -- "${cleanup_race_backup}" "${RUNTIME_UNIT_PATH}"
+sync -f "${RUNTIME_UNIT_DIR}"
+[[ $(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}") == \
+  "${runtime_sentinel_identity_before}" ]] || \
+  die "cleanup runtime race recovery did not restore the owned inode"
+[[ $(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }') == \
+  "${runtime_sentinel_hash_before}" ]] || \
+  die "cleanup runtime race recovery changed the runtime sentinel hash"
+rm -f -- "${cleanup_race_report}"
+
+set +e
+AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS=1 \
+  AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_PREFLIGHT_PROBE=1 bash \
+  "${SCRIPT_DIR}/test-install-autostream-encoder-recorder-integration.sh" \
+  > "${WORK_DIR}/preflight-conflict.out" 2>&1
+preflight_probe_status=$?
+set -e
+[[ ${preflight_probe_status} -ne 0 ]] || \
+  die "preflight conflict probe unexpectedly succeeded"
+grep -F -- "runner is not clean at ${RUNTIME_UNIT_PATH}" \
+  "${WORK_DIR}/preflight-conflict.out" >/dev/null || \
+  die "preflight conflict probe did not reject the runtime sentinel"
+[[ ! -e ${UNIT_PATH} && ! -L ${UNIT_PATH} ]] || \
+  die "preflight conflict recreated the private unit"
+[[ $(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}") == \
+  "${runtime_sentinel_identity_before}" ]] || \
+  die "preflight conflict changed the runtime sentinel inode"
+[[ $(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }') == \
+  "${runtime_sentinel_hash_before}" ]] || \
+  die "preflight conflict changed the runtime sentinel hash"
+[[ $(systemctl show --property FragmentPath --value "${UNIT}") == \
+  "${runtime_sentinel_fragment_before}" ]] || \
+  die "preflight conflict changed the runtime sentinel FragmentPath"
+[[ $(systemctl show --property ExecStart --value "${UNIT}") == \
+  "${runtime_sentinel_exec_start_before}" ]] || \
+  die "preflight conflict changed the runtime sentinel ExecStart"
+[[ $(systemctl show --property User --value "${UNIT}") == \
+  "${runtime_sentinel_user_before}" ]] || \
+  die "preflight conflict changed the runtime sentinel User"
+[[ $(systemctl show --property MainPID --value "${UNIT}") == "${old_pid}" ]] || \
+  die "preflight conflict changed the runtime sentinel PID"
+[[ $(systemctl is-enabled "${UNIT}" 2>/dev/null || true) == \
+  "${runtime_sentinel_enabled_before}" ]] || \
+  die "preflight conflict changed the runtime sentinel enabled state"
+kill -0 "${old_pid}" || die "preflight conflict stopped the runtime sentinel"
+
+systemctl stop "${UNIT}"
+service_start_attempted=false
+service_started_by_fixture=false
+assert_owned_runtime_unit_identity
+rm -f -- "${RUNTIME_UNIT_PATH}"
+runtime_unit_path_owned=false
+runtime_unit_identity=""
+old_pid=""
+old_pid_start_time=""
+systemctl daemon-reload
 
 install -d -o root -g root -m 0755 \
   "${ARTIFACTS_DIR}" \
@@ -257,13 +971,20 @@ set -e
 [[ ${mktemp_failure_status} -eq 73 ]] || die "installer did not preserve the INPUT_STAGE mktemp failure status"
 [[ $(< "${WORK_DIR}/mktemp-shim.reached") == "reached" ]] || \
   die "mktemp failure injection did not reach the mounted shim"
-[[ ! -e /unpack && ! -L /unpack ]] || die "mktemp failure created a root-level /unpack path"
+if [[ -e /unpack || -L /unpack ]]; then
+  root_unpack_owned=true
+  die "mktemp failure created a root-level /unpack path"
+fi
 if id autostream >/dev/null 2>&1 || getent group autostream >/dev/null 2>&1; then
   die "mktemp failure mutated the service account"
 fi
 
-created_autostream_user=true
+set +e
 "${EXTRACTED_ROOT}/install-autostream-encoder-recorder" > "${WORK_DIR}/fresh.out"
+fresh_status=$?
+set -e
+adopt_installer_paths
+[[ ${fresh_status} -eq 0 ]] || die "fresh installer invocation failed"
 [[ -L ${MANAGED_ROOT}/current ]] || die "fresh install did not activate current"
 [[ -L ${PUBLIC_BINARY} && -L ${PUBLIC_ALIAS} ]] || \
   die "fresh install did not create stable public links"
@@ -279,27 +1000,59 @@ assert_not_enabled
 grep -F -- "sudo systemctl enable --now ${UNIT}" "${WORK_DIR}/fresh.out" >/dev/null || \
   die "fresh install did not print the explicit first-start command"
 
-rm -f -- "${PUBLIC_BINARY}" "${PUBLIC_ALIAS}" "${ENV_PATH}" "${UNIT_PATH}"
-rm -rf -- "${STATE_DIR}" "${ARCHIVE_DIR}" "${MANAGED_ROOT}" "${INSTALL_BACKUP_ROOT}"
+[[ ${public_binary_owned} == true &&
+  ${public_alias_owned} == true &&
+  ${env_path_owned} == true &&
+  ${unit_path_owned} == true &&
+  ${state_dir_owned} == true &&
+  ${archive_dir_owned} == true &&
+  ${managed_root_owned} == true ]] || \
+  die "fresh install path ownership was not captured"
+rm -f -- "${PUBLIC_BINARY}"
+public_binary_owned=false
+rm -f -- "${PUBLIC_ALIAS}"
+public_alias_owned=false
+rm -f -- "${ENV_PATH}"
+env_path_owned=false
+rm -f -- "${UNIT_PATH}"
 systemctl daemon-reload
+unit_path_owned=false
+rm -rf -- "${STATE_DIR}"
+state_dir_owned=false
+rm -rf -- "${ARCHIVE_DIR}"
+archive_dir_owned=false
+rm -rf -- "${MANAGED_ROOT}"
+managed_root_owned=false
+if [[ ${install_backup_root_owned} == true ]]; then
+  rm -rf -- "${INSTALL_BACKUP_ROOT}"
+  install_backup_root_owned=false
+fi
 
+state_dir_owned=true
+archive_dir_owned=true
 install -d -o autostream -g autostream -m 0750 "${STATE_DIR}" "${ARCHIVE_DIR}"
 install -d -o root -g root -m 0750 /etc/autostream
+env_path_owned=true
 printf '%s\n' "${LEGACY_ENV_CONTENT}" > "${ENV_PATH}"
 chmod 0640 "${ENV_PATH}"
+config_dir_owned=true
 install -d -o root -g root -m 0700 "${CONFIG_DIR}"
 printf '%s\n' "${LEGACY_CONFIG_CONTENT}" > "${CONFIG_PATH}"
 chmod 0600 "${CONFIG_PATH}"
+public_binary_owned=true
 printf '%s\n' "${LEGACY_BINARY_CONTENT}" > "${PUBLIC_BINARY}"
 chmod 0755 "${PUBLIC_BINARY}"
+public_alias_owned=true
 printf '%s\n' "${LEGACY_ALIAS_CONTENT}" > "${PUBLIC_ALIAS}"
 chmod 0755 "${PUBLIC_ALIAS}"
+unit_path_owned=true
 cat > "${UNIT_PATH}" <<EOF
 [Unit]
 Description=${LEGACY_UNIT_CONTENT}
 
 [Service]
 Type=simple
+User=root
 ExecStart=/usr/bin/sleep infinity
 Restart=on-failure
 
@@ -307,10 +1060,16 @@ Restart=on-failure
 WantedBy=multi-user.target
 EOF
 chmod 0644 "${UNIT_PATH}"
+create_legacy_runtime_unit
 systemctl daemon-reload
+service_start_attempted=true
 systemctl start "${UNIT}"
+service_started_by_fixture=true
 old_pid="$(systemctl show --property MainPID --value "${UNIT}")"
 [[ ${old_pid} =~ ^[1-9][0-9]*$ ]] || die "legacy service did not start"
+old_pid_start_time="$(read_proc_pid_start_time "${old_pid}")"
+[[ ${old_pid_start_time} =~ ^[0-9]+$ ]] || \
+  die "legacy service PID start time is unavailable"
 kill -0 "${old_pid}" || die "legacy service PID is not alive"
 legacy_unit_file_state="$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"
 [[ ${legacy_unit_file_state} == "disabled" ]] || \
@@ -319,6 +1078,17 @@ legacy_unit_file_state="$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"
 env_before="$(sha256sum "${ENV_PATH}" | awk 'NR == 1 { print $1 }')"
 config_before="$(sha256sum "${CONFIG_PATH}" | awk 'NR == 1 { print $1 }')"
 unit_before="$(sha256sum "${UNIT_PATH}" | awk 'NR == 1 { print $1 }')"
+legacy_runtime_unit_before="$(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }')"
+legacy_fragment_before="$(systemctl show --property FragmentPath --value "${UNIT}")"
+legacy_exec_start_before="$(systemctl show --property ExecStart --value "${UNIT}")"
+legacy_user_before="$(systemctl show --property User --value "${UNIT}")"
+[[ ${legacy_fragment_before} == "${RUNTIME_UNIT_PATH}" ]] || \
+  die "legacy PID1 FragmentPath does not use the owned runtime unit"
+[[ ${legacy_exec_start_before} == *"path=/usr/bin/sleep"* &&
+  ${legacy_exec_start_before} == *"argv[]=/usr/bin/sleep"* ]] || \
+  die "legacy PID1 ExecStart is not the runtime shadow command"
+[[ ${legacy_user_before} == "root" ]] || die "legacy PID1 User is not root"
+assert_legacy_pid1_state "legacy baseline"
 
 install -o root -g root -m 0755 /usr/bin/sync "${WORK_DIR}/real-sync"
 printf '%s\n' \
@@ -338,6 +1108,7 @@ unshare --mount --propagation private bash -c \
   > "${WORK_DIR}/public-sync-failure.out" 2>&1
 public_sync_status=$?
 set -e
+adopt_installer_paths
 [[ ${public_sync_status} -eq 74 ]] || die "public-link sync failure injection returned an unexpected status"
 [[ -f ${WORK_DIR}/public-sync-failed ]] || die "public-link sync failure injection did not reach its shim"
 [[ ! -e ${MANAGED_ROOT}/current && ! -L ${MANAGED_ROOT}/current ]] || \
@@ -352,8 +1123,7 @@ grep -Fx -- "${LEGACY_ALIAS_CONTENT}" "${PUBLIC_ALIAS}" >/dev/null || \
   die "public-link sync failure changed config.yml"
 [[ $(sha256sum "${UNIT_PATH}" | awk 'NR == 1 { print $1 }') == "${unit_before}" ]] || \
   die "public-link sync failure did not restore the systemd unit"
-[[ $(systemctl show --property MainPID --value "${UNIT}") == "${old_pid}" ]] || \
-  die "public-link sync failure replaced the running legacy process"
+assert_legacy_pid1_state "public-link sync failure"
 assert_not_enabled
 
 set +e
@@ -362,6 +1132,7 @@ unshare --mount --propagation private bash -c \
   > "${WORK_DIR}/failed-install.out" 2>&1
 failed_status=$?
 set -e
+adopt_installer_paths
 [[ ${failed_status} -ne 0 ]] || die "daemon-reload failure injection unexpectedly succeeded"
 [[ ! -e ${MANAGED_ROOT}/current && ! -L ${MANAGED_ROOT}/current ]] || \
   die "failed migration left current activated"
@@ -379,35 +1150,42 @@ grep -Fx -- "${LEGACY_ALIAS_CONTENT}" "${PUBLIC_ALIAS}" >/dev/null || \
   die "failed migration changed config.yml"
 [[ $(sha256sum "${UNIT_PATH}" | awk 'NR == 1 { print $1 }') == "${unit_before}" ]] || \
   die "failed migration did not restore the systemd unit"
-[[ $(systemctl show --property MainPID --value "${UNIT}") == "${old_pid}" ]] || \
-  die "failed migration replaced the running legacy process"
-kill -0 "${old_pid}" || die "failed migration stopped the legacy process"
+assert_legacy_pid1_state "daemon-reload failure"
 assert_not_enabled
 
-recovery_path="$(
+RECOVERY_PATH="$(
   sed -n \
     's/^install-autostream-encoder-recorder: root-only recovery evidence preserved at //p' \
     "${WORK_DIR}/failed-install.out" |
     tail -n 1
 )"
-[[ ${recovery_path} == /var/tmp/autostream-encoder-recorder-install.* ]] || \
+[[ ${RECOVERY_PATH} == /var/tmp/autostream-encoder-recorder-install.* ]] || \
   die "failed rollback did not report a bounded recovery path"
-[[ -d ${recovery_path} && ! -L ${recovery_path} ]] || \
+[[ -d ${RECOVERY_PATH} && ! -L ${RECOVERY_PATH} ]] || \
   die "reported recovery path is missing or unsafe"
-[[ $(stat -c '%U:%G:%a' -- "${recovery_path}") == "root:root:700" ]] || \
+[[ $(stat -c '%U:%G:%a' -- "${RECOVERY_PATH}") == "root:root:700" ]] || \
   die "recovery path is not root-only"
-[[ -f ${recovery_path}/unit.previous && -f ${recovery_path}/recovery-state.txt ]] || \
+recovery_path_owned=true
+[[ -f ${RECOVERY_PATH}/unit.previous && -f ${RECOVERY_PATH}/recovery-state.txt ]] || \
   die "recovery evidence does not retain the previous unit and baseline metadata"
-rm -rf -- "${recovery_path}"
+rm -rf -- "${RECOVERY_PATH}"
+recovery_path_owned=false
+RECOVERY_PATH=""
 
 retry_backup_dir="${INSTALL_BACKUP_ROOT}/${VERSION}-${archive_sha256:0:12}"
+install_backup_root_owned=true
 install -d -o root -g root -m 0700 "${retry_backup_dir}"
 install -o root -g root -m 0500 "${PUBLIC_BINARY}" \
   "${retry_backup_dir}/autostream-encoder-recorder"
 install -o root -g root -m 0500 "${PUBLIC_ALIAS}" \
   "${retry_backup_dir}/encoder-recorder"
 
+set +e
 "${EXTRACTED_ROOT}/install-autostream-encoder-recorder" > "${WORK_DIR}/migration.out"
+migration_status=$?
+set -e
+adopt_installer_paths
+[[ ${migration_status} -eq 0 ]] || die "legacy migration installer invocation failed"
 readonly RELEASE_DIR="${MANAGED_ROOT}/releases/${VERSION}-${archive_sha256:0:12}"
 readonly INSTALL_BACKUP_DIR="${INSTALL_BACKUP_ROOT}/${VERSION}-${archive_sha256:0:12}"
 [[ $(readlink -f -- "${MANAGED_ROOT}/current") == "${RELEASE_DIR}" ]] || \
@@ -430,14 +1208,66 @@ grep -Fx -- "${LEGACY_ALIAS_CONTENT}" \
   die "installer backup parent is not root-only"
 grep -F -- "sudo systemctl restart ${UNIT}" "${WORK_DIR}/migration.out" >/dev/null || \
   die "active migration did not print the explicit restart command"
-[[ $(systemctl show --property MainPID --value "${UNIT}") == "${old_pid}" ]] || \
-  die "successful migration replaced the running legacy process"
-kill -0 "${old_pid}" || die "successful migration stopped the legacy process"
+runtime_race_fragment_before="$(systemctl show --property FragmentPath --value "${UNIT}")"
+runtime_race_exec_start_before="$(systemctl show --property ExecStart --value "${UNIT}")"
+runtime_race_user_before="$(systemctl show --property User --value "${UNIT}")"
+runtime_race_pid_before="$(systemctl show --property MainPID --value "${UNIT}")"
+runtime_race_enabled_before="$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"
+runtime_sync_precommit_hook=replace_runtime_unit_for_precommit_probe
+set +e
+sync_private_unit_to_runtime
+runtime_race_status=$?
+set -e
+runtime_sync_precommit_hook=""
+[[ ${runtime_race_status} -eq 75 ]] || \
+  die "runtime precommit race unexpectedly committed"
+[[ ${runtime_race_active} == true ]] || \
+  die "runtime precommit race did not retain recovery ownership"
+[[ $(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}") == \
+  "${runtime_race_foreign_identity}" ]] || \
+  die "precommit race changed the foreign runtime unit inode"
+[[ $(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }') == \
+  "${runtime_race_foreign_hash}" ]] || \
+  die "precommit race changed the foreign runtime unit hash"
+[[ $(systemctl show --property FragmentPath --value "${UNIT}") == \
+  "${runtime_race_fragment_before}" ]] || \
+  die "precommit race changed PID1 FragmentPath"
+[[ $(systemctl show --property ExecStart --value "${UNIT}") == \
+  "${runtime_race_exec_start_before}" ]] || \
+  die "precommit race changed PID1 ExecStart"
+[[ $(systemctl show --property User --value "${UNIT}") == \
+  "${runtime_race_user_before}" ]] || \
+  die "precommit race changed PID1 User"
+[[ $(systemctl show --property MainPID --value "${UNIT}") == \
+  "${runtime_race_pid_before}" ]] || \
+  die "precommit race changed PID1 MainPID"
+[[ $(systemctl is-enabled "${UNIT}" 2>/dev/null || true) == \
+  "${runtime_race_enabled_before}" ]] || \
+  die "precommit race changed the enabled state"
+kill -0 "${old_pid}" || die "precommit race stopped the legacy process"
+restore_runtime_sync_race || die "could not restore the owned runtime unit after the race probe"
+[[ $(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }') == \
+  "${legacy_runtime_unit_before}" ]] || \
+  die "race probe did not restore the legacy runtime unit"
+sync_private_unit_to_runtime
+assert_migrated_pid1_state "successful migration"
 assert_not_enabled
 
+idempotent_runtime_identity_before="${runtime_unit_identity}"
+idempotent_runtime_hash_before="$(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }')"
+set +e
 "${EXTRACTED_ROOT}/install-autostream-encoder-recorder" > "${WORK_DIR}/idempotent.out"
-[[ $(systemctl show --property MainPID --value "${UNIT}") == "${old_pid}" ]] || \
-  die "idempotent reinstall replaced the running legacy process"
+idempotent_status=$?
+set -e
+adopt_installer_paths
+[[ ${idempotent_status} -eq 0 ]] || die "idempotent installer invocation failed"
+assert_migrated_pid1_state "idempotent reinstall"
+[[ ${runtime_unit_identity} == "${idempotent_runtime_identity_before}" &&
+  $(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}") == "${idempotent_runtime_identity_before}" ]] || \
+  die "idempotent reinstall changed the managed runtime unit inode"
+[[ $(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }') == \
+  "${idempotent_runtime_hash_before}" ]] || \
+  die "idempotent reinstall changed the managed runtime unit hash"
 [[ $(sha256sum "${ENV_PATH}" | awk 'NR == 1 { print $1 }') == "${env_before}" ]] || \
   die "idempotent reinstall changed the existing environment"
 [[ $(sha256sum "${CONFIG_PATH}" | awk 'NR == 1 { print $1 }') == "${config_before}" ]] || \
@@ -450,15 +1280,16 @@ set +e
   > "${WORK_DIR}/malformed-current.out" 2>&1
 malformed_current_status=$?
 set -e
+adopt_installer_paths
 [[ ${malformed_current_status} -ne 0 ]] || \
   die "installer accepted a non-root-owned managed current link"
 grep -F -- "managed current link must be owned by root:root" \
   "${WORK_DIR}/malformed-current.out" >/dev/null || \
   die "malformed current link did not fail closed with the expected message"
 chown -h root:root "${MANAGED_ROOT}/current"
-[[ $(systemctl show --property MainPID --value "${UNIT}") == "${old_pid}" ]] || \
-  die "malformed current validation changed the running legacy process"
+assert_migrated_pid1_state "malformed current validation"
 
+[[ ${target_lock_owned} == true ]] || die "fixture does not own the updater target lock"
 (
   exec 8>"${TARGET_LOCK}"
   flock -n 8 || die "test could not acquire the updater target lock"
@@ -472,7 +1303,6 @@ chown -h root:root "${MANAGED_ROOT}/current"
 grep -F -- "another privileged update is already active for ${UNIT}" \
   "${WORK_DIR}/contention.out" >/dev/null || \
   die "lock contention did not fail with the expected message"
-[[ $(systemctl show --property MainPID --value "${UNIT}") == "${old_pid}" ]] || \
-  die "lock contention changed the running legacy process"
+assert_migrated_pid1_state "lock contention"
 
 printf '%s\n' "Encoder Recorder installer integration scenarios passed."
