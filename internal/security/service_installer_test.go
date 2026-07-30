@@ -85,10 +85,23 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		"managed current link must be owned by root:root",
 		"another privileged update is already active",
 		"AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS",
+		"autostream-encoder-recorder-installer-test-scratch /mnt",
+		"mount --rbind /usr /mnt/usr-lower",
+		"mount --make-rprivate /mnt/usr-lower",
+		"install -d -o root -g root -m 0755 /mnt/usr-upper",
+		"install -d -o root -g root -m 0755 /mnt/usr-upper/local",
+		"install -d -o root -g root -m 0700 /mnt/usr-work",
+		"-o nodev,nosuid,lowerdir=/mnt/usr-lower,upperdir=/mnt/usr-upper,workdir=/mnt/usr-work",
+		"autostream-encoder-recorder-installer-test-usr-overlay /usr",
 		"autostream-encoder-recorder-installer-test-bin /usr/local/bin",
 		"autostream-encoder-recorder-installer-test-opt /opt",
+		"isolated /mnt scratch mount is missing",
+		"isolated /usr overlay mount is missing",
 		"isolated /usr/local/bin mount is missing",
 		"isolated /opt mount is missing",
+		"could not create an isolated safe /mnt fixture",
+		"could not create an isolated safe /usr fixture",
+		"could not create an isolated safe /usr/local fixture",
 		"could not create an isolated safe /usr/local/bin fixture",
 		"could not create an isolated safe /opt fixture",
 		`legacy_unit_file_state="$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"`,
@@ -102,9 +115,35 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		integration,
 		`if [[ ${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS:-} != "1" ]]; then`,
 	)
+	outerStrictIndex := strings.Index(
+		integration,
+		"exec unshare --mount --propagation private bash -c '\n    set -euo pipefail",
+	)
 	workDirIndex := strings.Index(integration, `WORK_DIR="$(mktemp`)
-	if namespaceIndex < 0 || workDirIndex < 0 || namespaceIndex >= workDirIndex {
+	if namespaceIndex < 0 ||
+		outerStrictIndex <= namespaceIndex ||
+		workDirIndex <= outerStrictIndex {
 		t.Fatal("installer integration fixture must enter its isolated mount namespace before creating mutable state")
+	}
+	scratchIndex := strings.Index(integration, "autostream-encoder-recorder-installer-test-scratch /mnt")
+	lowerIndex := strings.Index(integration, "mount --rbind /usr /mnt/usr-lower")
+	privateIndex := strings.Index(integration, "mount --make-rprivate /mnt/usr-lower")
+	upperIndex := strings.Index(integration, "install -d -o root -g root -m 0755 /mnt/usr-upper")
+	upperLocalIndex := strings.Index(integration, "install -d -o root -g root -m 0755 /mnt/usr-upper/local")
+	workIndex := strings.Index(integration, "install -d -o root -g root -m 0700 /mnt/usr-work")
+	overlayIndex := strings.Index(integration, "autostream-encoder-recorder-installer-test-usr-overlay /usr")
+	binIndex := strings.Index(integration, "autostream-encoder-recorder-installer-test-bin /usr/local/bin")
+	optIndex := strings.Index(integration, "autostream-encoder-recorder-installer-test-opt /opt")
+	if scratchIndex <= outerStrictIndex ||
+		lowerIndex <= scratchIndex ||
+		privateIndex <= lowerIndex ||
+		upperIndex <= privateIndex ||
+		upperLocalIndex <= upperIndex ||
+		workIndex <= upperLocalIndex ||
+		overlayIndex <= workIndex ||
+		binIndex <= overlayIndex ||
+		optIndex <= overlayIndex {
+		t.Fatal("installer integration fixture must overlay an isolated /usr before mounting child fixture filesystems")
 	}
 	if count := strings.Count(integration, "[Install]\nWantedBy=multi-user.target"); count != 2 {
 		t.Fatalf("integration fixture must define two enable-capable but disabled units, got %d", count)
