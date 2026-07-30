@@ -471,6 +471,34 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 	if count := strings.Count(integration, `assert_legacy_pid1_state "`); count < 3 {
 		t.Fatalf("fixture must assert the legacy runtime/PID1 state for both rollback faults, got %d checks", count)
 	}
+	legacyPID1StateStart := strings.Index(integration, "assert_legacy_pid1_state() {")
+	if legacyPID1StateStart < 0 {
+		t.Fatal("fixture is missing the legacy PID1 state assertion helper")
+	}
+	legacyPID1StateEnd := strings.Index(
+		integration[legacyPID1StateStart:],
+		"\n}\n\nassert_migrated_pid1_state()",
+	)
+	if legacyPID1StateEnd < 0 {
+		t.Fatal("legacy PID1 state assertion helper is unterminated")
+	}
+	legacyPID1State := integration[legacyPID1StateStart : legacyPID1StateStart+legacyPID1StateEnd]
+	for _, marker := range []string{
+		`${exec_start_now} == *"path=/usr/bin/sleep"*`,
+		`${exec_start_now} == *"argv[]=/usr/bin/sleep infinity"*`,
+		`pid_start_time_now="$(read_proc_pid_start_time "${old_pid}")"`,
+		`[[ ${pid_start_time_now} == "${old_pid_start_time}" ]]`,
+	} {
+		if !strings.Contains(legacyPID1State, marker) {
+			t.Fatalf("legacy PID1 state assertion must compare stable command/process semantics: missing %q", marker)
+		}
+	}
+	if strings.Contains(
+		legacyPID1State,
+		`[[ ${exec_start_now} == "${legacy_exec_start_before}" ]]`,
+	) {
+		t.Fatal("legacy PID1 state assertion must not compare volatile ExecStart runtime metadata")
+	}
 	if count := strings.Count(integration, `assert_migrated_pid1_state "`); count < 2 {
 		t.Fatalf("fixture must assert migrated PID1 state after migration and idempotent reinstall, got %d checks", count)
 	}

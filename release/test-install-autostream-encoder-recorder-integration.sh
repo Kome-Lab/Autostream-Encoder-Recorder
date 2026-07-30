@@ -679,6 +679,7 @@ sync_private_unit_to_runtime() {
 assert_legacy_pid1_state() {
   local scenario=$1
   local runtime_unit_now fragment_now exec_start_now user_now pid_now
+  local pid_start_time_now=""
 
   assert_owned_runtime_unit_identity
   runtime_unit_now="$(sha256sum "${RUNTIME_UNIT_PATH}" | awk 'NR == 1 { print $1 }')"
@@ -691,12 +692,17 @@ assert_legacy_pid1_state() {
     die "${scenario} changed the legacy runtime unit shadow"
   [[ ${fragment_now} == "${legacy_fragment_before}" ]] || \
     die "${scenario} changed PID1 FragmentPath"
-  [[ ${exec_start_now} == "${legacy_exec_start_before}" ]] || \
-    die "${scenario} changed PID1 ExecStart"
+  [[ ${exec_start_now} == *"path=/usr/bin/sleep"* &&
+    ${exec_start_now} == *"argv[]=/usr/bin/sleep infinity"* ]] || \
+    die "${scenario} changed PID1 ExecStart command"
   [[ ${user_now} == "${legacy_user_before}" ]] || \
     die "${scenario} changed PID1 User"
   [[ ${pid_now} == "${old_pid}" ]] || \
     die "${scenario} replaced the running legacy process"
+  pid_start_time_now="$(read_proc_pid_start_time "${old_pid}")" || \
+    die "${scenario} could not read the legacy process identity"
+  [[ ${pid_start_time_now} == "${old_pid_start_time}" ]] || \
+    die "${scenario} observed PID reuse for the legacy process"
   kill -0 "${old_pid}" || die "${scenario} stopped the legacy process"
 }
 
@@ -1085,7 +1091,7 @@ legacy_user_before="$(systemctl show --property User --value "${UNIT}")"
 [[ ${legacy_fragment_before} == "${RUNTIME_UNIT_PATH}" ]] || \
   die "legacy PID1 FragmentPath does not use the owned runtime unit"
 [[ ${legacy_exec_start_before} == *"path=/usr/bin/sleep"* &&
-  ${legacy_exec_start_before} == *"argv[]=/usr/bin/sleep"* ]] || \
+  ${legacy_exec_start_before} == *"argv[]=/usr/bin/sleep infinity"* ]] || \
   die "legacy PID1 ExecStart is not the runtime shadow command"
 [[ ${legacy_user_before} == "root" ]] || die "legacy PID1 User is not root"
 assert_legacy_pid1_state "legacy baseline"
