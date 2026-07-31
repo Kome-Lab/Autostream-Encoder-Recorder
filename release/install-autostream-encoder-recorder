@@ -1097,8 +1097,7 @@ cleanup() {
       setup_rollback_safe=false
     fi
   fi
-  if [[ ${status} -ne 0 && ${installation_complete} != true &&
-    ${setup_rollback_safe} == true ]]; then
+  if [[ ${status} -ne 0 && ${installation_complete} != true ]]; then
     if ! rollback_journaled_directories; then
       printf '%s\n' "install-autostream-encoder-recorder: failed to restore invocation-mutated directories" >&2
       rollback_incomplete=true
