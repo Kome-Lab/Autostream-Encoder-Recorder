@@ -538,6 +538,7 @@ cleanup() {
     rm -rf -- "${RECOVERY_PATH}"
   fi
   if [[ ${autostream_account_owned} == true ]]; then
+    userdel autostream-install-rollback >/dev/null 2>&1
     userdel autostream >/dev/null 2>&1
     groupdel autostream >/dev/null 2>&1
   fi
@@ -611,6 +612,10 @@ preflight_enabled_state="$(systemctl is-enabled "${UNIT}" 2>/dev/null || true)"
   die "runner already has an enabled ${UNIT}"
 if id autostream >/dev/null 2>&1 || getent group autostream >/dev/null 2>&1; then
   die "runner already has an autostream account"
+fi
+if getent passwd autostream-install-rollback >/dev/null 2>&1 ||
+  getent group autostream-install-rollback >/dev/null 2>&1; then
+  die "runner already has the reserved service-account rollback login"
 fi
 [[ ! -e /unpack && ! -L /unpack ]] || die "runner is not clean at /unpack"
 if [[ ${AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_PREFLIGHT_PROBE:-} == "1" ]]; then
@@ -1313,6 +1318,9 @@ assert_no_persistent_installer_mutation "groupadd TERM transaction rollback"
 
 "${WORK_DIR}/real-groupadd" --system autostream
 preexisting_group_record="$(getent group autostream)"
+preexisting_gshadow_digest="$(sha256sum -- /etc/gshadow | awk 'NR == 1 { print $1 }')"
+[[ ${preexisting_gshadow_digest} =~ ^[0-9a-f]{64}$ ]] || \
+  die "could not snapshot /etc/gshadow before the useradd TERM transaction"
 set +e
 unshare --mount --propagation private bash -c \
   "mount --bind '${WORK_DIR}/useradd-term-probe' /usr/sbin/useradd && '${EXTRACTED_ROOT}/install-autostream-encoder-recorder'" \
@@ -1325,8 +1333,15 @@ set -e
   die "useradd TERM transaction did not receive its termination request"
 id autostream >/dev/null 2>&1 && \
   die "useradd TERM transaction left the invocation-created service user"
+if getent passwd autostream-install-rollback >/dev/null 2>&1 ||
+  getent group autostream-install-rollback >/dev/null 2>&1; then
+  die "useradd TERM transaction left the reserved rollback login"
+fi
 [[ $(getent group autostream) == "${preexisting_group_record}" ]] || \
   die "useradd TERM transaction changed the pre-existing service group"
+[[ $(sha256sum -- /etc/gshadow | awk 'NR == 1 { print $1 }') == \
+  "${preexisting_gshadow_digest}" ]] || \
+  die "useradd TERM transaction changed /etc/gshadow"
 for useradd_term_path in \
   /opt/autostream \
   /var/lib/autostream \

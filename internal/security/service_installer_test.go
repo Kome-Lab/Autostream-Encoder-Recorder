@@ -190,6 +190,10 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		"useradd-term-delivered",
 		"groupadd TERM transaction exited with",
 		"useradd TERM transaction exited with",
+		"useradd TERM transaction left the reserved rollback login",
+		"preexisting_gshadow_digest",
+		"could not snapshot /etc/gshadow before the useradd TERM transaction",
+		"useradd TERM transaction changed /etc/gshadow",
 		`readonly SHARED_HOST_SETUP_LOCK="/run/autostream-updater/.autostream-runtime-host-setup.lock"`,
 		"archive-only fixture unexpectedly contains an archive sidecar",
 		"archive-only fixture unexpectedly contains release-manifest.json",
@@ -769,6 +773,12 @@ func TestEncoderRecorderInstallerTransactionsPrivilegedHostSetup(t *testing.T) {
 		"install_journaled_directory()",
 		"create_autostream_group_transactionally()",
 		"create_autostream_user_transactionally()",
+		"prepare_autostream_user_rollback_login()",
+		"local_group_database_references_are_safe()",
+		"calculate_local_group_database_digest()",
+		"local_group_database_digests_match()",
+		"restore_renamed_autostream_user()",
+		"remove_created_autostream_user_preserving_group()",
 		"restore_existing_archive_directory()",
 		"snapshot_existing_archive_directory()",
 		"register_temporary_path()",
@@ -778,6 +788,9 @@ func TestEncoderRecorderInstallerTransactionsPrivilegedHostSetup(t *testing.T) {
 		"INPUT_STAGE_IDENTITY",
 		"restore_legacy_backup_state()",
 		"created_autostream_user=false",
+		"created_autostream_user_group_record",
+		`readonly AUTOSTREAM_USER_ROLLBACK_LOGIN="autostream-install-rollback"`,
+		"autostream_user_rollback_login_ready",
 		"created_autostream_group=false",
 		"release_created=false",
 		"archive_directory_mutation_started=false",
@@ -793,6 +806,14 @@ func TestEncoderRecorderInstallerTransactionsPrivilegedHostSetup(t *testing.T) {
 		"handle_installer_signal()",
 		"begin_installer_signal_transaction()",
 		"finish_installer_signal_transaction()",
+		`usermod --login "${AUTOSTREAM_USER_ROLLBACK_LOGIN}" autostream`,
+		`usermod --login autostream "${AUTOSTREAM_USER_ROLLBACK_LOGIN}"`,
+		`userdel "${AUTOSTREAM_USER_ROLLBACK_LOGIN}"`,
+		`FILENAME == "/etc/group" && NF >= 4 && list_contains($4)`,
+		`FILENAME == "/etc/gshadow" && NF >= 4 &&`,
+		`(list_contains($3) || list_contains($4))`,
+		`group_content_digest="$(calculate_local_group_database_digest /etc/group)" || return 1`,
+		`gshadow_content_digest="$(calculate_local_group_database_digest /etc/gshadow)" || return 1`,
 		`exit "${input_stage_status}"`,
 		"could not journal the published managed release identity",
 		`readonly SHARED_HOST_SETUP_LOCK="/run/autostream-updater/.autostream-runtime-host-setup.lock"`,
@@ -813,6 +834,33 @@ func TestEncoderRecorderInstallerTransactionsPrivilegedHostSetup(t *testing.T) {
 		if !strings.Contains(installer, marker) {
 			t.Fatalf("installer is missing privileged transaction marker %q", marker)
 		}
+	}
+	if strings.Contains(installer, "usermod --gid") ||
+		strings.Contains(installer, "usermod --home") {
+		t.Fatal("service-account rollback must not mutate the created user's GID or home")
+	}
+	if strings.Contains(installer, "id -Gn autostream") {
+		t.Fatal("service-account rollback must inspect exact local group and gshadow fields instead of relying on resolved group names")
+	}
+	if count := strings.Count(installer, "local_group_database_references_are_safe || return 1"); count != 2 {
+		t.Fatalf("service-account transaction must reject local group references before creation and rollback, got %d checks", count)
+	}
+	if count := strings.Count(installer, "local_group_database_digests_match \\"); count != 3 {
+		t.Fatalf("service-account rollback must verify group database digests after rename, restoration, and deletion, got %d checks", count)
+	}
+	restoreStart := strings.Index(installer, "restore_renamed_autostream_user() {")
+	restoreEndOffset := -1
+	if restoreStart >= 0 {
+		restoreEndOffset = strings.Index(installer[restoreStart:], "\n}\n\nremove_created_autostream_user_preserving_group()")
+	}
+	if restoreStart < 0 || restoreEndOffset < 0 {
+		t.Fatal("could not isolate the renamed service-account restoration helper")
+	}
+	restoreBody := installer[restoreStart : restoreStart+restoreEndOffset]
+	restoreRenameIndex := strings.Index(restoreBody, `usermod --login autostream "${AUTOSTREAM_USER_ROLLBACK_LOGIN}"`)
+	restoreDigestIndex := strings.Index(restoreBody, "local_group_database_digests_match")
+	if restoreRenameIndex < 0 || restoreDigestIndex <= restoreRenameIndex {
+		t.Fatal("renamed service-account restoration must rename the login back before checking group database digests")
 	}
 	if strings.Contains(installer, `exec 9>"${TARGET_LOCK}"`) {
 		t.Fatal("installer must not truncate the production updater lock")
