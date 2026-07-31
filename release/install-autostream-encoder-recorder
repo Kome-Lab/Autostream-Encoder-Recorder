@@ -189,8 +189,14 @@ previous_current_kind="absent"
 previous_current_target=""
 declare -A previous_public_kind=()
 declare -A previous_public_target=()
+declare -A previous_public_identity=()
+declare -A previous_public_nlink=()
 declare -A previous_public_mode=()
 declare -A previous_public_sha256=()
+declare -A public_rollback_anchor_path=()
+declare -A public_rollback_anchor_owner=()
+declare -A published_public_target=()
+declare -A published_public_identity=()
 unit_previous_kind="absent"
 unit_previous_mode=""
 unit_previous_sha256=""
@@ -297,12 +303,63 @@ forget_temporary_path() {
   unset 'temporary_path_identity['"${path}"']'
 }
 
+finalize_public_rollback_anchors() {
+  local link_path
+  local rollback_anchor
+  local previous_identity
+  local previous_nlink
+  local rollback_anchor_parent
+  local cleanup_failed=false
+
+  for link_path in "${PUBLIC_BINARY}" "${PUBLIC_ALIAS}"; do
+    [[ ${previous_public_kind["${link_path}"]} == "regular" ]] || continue
+    rollback_anchor="${public_rollback_anchor_path["${link_path}"]-}"
+    previous_identity="${previous_public_identity["${link_path}"]-}"
+    previous_nlink="${previous_public_nlink["${link_path}"]-}"
+    if [[ -z ${rollback_anchor} ||
+      ! ${previous_identity} =~ ^[0-9]+:[0-9]+$ ||
+      ! ${previous_nlink} =~ ^[1-9][0-9]*$ ||
+      ${public_rollback_anchor_owner["${rollback_anchor}"]-} != "${link_path}" ||
+      -z ${temporary_path_identity["${rollback_anchor}"]+present} ||
+      ${temporary_path_identity["${rollback_anchor}"]} != "${previous_identity}" ||
+      ! -f ${rollback_anchor} || -L ${rollback_anchor} ||
+      $(stat -c '%d:%i' -- "${rollback_anchor}") != "${previous_identity}" ||
+      $(stat -c '%h' -- "${rollback_anchor}") != "${previous_nlink}" ||
+      -z ${published_public_identity["${link_path}"]-} ||
+      -z ${published_public_target["${link_path}"]-} ||
+      ! -L ${link_path} ||
+      $(stat -c '%d:%i' -- "${link_path}") != "${published_public_identity["${link_path}"]}" ||
+      $(readlink -- "${link_path}") != "${published_public_target["${link_path}"]}" ]]; then
+      cleanup_failed=true
+      continue
+    fi
+    if ! rm -f -- "${rollback_anchor}" ||
+      [[ -e ${rollback_anchor} || -L ${rollback_anchor} ]]; then
+      cleanup_failed=true
+      continue
+    fi
+    rollback_anchor_parent="$(dirname -- "${rollback_anchor}")"
+    if ! sync -f "${rollback_anchor_parent}"; then
+      cleanup_failed=true
+      continue
+    fi
+    forget_temporary_path "${rollback_anchor}"
+    unset 'public_rollback_anchor_owner['"${rollback_anchor}"']'
+    unset 'public_rollback_anchor_path['"${link_path}"']'
+  done
+  [[ ${cleanup_failed} == false ]]
+}
+
 cleanup_temporary_paths() {
   local path
   local identity
   local cleanup_failed=false
   for path in "${!temporary_path_identity[@]}"; do
     identity="${temporary_path_identity["${path}"]}"
+    if [[ -n ${public_rollback_anchor_owner["${path}"]-} ]]; then
+      cleanup_failed=true
+      continue
+    fi
     if [[ ! -e ${path} && ! -L ${path} ]]; then
       unset 'temporary_path_identity['"${path}"']'
       continue
@@ -779,49 +836,95 @@ restore_public_state() {
   local path=$1
   local kind="${previous_public_kind["${path}"]}"
   local restore_next="${path}.rollback.$$"
-  local backup_path
-  local backup_name
+  local previous_identity="${previous_public_identity["${path}"]-}"
+  local previous_nlink="${previous_public_nlink["${path}"]-}"
+  local published_identity="${published_public_identity["${path}"]-}"
+  local published_target="${published_public_target["${path}"]-}"
+  local rollback_anchor="${public_rollback_anchor_path["${path}"]-}"
+  local rollback_anchor_consumed=false
   [[ ! -e ${restore_next} && ! -L ${restore_next} ]] || return 1
   if [[ -e ${path} && ! -L ${path} && ! -f ${path} ]]; then
     return 1
   fi
   case "${kind}" in
     absent)
-      rm -f -- "${path}" || return 1
+      if [[ -e ${path} || -L ${path} ]]; then
+        [[ ${published_identity} =~ ^[0-9]+:[0-9]+$ &&
+          -n ${published_target} && -L ${path} &&
+          $(stat -c '%d:%i' -- "${path}") == "${published_identity}" &&
+          $(readlink -- "${path}") == "${published_target}" ]] || return 1
+        rm -f -- "${path}" || return 1
+      fi
       [[ ! -e ${path} && ! -L ${path} ]] || return 1
       ;;
     symlink)
-      register_temporary_path "${restore_next}" || return 1
-      ln -s -- "${previous_public_target["${path}"]}" "${restore_next}" || return 1
-      claim_temporary_path "${restore_next}" || return 1
-      mv -Tf -- "${restore_next}" "${path}" || return 1
-      forget_temporary_path "${restore_next}"
+      if [[ -L ${path} && ${previous_identity} =~ ^[0-9]+:[0-9]+$ &&
+        $(stat -c '%d:%i' -- "${path}") == "${previous_identity}" &&
+        $(readlink -- "${path}") == "${previous_public_target["${path}"]}" ]]; then
+        :
+      else
+        if [[ -e ${path} || -L ${path} ]]; then
+          [[ ${published_identity} =~ ^[0-9]+:[0-9]+$ &&
+            -n ${published_target} && -L ${path} &&
+            $(stat -c '%d:%i' -- "${path}") == "${published_identity}" &&
+            $(readlink -- "${path}") == "${published_target}" ]] || return 1
+        fi
+        register_temporary_path "${restore_next}" || return 1
+        ln -s -- "${previous_public_target["${path}"]}" "${restore_next}" || return 1
+        claim_temporary_path "${restore_next}" || return 1
+        mv -Tf -- "${restore_next}" "${path}" || return 1
+        forget_temporary_path "${restore_next}"
+      fi
       [[ -L ${path} &&
         $(readlink -- "${path}") == "${previous_public_target["${path}"]}" ]] || return 1
       ;;
     regular)
-      backup_name="$(basename -- "${path}")" || return 1
-      [[ -n ${backup_name} && ${backup_name} != */* ]] || return 1
-      backup_path="${LEGACY_BACKUP_DIR}/${backup_name}"
+      [[ ${previous_identity} =~ ^[0-9]+:[0-9]+$ &&
+        ${previous_nlink} =~ ^[1-9][0-9]*$ ]] || return 1
       if [[ -f ${path} && ! -L ${path} &&
+        $(stat -c '%d:%i' -- "${path}") == "${previous_identity}" &&
         $(sha256sum -- "${path}" | awk 'NR == 1 { print $1 }') == "${previous_public_sha256["${path}"]}" ]]; then
         chmod "${previous_public_mode["${path}"]}" "${path}" || return 1
+        if [[ -n ${rollback_anchor} ]]; then
+          [[ ${public_rollback_anchor_owner["${rollback_anchor}"]-} == "${path}" &&
+            -n ${temporary_path_identity["${rollback_anchor}"]+present} &&
+            ${temporary_path_identity["${rollback_anchor}"]} == "${previous_identity}" &&
+            -f ${rollback_anchor} && ! -L ${rollback_anchor} &&
+            $(stat -c '%d:%i' -- "${rollback_anchor}") == "${previous_identity}" &&
+            $(stat -c '%h' -- "${rollback_anchor}") == "$((previous_nlink + 1))" ]] || return 1
+          rm -f -- "${rollback_anchor}" || return 1
+          [[ ! -e ${rollback_anchor} && ! -L ${rollback_anchor} ]] || return 1
+          rollback_anchor_consumed=true
+        fi
       else
-        [[ -f ${backup_path} && ! -L ${backup_path} ]] || return 1
-        register_temporary_path "${restore_next}" || return 1
-        install -o root -g root -m "${previous_public_mode["${path}"]}" \
-          "${backup_path}" "${restore_next}" || return 1
-        claim_temporary_path "${restore_next}" || return 1
-        [[ $(sha256sum -- "${restore_next}" | awk 'NR == 1 { print $1 }') == \
-          "${previous_public_sha256["${path}"]}" ]] || return 1
-        mv -Tf -- "${restore_next}" "${path}" || return 1
-        forget_temporary_path "${restore_next}"
+        [[ -n ${rollback_anchor} && -n ${published_target} &&
+          ${published_identity} =~ ^[0-9]+:[0-9]+$ &&
+          ${public_rollback_anchor_owner["${rollback_anchor}"]-} == "${path}" &&
+          -n ${temporary_path_identity["${rollback_anchor}"]+present} &&
+          ${temporary_path_identity["${rollback_anchor}"]} == "${previous_identity}" &&
+          -f ${rollback_anchor} && ! -L ${rollback_anchor} &&
+          $(stat -c '%d:%i' -- "${rollback_anchor}") == "${previous_identity}" &&
+          $(stat -c '%h' -- "${rollback_anchor}") == "${previous_nlink}" &&
+          -L ${path} &&
+          $(stat -c '%d:%i' -- "${path}") == "${published_identity}" &&
+          $(readlink -- "${path}") == "${published_target}" ]] || return 1
+        mv -Tf -- "${rollback_anchor}" "${path}" || return 1
+        rollback_anchor_consumed=true
       fi
       [[ -f ${path} && ! -L ${path} &&
+        $(stat -c '%d:%i' -- "${path}") == "${previous_public_identity["${path}"]}" &&
+        $(stat -c '%h' -- "${path}") == "${previous_public_nlink["${path}"]}" &&
         $(stat -c '%U:%G:%a' -- "${path}") == "root:root:${previous_public_mode["${path}"]}" &&
         $(sha256sum -- "${path}" | awk 'NR == 1 { print $1 }') == \
           "${previous_public_sha256["${path}"]}" ]] || return 1
       sync -f "$(dirname -- "${path}")" || return 1
+      if [[ ${rollback_anchor_consumed} == true ]]; then
+        forget_temporary_path "${rollback_anchor}"
+        unset 'public_rollback_anchor_owner['"${rollback_anchor}"']'
+        unset 'public_rollback_anchor_path['"${path}"']'
+      fi
+      unset 'published_public_target['"${path}"']'
+      unset 'published_public_identity['"${path}"']'
       # A backup is removed only after the public binary is proven restored.
       # On incomplete rollback it remains as a durable recovery backup.
       restore_legacy_backup_state "${path}" || return 1
@@ -913,6 +1016,15 @@ rollback_activation() {
   printf '%s\n' "install-autostream-encoder-recorder: restored the pre-install activation state" >&2
 }
 
+observe_path_identity_and_nlink() {
+  local path=$1
+  if [[ -e ${path} || -L ${path} ]]; then
+    stat -c '%d:%i:%h' -- "${path}" 2>/dev/null || printf '%s\n' unreadable
+  else
+    printf '%s\n' absent
+  fi
+}
+
 cleanup() {
   local status=$?
   local setup_rollback_safe=true
@@ -965,6 +1077,13 @@ cleanup() {
   fi
   managed_candidate=""
   managed_candidate_identity=""
+  if [[ ${installation_complete} == true ]]; then
+    if ! finalize_public_rollback_anchors; then
+      printf '%s\n' "install-autostream-encoder-recorder: failed to finalize a public rollback anchor" >&2
+      rollback_incomplete=true
+      setup_rollback_safe=false
+    fi
+  fi
   if ! cleanup_temporary_paths; then
     printf '%s\n' "install-autostream-encoder-recorder: failed to clean an invocation-owned temporary path" >&2
     rollback_incomplete=true
@@ -993,6 +1112,9 @@ cleanup() {
       rollback_incomplete=true
     fi
   fi
+  if [[ ${rollback_incomplete} == true && ${status} -eq 0 ]]; then
+    status=1
+  fi
   if [[ ${rollback_incomplete} == true ]]; then
     recovery_evidence_ready=true
     if ! {
@@ -1003,10 +1125,24 @@ cleanup() {
       printf 'public_binary_target=%s\n' "${previous_public_target["${PUBLIC_BINARY}"]-}"
       printf 'public_binary_mode=%s\n' "${previous_public_mode["${PUBLIC_BINARY}"]-}"
       printf 'public_binary_sha256=%s\n' "${previous_public_sha256["${PUBLIC_BINARY}"]-}"
+      printf 'public_binary_previous_identity=%s\n' "${previous_public_identity["${PUBLIC_BINARY}"]-}"
+      printf 'public_binary_previous_nlink=%s\n' "${previous_public_nlink["${PUBLIC_BINARY}"]-}"
+      printf 'public_binary_anchor_path=%s\n' "${public_rollback_anchor_path["${PUBLIC_BINARY}"]-}"
+      printf 'public_binary_anchor_observed=%s\n' \
+        "$(observe_path_identity_and_nlink "${public_rollback_anchor_path["${PUBLIC_BINARY}"]-}")"
+      printf 'public_binary_published_identity=%s\n' "${published_public_identity["${PUBLIC_BINARY}"]-}"
+      printf 'public_binary_published_target=%s\n' "${published_public_target["${PUBLIC_BINARY}"]-}"
       printf 'public_alias_kind=%s\n' "${previous_public_kind["${PUBLIC_ALIAS}"]-unknown}"
       printf 'public_alias_target=%s\n' "${previous_public_target["${PUBLIC_ALIAS}"]-}"
       printf 'public_alias_mode=%s\n' "${previous_public_mode["${PUBLIC_ALIAS}"]-}"
       printf 'public_alias_sha256=%s\n' "${previous_public_sha256["${PUBLIC_ALIAS}"]-}"
+      printf 'public_alias_previous_identity=%s\n' "${previous_public_identity["${PUBLIC_ALIAS}"]-}"
+      printf 'public_alias_previous_nlink=%s\n' "${previous_public_nlink["${PUBLIC_ALIAS}"]-}"
+      printf 'public_alias_anchor_path=%s\n' "${public_rollback_anchor_path["${PUBLIC_ALIAS}"]-}"
+      printf 'public_alias_anchor_observed=%s\n' \
+        "$(observe_path_identity_and_nlink "${public_rollback_anchor_path["${PUBLIC_ALIAS}"]-}")"
+      printf 'public_alias_published_identity=%s\n' "${published_public_identity["${PUBLIC_ALIAS}"]-}"
+      printf 'public_alias_published_target=%s\n' "${published_public_target["${PUBLIC_ALIAS}"]-}"
       printf 'unit_previous_kind=%s\n' "${unit_previous_kind}"
       printf 'unit_previous_mode=%s\n' "${unit_previous_mode}"
       printf 'unit_previous_sha256=%s\n' "${unit_previous_sha256}"
@@ -1457,7 +1593,11 @@ preflight_public_path() {
   local expected_target=$2
   local parent
   local mode
+  local previous_kind
   local source_digest
+  local source_identity
+  local source_nlink
+  local source_target
   local backup_name
   local backup_path
   backup_name="$(basename -- "${link_path}")" || die "could not resolve the legacy public binary name"
@@ -1465,11 +1605,29 @@ preflight_public_path() {
   backup_path="${LEGACY_BACKUP_DIR}/${backup_name}"
   parent="$(dirname -- "${link_path}")"
   [[ -d ${parent} && ! -L ${parent} ]] || die "public path parent is missing or unsafe: ${parent}"
+  previous_kind="${previous_public_kind["${link_path}"]-unobserved}"
   if [[ -L ${link_path} ]]; then
-    [[ $(readlink -- "${link_path}") == "${expected_target}" ]] || \
+    source_target="$(readlink -- "${link_path}")"
+    source_identity="$(stat -c '%d:%i' -- "${link_path}")"
+    [[ ${source_target} == "${expected_target}" ]] || \
       die "existing public symlink has an unexpected target: ${link_path}"
-    previous_public_kind["${link_path}"]="symlink"
-    previous_public_target["${link_path}"]="$(readlink -- "${link_path}")"
+    [[ ${source_identity} =~ ^[0-9]+:[0-9]+$ ]] || \
+      die "could not capture the public symlink identity: ${link_path}"
+    case "${previous_kind}" in
+      unobserved)
+        previous_public_kind["${link_path}"]="symlink"
+        previous_public_target["${link_path}"]="${source_target}"
+        previous_public_identity["${link_path}"]="${source_identity}"
+        ;;
+      symlink)
+        [[ ${source_target} == "${previous_public_target["${link_path}"]}" &&
+          ${source_identity} == "${previous_public_identity["${link_path}"]}" ]] || \
+          die "public symlink changed after preflight: ${link_path}"
+        ;;
+      *)
+        die "public path type changed after preflight: ${link_path}"
+        ;;
+    esac
     if [[ -z ${backup_previous_kind["${link_path}"]+present} ]]; then
       backup_previous_kind["${link_path}"]="not-applicable"
     fi
@@ -1481,7 +1639,32 @@ preflight_public_path() {
     mode="$(stat -c '%a' -- "${link_path}")"
     (( (8#${mode} & 07022) == 0 )) || \
       die "legacy public binary has unsafe write or special mode bits: ${link_path}"
+    source_identity="$(stat -c '%d:%i' -- "${link_path}")"
+    source_nlink="$(stat -c '%h' -- "${link_path}")"
+    [[ ${source_identity} =~ ^[0-9]+:[0-9]+$ ]] || \
+      die "could not capture the legacy public binary identity: ${link_path}"
+    [[ ${source_nlink} =~ ^[1-9][0-9]*$ ]] || \
+      die "could not capture the legacy public binary link count: ${link_path}"
     source_digest="$(sha256sum -- "${link_path}" | awk 'NR == 1 { print $1 }')"
+    case "${previous_kind}" in
+      unobserved)
+        previous_public_kind["${link_path}"]="regular"
+        previous_public_identity["${link_path}"]="${source_identity}"
+        previous_public_nlink["${link_path}"]="${source_nlink}"
+        previous_public_mode["${link_path}"]="${mode}"
+        previous_public_sha256["${link_path}"]="${source_digest}"
+        ;;
+      regular)
+        [[ ${source_identity} == "${previous_public_identity["${link_path}"]}" &&
+          ${source_nlink} == "${previous_public_nlink["${link_path}"]}" &&
+          ${mode} == "${previous_public_mode["${link_path}"]}" &&
+          ${source_digest} == "${previous_public_sha256["${link_path}"]}" ]] || \
+          die "legacy public binary changed after preflight: ${link_path}"
+        ;;
+      *)
+        die "public path type changed after preflight: ${link_path}"
+        ;;
+    esac
     if [[ -z ${backup_previous_kind["${link_path}"]+present} ]]; then
       if [[ -e ${backup_path} || -L ${backup_path} ]]; then
         [[ -f ${backup_path} && ! -L ${backup_path} &&
@@ -1518,15 +1701,37 @@ preflight_public_path() {
           ;;
       esac
     fi
-    previous_public_kind["${link_path}"]="regular"
-    previous_public_mode["${link_path}"]="${mode}"
-    previous_public_sha256["${link_path}"]="${source_digest}"
   else
-    previous_public_kind["${link_path}"]="absent"
+    case "${previous_kind}" in
+      unobserved)
+        previous_public_kind["${link_path}"]="absent"
+        ;;
+      absent)
+        ;;
+      *)
+        die "public path disappeared after preflight: ${link_path}"
+        ;;
+    esac
     if [[ -z ${backup_previous_kind["${link_path}"]+present} ]]; then
       backup_previous_kind["${link_path}"]="not-applicable"
     fi
   fi
+}
+
+reject_stale_public_rollback_anchors() {
+  local path=$1
+  local restore_nullglob=false
+  local -a stale_anchors=()
+  if ! shopt -q nullglob; then
+    shopt -s nullglob
+    restore_nullglob=true
+  fi
+  stale_anchors=("${path}.rollback-anchor."*)
+  if [[ ${restore_nullglob} == true ]]; then
+    shopt -u nullglob
+  fi
+  ((${#stale_anchors[@]} == 0)) || \
+    die "stale public rollback anchor requires manual recovery: ${path}"
 }
 
 [[ -d /run && ! -L /run && $(readlink -f -- /run) == "/run" &&
@@ -1598,6 +1803,14 @@ flock -n 9 || die "another privileged update is already active for ${UNIT_NAME}"
 
 preflight_public_path "${PUBLIC_BINARY}" "${CURRENT_LINK}/bin/autostream-encoder-recorder"
 preflight_public_path "${PUBLIC_ALIAS}" "${PUBLIC_BINARY}"
+if [[ ${previous_public_kind["${PUBLIC_BINARY}"]} == "regular" &&
+  ${previous_public_kind["${PUBLIC_ALIAS}"]} == "regular" &&
+  ${previous_public_identity["${PUBLIC_BINARY}"]} == \
+    "${previous_public_identity["${PUBLIC_ALIAS}"]}" ]]; then
+  die "legacy canonical public binary and alias must not be hard links to the same inode"
+fi
+reject_stale_public_rollback_anchors "${PUBLIC_BINARY}"
+reject_stale_public_rollback_anchors "${PUBLIC_ALIAS}"
 if [[ ${previous_public_kind["${PUBLIC_BINARY}"]} == "absent" ]] &&
   systemctl is-active --quiet "${UNIT_NAME}"; then
   die "active service has no canonical public binary; stop it before installing"
@@ -1950,10 +2163,65 @@ backup_legacy_binary() {
 backup_legacy_binary "${PUBLIC_BINARY}"
 backup_legacy_binary "${PUBLIC_ALIAS}"
 
+prepare_public_rollback_anchor() {
+  local link_path=$1
+  local anchor_status=0
+  local previous_identity="${previous_public_identity["${link_path}"]-}"
+  local previous_nlink="${previous_public_nlink["${link_path}"]-}"
+  local anchored_nlink=0
+  local rollback_anchor="${link_path}.rollback-anchor.$$"
+
+  [[ ${previous_public_kind["${link_path}"]} == "regular" ]] || return 0
+  [[ ${previous_identity} =~ ^[0-9]+:[0-9]+$ &&
+    ${previous_nlink} =~ ^[1-9][0-9]*$ &&
+    -f ${link_path} && ! -L ${link_path} &&
+    $(stat -c '%d:%i' -- "${link_path}") == "${previous_identity}" &&
+    $(stat -c '%h' -- "${link_path}") == "${previous_nlink}" &&
+    -z ${public_rollback_anchor_path["${link_path}"]+present} &&
+    -z ${public_rollback_anchor_owner["${rollback_anchor}"]+present} &&
+    ! -e ${rollback_anchor} && ! -L ${rollback_anchor} ]] || return 1
+
+  begin_installer_signal_transaction
+  if ! register_temporary_path "${rollback_anchor}"; then
+    anchor_status=1
+  else
+    public_rollback_anchor_path["${link_path}"]="${rollback_anchor}"
+    public_rollback_anchor_owner["${rollback_anchor}"]="${link_path}"
+    if ! ln -T -- "${link_path}" "${rollback_anchor}"; then
+      anchor_status=1
+    elif ! claim_temporary_path "${rollback_anchor}"; then
+      anchor_status=1
+    else
+      anchored_nlink=$((previous_nlink + 1))
+    fi
+    if [[ ${anchor_status} -eq 0 &&
+      ( ${temporary_path_identity["${rollback_anchor}"]} != "${previous_identity}" ||
+      $(stat -c '%d:%i' -- "${link_path}") != "${previous_identity}" ||
+      $(stat -c '%d:%i' -- "${rollback_anchor}") != "${previous_identity}" ||
+      $(stat -c '%h' -- "${link_path}") != "${anchored_nlink}" ||
+      $(stat -c '%h' -- "${rollback_anchor}") != "${anchored_nlink}" ) ]]; then
+      anchor_status=1
+    fi
+    if [[ ${anchor_status} -ne 0 &&
+      ! -e ${rollback_anchor} && ! -L ${rollback_anchor} ]]; then
+      forget_temporary_path "${rollback_anchor}"
+      unset 'public_rollback_anchor_owner['"${rollback_anchor}"']'
+      unset 'public_rollback_anchor_path['"${link_path}"']'
+    fi
+  fi
+  finish_installer_signal_transaction
+  [[ ${anchor_status} -eq 0 ]]
+}
+
 install_public_link() {
   local target=$1
   local link_path=$2
   local link_status=0
+  local previous_kind="${previous_public_kind["${link_path}"]}"
+  local previous_identity="${previous_public_identity["${link_path}"]-}"
+  local previous_nlink="${previous_public_nlink["${link_path}"]-}"
+  local rollback_anchor="${public_rollback_anchor_path["${link_path}"]-}"
+  local staged_link_identity=""
   public_link_next="${link_path}.next.$$"
   [[ ! -e ${public_link_next} && ! -L ${public_link_next} ]] || \
     die "public link staging path already exists: ${public_link_next}"
@@ -1964,11 +2232,36 @@ install_public_link() {
     link_status=1
   elif ! claim_temporary_path "${public_link_next}"; then
     link_status=1
-  elif ! mv -Tf -- "${public_link_next}" "${link_path}"; then
-    link_status=1
   else
-    forget_temporary_path "${public_link_next}"
-    public_link_next=""
+    staged_link_identity="${temporary_path_identity["${public_link_next}"]}"
+    [[ ${staged_link_identity} =~ ^[0-9]+:[0-9]+$ ]] || link_status=1
+    if [[ ${link_status} -eq 0 && ${previous_kind} == "regular" ]]; then
+      [[ ${previous_identity} =~ ^[0-9]+:[0-9]+$ &&
+        ${previous_nlink} =~ ^[1-9][0-9]*$ &&
+        -n ${rollback_anchor} &&
+        ${public_rollback_anchor_owner["${rollback_anchor}"]-} == "${link_path}" &&
+        -n ${temporary_path_identity["${rollback_anchor}"]+present} &&
+        ${temporary_path_identity["${rollback_anchor}"]} == "${previous_identity}" &&
+        -f ${rollback_anchor} && ! -L ${rollback_anchor} &&
+        $(stat -c '%d:%i' -- "${rollback_anchor}") == "${previous_identity}" &&
+        $(stat -c '%h' -- "${rollback_anchor}") == "$((previous_nlink + 1))" &&
+        -f ${link_path} && ! -L ${link_path} &&
+        $(stat -c '%d:%i' -- "${link_path}") == "${previous_identity}" &&
+        $(stat -c '%h' -- "${link_path}") == "$((previous_nlink + 1))" ]] || link_status=1
+    fi
+    if [[ ${link_status} -eq 0 ]]; then
+      published_public_target["${link_path}"]="${target}"
+      published_public_identity["${link_path}"]="${staged_link_identity}"
+      if ! mv -Tf -- "${public_link_next}" "${link_path}"; then
+        link_status=1
+      else
+        forget_temporary_path "${public_link_next}"
+        public_link_next=""
+        [[ -L ${link_path} &&
+          $(stat -c '%d:%i' -- "${link_path}") == "${staged_link_identity}" &&
+          $(readlink -- "${link_path}") == "${target}" ]] || link_status=1
+      fi
+    fi
   fi
   finish_installer_signal_transaction
   [[ ${link_status} -eq 0 ]] || die "could not publish public link: ${link_path}"
@@ -2035,6 +2328,15 @@ if [[ ! -L ${CURRENT_LINK} ]] || [[ $(readlink -f -- "${CURRENT_LINK}") != "${RE
   sync -f "${MANAGED_ROOT}"
 fi
 [[ $(readlink -f -- "${CURRENT_LINK}") == "${RELEASE_DIR}" ]] || die "managed current link verification failed"
+
+prepare_public_rollback_anchor "${PUBLIC_BINARY}" || \
+  die "could not prepare the canonical public binary rollback anchor"
+prepare_public_rollback_anchor "${PUBLIC_ALIAS}" || \
+  die "could not prepare the public alias rollback anchor"
+if [[ -n ${public_rollback_anchor_path["${PUBLIC_BINARY}"]-} ||
+  -n ${public_rollback_anchor_path["${PUBLIC_ALIAS}"]-} ]]; then
+  sync -f /usr/local/bin
+fi
 
 # The alias is not used by ExecStart, so switch it first and commit the
 # canonical systemd path last.

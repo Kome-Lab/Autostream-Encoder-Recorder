@@ -367,10 +367,212 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		"cleanup runtime race changed the foreign runtime unit hash",
 		"cleanup runtime race recovery did not restore the owned inode",
 		"Keep cleanup race enablement semantics equivalent to the foreign probe unit.",
+		`install -d -o root -g root -m 0700 "${INSTALL_BACKUP_ROOT}"`,
+		"pre-existing backup root fixture is not root-only",
+		"public-link sync failure actual status:",
+		"public-link sync failure shim marker: reached",
+		"public-link sync failure shim marker: not reached",
+		"public-link sync failure shim argv trace:",
+		"public-link sync failure captured installer output:",
+		`assert_no_public_rollback_anchors "public-link sync failure"`,
+		"legacy_public_binary_nlink_before=",
+		"legacy_public_alias_nlink_before=",
+		"failed migration changed the legacy canonical binary link count",
+		"failed migration changed the legacy alias link count",
+		`assert_no_public_rollback_anchors "successful migration"`,
+		`assert_no_public_rollback_anchors "idempotent reinstall"`,
+		`[ -L /usr/local/bin/encoder-recorder ]`,
+		`[ "$(readlink -- /usr/local/bin/encoder-recorder)" = "/usr/local/bin/autostream-encoder-recorder" ]`,
+		`stat -c '%d:%i:%u:%g:%a' -- "${PUBLIC_BINARY}"`,
+		`stat -c '%d:%i:%u:%g:%a' -- "${PUBLIC_ALIAS}"`,
 	} {
 		if !strings.Contains(integration, marker) {
 			t.Fatalf("installer integration fixture is missing scenario marker %q", marker)
 		}
+	}
+	preexistingBackupDirIndex := strings.Index(integration, `preexisting_backup_dir="${INSTALL_BACKUP_ROOT}`)
+	backupRootCreateIndex := strings.Index(integration, `install -d -o root -g root -m 0700 "${INSTALL_BACKUP_ROOT}"`)
+	backupVersionCreateIndex := strings.Index(integration, `install -d -o root -g root -m 0700 "${preexisting_backup_dir}"`)
+	backupRootModeIndex := strings.Index(integration, `die "pre-existing backup root fixture is not root-only"`)
+	backupVersionModeIndex := strings.Index(integration, `die "pre-existing backup directory fixture is not root-only"`)
+	if preexistingBackupDirIndex < 0 || backupRootCreateIndex <= preexistingBackupDirIndex ||
+		backupVersionCreateIndex <= backupRootCreateIndex || backupRootModeIndex <= backupVersionCreateIndex ||
+		backupVersionModeIndex <= backupRootModeIndex {
+		t.Fatal("pre-existing backup fixture must create and verify the root before the version directory")
+	}
+	publicSyncStatusIndex := strings.Index(integration, "public_sync_status=$?")
+	publicSyncDiagnosticIndex := strings.Index(
+		integration,
+		`if [[ ${public_sync_status} -ne 74 ]]; then`,
+	)
+	publicSyncExactAssertionIndex := strings.Index(
+		integration,
+		`[[ ${public_sync_status} -eq 74 ]] ||`,
+	)
+	if publicSyncStatusIndex < 0 ||
+		publicSyncDiagnosticIndex <= publicSyncStatusIndex ||
+		publicSyncExactAssertionIndex <= publicSyncDiagnosticIndex {
+		t.Fatal("public-link sync fault must emit diagnostics before retaining its exact status and rollback assertions")
+	}
+	for _, marker := range []string{
+		`declare -A previous_public_identity=()`,
+		`declare -A previous_public_nlink=()`,
+		`declare -A public_rollback_anchor_path=()`,
+		`declare -A public_rollback_anchor_owner=()`,
+		`declare -A published_public_target=()`,
+		`declare -A published_public_identity=()`,
+		`finalize_public_rollback_anchors()`,
+		`ln -T -- "${link_path}" "${rollback_anchor}"`,
+		`claim_temporary_path "${rollback_anchor}"`,
+		`public_rollback_anchor_path["${link_path}"]="${rollback_anchor}"`,
+		`published_public_target["${link_path}"]="${target}"`,
+		`published_public_identity["${link_path}"]="${staged_link_identity}"`,
+		`mv -Tf -- "${rollback_anchor}" "${path}"`,
+		`$(stat -c '%d:%i' -- "${path}") == "${previous_public_identity["${path}"]}"`,
+		`$(stat -c '%h' -- "${path}") == "${previous_public_nlink["${path}"]}"`,
+		`if [[ ${rollback_incomplete} == true && ${status} -eq 0 ]]; then`,
+		`public_binary_anchor_observed=%s`,
+		`public_alias_anchor_observed=%s`,
+		`legacy canonical public binary and alias must not be hard links to the same inode`,
+		"reject_stale_public_rollback_anchors()",
+		`stale_anchors=("${path}.rollback-anchor."*)`,
+		`reject_stale_public_rollback_anchors "${PUBLIC_BINARY}"`,
+		`reject_stale_public_rollback_anchors "${PUBLIC_ALIAS}"`,
+		`previous_kind="${previous_public_kind["${link_path}"]-unobserved}"`,
+		`source_identity="$(stat -c '%d:%i' -- "${link_path}")"`,
+		`previous_public_identity["${link_path}"]="${source_identity}"`,
+		`die "public symlink changed after preflight: ${link_path}"`,
+		`die "legacy public binary changed after preflight: ${link_path}"`,
+		`$(stat -c '%d:%i' -- "${path}") == "${published_identity}"`,
+		`$(readlink -- "${path}") == "${published_target}"`,
+	} {
+		if !strings.Contains(installer, marker) {
+			t.Fatalf("installer is missing inode-preserving public rollback marker %q", marker)
+		}
+	}
+	prepareAnchorFunctionIndex := strings.Index(installer, "prepare_public_rollback_anchor() {")
+	prepareAnchorFunctionEndOffset := -1
+	if prepareAnchorFunctionIndex >= 0 {
+		prepareAnchorFunctionEndOffset = strings.Index(
+			installer[prepareAnchorFunctionIndex:],
+			"\n}\n\ninstall_public_link() {",
+		)
+	}
+	if prepareAnchorFunctionIndex < 0 || prepareAnchorFunctionEndOffset < 0 {
+		t.Fatal("installer public rollback-anchor transaction is missing")
+	}
+	prepareAnchorFunction := installer[prepareAnchorFunctionIndex : prepareAnchorFunctionIndex+prepareAnchorFunctionEndOffset]
+	anchorRegisterIndex := strings.Index(prepareAnchorFunction, `register_temporary_path "${rollback_anchor}"`)
+	anchorProtectIndex := strings.Index(prepareAnchorFunction, `public_rollback_anchor_owner["${rollback_anchor}"]="${link_path}"`)
+	anchorLinkIndex := strings.Index(prepareAnchorFunction, `ln -T -- "${link_path}" "${rollback_anchor}"`)
+	anchorClaimIndex := strings.Index(prepareAnchorFunction, `claim_temporary_path "${rollback_anchor}"`)
+	anchorIdentityIndex := strings.Index(prepareAnchorFunction, `${temporary_path_identity["${rollback_anchor}"]} != "${previous_identity}"`)
+	if anchorRegisterIndex < 0 || anchorProtectIndex <= anchorRegisterIndex ||
+		anchorLinkIndex <= anchorProtectIndex || anchorClaimIndex <= anchorLinkIndex ||
+		anchorIdentityIndex <= anchorClaimIndex {
+		t.Fatal("installer must protect, journal, and identity-check each same-filesystem rollback anchor")
+	}
+
+	publicLinkFunctionIndex := strings.Index(installer, "install_public_link() {")
+	publicLinkFunctionEndOffset := -1
+	if publicLinkFunctionIndex >= 0 {
+		publicLinkFunctionEndOffset = strings.Index(
+			installer[publicLinkFunctionIndex:],
+			"\n}\n\nif [[ -n ${env_stage} ]]",
+		)
+	}
+	if publicLinkFunctionIndex < 0 || publicLinkFunctionEndOffset < 0 {
+		t.Fatal("installer public-link transaction is missing")
+	}
+	publicLinkFunction := installer[publicLinkFunctionIndex : publicLinkFunctionIndex+publicLinkFunctionEndOffset]
+	stagedIdentityIndex := strings.Index(publicLinkFunction, `staged_link_identity="${temporary_path_identity["${public_link_next}"]}"`)
+	publishedTargetIndex := strings.Index(publicLinkFunction, `published_public_target["${link_path}"]="${target}"`)
+	publishedIdentityIndex := strings.Index(publicLinkFunction, `published_public_identity["${link_path}"]="${staged_link_identity}"`)
+	publicLinkMoveIndex := strings.Index(publicLinkFunction, `mv -Tf -- "${public_link_next}" "${link_path}"`)
+	publishedDestinationIdentityIndex := strings.Index(publicLinkFunction, `$(stat -c '%d:%i' -- "${link_path}") == "${staged_link_identity}"`)
+	publishedDestinationTargetIndex := strings.Index(publicLinkFunction, `$(readlink -- "${link_path}") == "${target}"`)
+	if stagedIdentityIndex < 0 || publishedTargetIndex <= stagedIdentityIndex ||
+		publishedIdentityIndex <= publishedTargetIndex || publicLinkMoveIndex <= publishedIdentityIndex ||
+		publishedDestinationIdentityIndex <= publicLinkMoveIndex ||
+		publishedDestinationTargetIndex <= publishedDestinationIdentityIndex {
+		t.Fatal("installer must capture and verify the exact staged symlink identity around public-link publication")
+	}
+	prepareBinaryIndex := strings.Index(installer, `prepare_public_rollback_anchor "${PUBLIC_BINARY}" ||`)
+	prepareAliasIndex := strings.Index(installer, `prepare_public_rollback_anchor "${PUBLIC_ALIAS}" ||`)
+	anchorDirectorySyncIndex := strings.Index(installer, "  sync -f /usr/local/bin\n")
+	publicAliasInstallIndex := strings.Index(installer, `install_public_link "${PUBLIC_BINARY}" "${PUBLIC_ALIAS}"`)
+	if prepareBinaryIndex < 0 || prepareAliasIndex <= prepareBinaryIndex ||
+		anchorDirectorySyncIndex <= prepareAliasIndex || publicAliasInstallIndex <= anchorDirectorySyncIndex {
+		t.Fatal("installer must durably prepare both public rollback anchors before the first public rename")
+	}
+	staleBinaryIndex := strings.Index(installer, `reject_stale_public_rollback_anchors "${PUBLIC_BINARY}"`)
+	staleAliasIndex := strings.Index(installer, `reject_stale_public_rollback_anchors "${PUBLIC_ALIAS}"`)
+	firstBackupIndex := strings.Index(installer, `backup_legacy_binary "${PUBLIC_BINARY}"`)
+	if staleBinaryIndex < 0 || staleAliasIndex <= staleBinaryIndex || firstBackupIndex <= staleAliasIndex {
+		t.Fatal("installer must reject stale rollback anchors before creating migration backups")
+	}
+
+	finalizeStart := strings.Index(installer, "finalize_public_rollback_anchors() {")
+	finalizeEndOffset := -1
+	if finalizeStart >= 0 {
+		finalizeEndOffset = strings.Index(installer[finalizeStart:], "\n}\n\ncleanup_temporary_paths() {")
+	}
+	if finalizeStart < 0 || finalizeEndOffset < 0 {
+		t.Fatal("installer completed rollback-anchor finalizer is missing")
+	}
+	finalizeFunction := installer[finalizeStart : finalizeStart+finalizeEndOffset]
+	finalizeRM := strings.Index(finalizeFunction, `rm -f -- "${rollback_anchor}"`)
+	finalizeSync := strings.Index(finalizeFunction, `sync -f "${rollback_anchor_parent}"`)
+	finalizeForget := strings.Index(finalizeFunction, `forget_temporary_path "${rollback_anchor}"`)
+	if finalizeRM < 0 || finalizeSync <= finalizeRM || finalizeForget <= finalizeSync {
+		t.Fatal("installer must retain completed rollback-anchor tracking until its unlink is durable")
+	}
+
+	restoreStart := strings.Index(installer, "restore_public_state() {")
+	restoreEndOffset := -1
+	if restoreStart >= 0 {
+		restoreEndOffset = strings.Index(installer[restoreStart:], "\n}\n\nrestore_unit_state() {")
+	}
+	if restoreStart < 0 || restoreEndOffset < 0 {
+		t.Fatal("installer public rollback helper is missing")
+	}
+	restoreFunction := installer[restoreStart : restoreStart+restoreEndOffset]
+	anchorMove := strings.Index(restoreFunction, `mv -Tf -- "${rollback_anchor}" "${path}"`)
+	restoreSync := -1
+	restoreForget := -1
+	if anchorMove >= 0 {
+		restoreSync = strings.Index(restoreFunction[anchorMove:], `sync -f "$(dirname -- "${path}")"`)
+		restoreForget = strings.Index(restoreFunction[anchorMove:], `forget_temporary_path "${rollback_anchor}"`)
+	}
+	if anchorMove < 0 || restoreSync < 0 || restoreForget <= restoreSync {
+		t.Fatal("installer must retain restored rollback-anchor tracking until its rename is durable")
+	}
+	publicSyncScenarioEndOffset := strings.Index(
+		integration[publicSyncExactAssertionIndex:],
+		"\nset +e\n",
+	)
+	if publicSyncScenarioEndOffset < 0 {
+		t.Fatal("public-link sync fault scenario must end before the next injected failure")
+	}
+	publicSyncScenarioEndIndex := publicSyncExactAssertionIndex + publicSyncScenarioEndOffset
+	publicSyncScenario := integration[publicSyncExactAssertionIndex:publicSyncScenarioEndIndex]
+	previousPublicSyncAssertionIndex := -1
+	for _, assertion := range []string{
+		`[[ ${public_sync_status} -eq 74 ]] ||`,
+		`[[ ! -e ${MANAGED_ROOT}/current && ! -L ${MANAGED_ROOT}/current ]] ||`,
+		`assert_existing_state_unchanged "activation failure"`,
+		`assert_existing_archive_unchanged "archive activation failure"`,
+		`assert_legacy_public_paths_unchanged`,
+		`assert_preexisting_backups_unchanged`,
+		`assert_shared_managed_parent_unchanged`,
+		`assert_legacy_pid1_state "public-link sync failure"`,
+		`assert_not_enabled`,
+	} {
+		assertionIndex := strings.Index(publicSyncScenario, assertion)
+		if assertionIndex <= previousPublicSyncAssertionIndex {
+			t.Fatalf("public-link sync fault scenario is missing ordered rollback assertion %q", assertion)
+		}
+		previousPublicSyncAssertionIndex = assertionIndex
 	}
 	namespaceIndex := strings.Index(
 		integration,

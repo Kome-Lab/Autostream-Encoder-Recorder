@@ -1575,19 +1575,24 @@ legacy_public_binary_metadata_before="$(
 legacy_public_binary_sha_before="$(
   sha256sum "${PUBLIC_BINARY}" | awk 'NR == 1 { print $1 }'
 )"
+legacy_public_binary_nlink_before="$(stat -c '%h' -- "${PUBLIC_BINARY}")"
 legacy_public_alias_metadata_before="$(
   stat -c '%d:%i:%u:%g:%a' -- "${PUBLIC_ALIAS}"
 )"
 legacy_public_alias_sha_before="$(
   sha256sum "${PUBLIC_ALIAS}" | awk 'NR == 1 { print $1 }'
 )"
+legacy_public_alias_nlink_before="$(stat -c '%h' -- "${PUBLIC_ALIAS}")"
 preexisting_backup_dir="${INSTALL_BACKUP_ROOT}/${VERSION}-${archive_sha256:0:12}"
 install_backup_root_owned=true
+install -d -o root -g root -m 0700 "${INSTALL_BACKUP_ROOT}"
 install -d -o root -g root -m 0700 "${preexisting_backup_dir}"
 install -o root -g root -m 0500 "${PUBLIC_BINARY}" \
   "${preexisting_backup_dir}/autostream-encoder-recorder"
 install -o root -g root -m 0500 "${PUBLIC_ALIAS}" \
   "${preexisting_backup_dir}/encoder-recorder"
+[[ $(stat -c '%u:%g:%a' -- "${INSTALL_BACKUP_ROOT}") == "0:0:700" ]] || \
+  die "pre-existing backup root fixture is not root-only"
 [[ $(stat -c '%u:%g:%a' -- "${preexisting_backup_dir}") == "0:0:700" ]] || \
   die "pre-existing backup directory fixture is not root-only"
 [[ $(stat -c '%u:%g:%a' -- \
@@ -1644,18 +1649,36 @@ assert_legacy_public_paths_unchanged() {
   [[ "$(sha256sum "${PUBLIC_BINARY}" | awk 'NR == 1 { print $1 }')" == \
     "${legacy_public_binary_sha_before}" ]] || \
     die "failed migration changed the legacy canonical binary content"
+  [[ "$(stat -c '%h' -- "${PUBLIC_BINARY}")" == \
+    "${legacy_public_binary_nlink_before}" ]] || \
+    die "failed migration changed the legacy canonical binary link count"
   [[ "$(stat -c '%d:%i:%u:%g:%a' -- "${PUBLIC_ALIAS}")" == \
     "${legacy_public_alias_metadata_before}" ]] || \
     die "failed migration changed the legacy alias inode or metadata"
   [[ "$(sha256sum "${PUBLIC_ALIAS}" | awk 'NR == 1 { print $1 }')" == \
     "${legacy_public_alias_sha_before}" ]] || \
     die "failed migration changed the legacy alias content"
+  [[ "$(stat -c '%h' -- "${PUBLIC_ALIAS}")" == \
+    "${legacy_public_alias_nlink_before}" ]] || \
+    die "failed migration changed the legacy alias link count"
   [[ "${legacy_public_binary_sha_before}" == \
     "${preexisting_backup_binary_sha_before}" ]] || \
     die "pre-existing canonical backup was not bound to the live legacy binary"
   [[ "${legacy_public_alias_sha_before}" == \
     "${preexisting_backup_alias_sha_before}" ]] || \
     die "pre-existing alias backup was not bound to the live legacy binary"
+}
+
+assert_no_public_rollback_anchors() {
+  local scenario=$1
+  local leftover=""
+  leftover="$(
+    find /usr/local/bin -mindepth 1 -maxdepth 1 \
+      \( -name 'autostream-encoder-recorder.rollback-anchor.*' -o \
+      -name 'encoder-recorder.rollback-anchor.*' \) -print -quit
+  )"
+  [[ -z ${leftover} ]] || \
+    die "${scenario} left a public rollback anchor: ${leftover}"
 }
 
 assert_shared_managed_parent_unchanged() {
@@ -1678,7 +1701,16 @@ assert_legacy_pid1_state "legacy baseline"
 install -o root -g root -m 0755 /usr/bin/sync "${WORK_DIR}/real-sync"
 printf '%s\n' \
   '#!/bin/sh' \
-  'if [ "${1:-}" = "-f" ] && [ "${2:-}" = "/usr/local/bin" ]; then' \
+  '{' \
+  '  printf "argc=%s" "$#"' \
+  '  for public_sync_arg in "$@"; do' \
+  '    printf " <%s>" "${public_sync_arg}"' \
+  '  done' \
+  '  printf "\n"' \
+  "} >> '${WORK_DIR}/public-sync-argv.trace'" \
+  'if [ "${1:-}" = "-f" ] && [ "${2:-}" = "/usr/local/bin" ] &&' \
+  '  [ -L /usr/local/bin/encoder-recorder ] &&' \
+  '  [ "$(readlink -- /usr/local/bin/encoder-recorder)" = "/usr/local/bin/autostream-encoder-recorder" ]; then' \
   "  if [ ! -e '${WORK_DIR}/public-sync-failed' ]; then" \
   "    : > '${WORK_DIR}/public-sync-failed'" \
   '    exit 74' \
@@ -1694,6 +1726,33 @@ unshare --mount --propagation private bash -c \
 public_sync_status=$?
 set -e
 adopt_installer_paths
+if [[ ${public_sync_status} -ne 74 ]]; then
+  printf 'encoder-recorder installer integration test: public-link sync failure actual status: %s\n' \
+    "${public_sync_status}" >&2
+  if [[ -f ${WORK_DIR}/public-sync-failed && ! -L ${WORK_DIR}/public-sync-failed ]]; then
+    printf '%s\n' \
+      'encoder-recorder installer integration test: public-link sync failure shim marker: reached' >&2
+  else
+    printf '%s\n' \
+      'encoder-recorder installer integration test: public-link sync failure shim marker: not reached' >&2
+  fi
+  printf '%s\n' \
+    'encoder-recorder installer integration test: public-link sync failure shim argv trace:' >&2
+  if [[ -f ${WORK_DIR}/public-sync-argv.trace && ! -L ${WORK_DIR}/public-sync-argv.trace ]]; then
+    cat -- "${WORK_DIR}/public-sync-argv.trace" >&2 || \
+      printf '%s\n' '<argv trace unreadable>' >&2
+  else
+    printf '%s\n' '<argv trace missing>' >&2
+  fi
+  printf '%s\n' \
+    'encoder-recorder installer integration test: public-link sync failure captured installer output:' >&2
+  if [[ -f ${WORK_DIR}/public-sync-failure.out && ! -L ${WORK_DIR}/public-sync-failure.out ]]; then
+    cat -- "${WORK_DIR}/public-sync-failure.out" >&2 || \
+      printf '%s\n' '<captured installer output unreadable>' >&2
+  else
+    printf '%s\n' '<captured installer output missing>' >&2
+  fi
+fi
 [[ ${public_sync_status} -eq 74 ]] || die "public-link sync failure injection returned an unexpected status"
 [[ -f ${WORK_DIR}/public-sync-failed ]] || die "public-link sync failure injection did not reach its shim"
 [[ ! -e ${MANAGED_ROOT}/current && ! -L ${MANAGED_ROOT}/current ]] || \
@@ -1711,6 +1770,7 @@ grep -Fx -- "${LEGACY_ALIAS_CONTENT}" "${PUBLIC_ALIAS}" >/dev/null || \
 assert_existing_state_unchanged "activation failure"
 assert_existing_archive_unchanged "archive activation failure"
 assert_legacy_public_paths_unchanged
+assert_no_public_rollback_anchors "public-link sync failure"
 assert_preexisting_backups_unchanged
 assert_shared_managed_parent_unchanged
 assert_legacy_pid1_state "public-link sync failure"
@@ -1743,6 +1803,7 @@ grep -Fx -- "${LEGACY_ALIAS_CONTENT}" "${PUBLIC_ALIAS}" >/dev/null || \
 assert_existing_state_unchanged "activation failure"
 assert_existing_archive_unchanged "archive activation failure"
 assert_legacy_public_paths_unchanged
+assert_no_public_rollback_anchors "daemon-reload failure"
 assert_preexisting_backups_unchanged
 assert_shared_managed_parent_unchanged
 assert_legacy_pid1_state "daemon-reload failure"
@@ -1786,6 +1847,7 @@ readonly INSTALL_BACKUP_DIR="${INSTALL_BACKUP_ROOT}/${VERSION}-${archive_sha256:
   die "canonical public link does not resolve to the verified release"
 [[ $(readlink -f -- "${PUBLIC_ALIAS}") == "${RELEASE_DIR}/bin/autostream-encoder-recorder" ]] || \
   die "public alias does not resolve to the verified release"
+assert_no_public_rollback_anchors "successful migration"
 [[ $(sha256sum "${ENV_PATH}" | awk 'NR == 1 { print $1 }') == "${env_before}" ]] || \
   die "successful migration changed the existing environment"
 [[ $(sha256sum "${CONFIG_PATH}" | awk 'NR == 1 { print $1 }') == "${config_before}" ]] || \
@@ -1859,6 +1921,7 @@ idempotent_status=$?
 set -e
 adopt_installer_paths
 [[ ${idempotent_status} -eq 0 ]] || die "idempotent installer invocation failed"
+assert_no_public_rollback_anchors "idempotent reinstall"
 assert_migrated_pid1_state "idempotent reinstall"
 [[ ${runtime_unit_identity} == "${idempotent_runtime_identity_before}" &&
   $(stat -c '%d:%i' -- "${RUNTIME_UNIT_PATH}") == "${idempotent_runtime_identity_before}" ]] || \
