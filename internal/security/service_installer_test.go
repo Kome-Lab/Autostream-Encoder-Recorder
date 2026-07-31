@@ -809,6 +809,7 @@ func TestEncoderRecorderInstallerTransactionsPrivilegedHostSetup(t *testing.T) {
 		`usermod --login "${AUTOSTREAM_USER_ROLLBACK_LOGIN}" autostream`,
 		`usermod --login autostream "${AUTOSTREAM_USER_ROLLBACK_LOGIN}"`,
 		`userdel "${AUTOSTREAM_USER_ROLLBACK_LOGIN}"`,
+		"function list_contains(value, count, member_index, names)",
 		`FILENAME == "/etc/group" && NF >= 4 && list_contains($4)`,
 		`FILENAME == "/etc/gshadow" && NF >= 4 &&`,
 		`(list_contains($3) || list_contains($4))`,
@@ -838,6 +839,9 @@ func TestEncoderRecorderInstallerTransactionsPrivilegedHostSetup(t *testing.T) {
 	if strings.Contains(installer, "usermod --gid") ||
 		strings.Contains(installer, "usermod --home") {
 		t.Fatal("service-account rollback must not mutate the created user's GID or home")
+	}
+	if strings.Contains(installer, "for (index =") {
+		t.Fatal("service-account group scan must not use awk's reserved index builtin as an iterator")
 	}
 	if strings.Contains(installer, "id -Gn autostream") {
 		t.Fatal("service-account rollback must inspect exact local group and gshadow fields instead of relying on resolved group names")

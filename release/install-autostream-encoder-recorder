@@ -451,10 +451,10 @@ local_group_database_references_are_safe() {
     -f /etc/gshadow && ! -L /etc/gshadow && -r /etc/gshadow ]] || return 1
   for account_name in autostream "${AUTOSTREAM_USER_ROLLBACK_LOGIN}"; do
     awk -F: -v target="${account_name}" '
-      function list_contains(value, count, index, names) {
+      function list_contains(value, count, member_index, names) {
         count = split(value, names, ",")
-        for (index = 1; index <= count; index++) {
-          if (names[index] == target) {
+        for (member_index = 1; member_index <= count; member_index++) {
+          if (names[member_index] == target) {
             return 1
           }
         }
