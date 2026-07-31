@@ -793,14 +793,19 @@ func TestEncoderRecorderInstallerTransactionsPrivilegedHostSetup(t *testing.T) {
 		"handle_installer_signal()",
 		"begin_installer_signal_transaction()",
 		"finish_installer_signal_transaction()",
+		`exit "${input_stage_status}"`,
 		"could not journal the published managed release identity",
 		`readonly SHARED_HOST_SETUP_LOCK="/run/autostream-updater/.autostream-runtime-host-setup.lock"`,
 		`exec 8<>"${SHARED_HOST_SETUP_LOCK}"`,
+		`-f ${SHARED_HOST_SETUP_LOCK_FD_PATH} &&`,
+		`$(stat -Lc '%U:%G:%a' -- "${SHARED_HOST_SETUP_LOCK_FD_PATH}") == "root:root:600"`,
 		`flock -n 8`,
 		"another AutoStream installer is provisioning shared host state",
 		"shared host-setup lock identity changed after acquisition",
 		`exec 9<>"${TARGET_LOCK}"`,
 		`readonly TARGET_LOCK_FD_PATH="/proc/self/fd/9"`,
+		`-f ${TARGET_LOCK_FD_PATH} &&`,
+		`$(stat -Lc '%U:%G:%a' -- "${TARGET_LOCK_FD_PATH}") == "root:root:600"`,
 		"updater lock descriptor/path identity changed",
 		"permanent updater lock",
 		"durable recovery backup",
@@ -811,6 +816,9 @@ func TestEncoderRecorderInstallerTransactionsPrivilegedHostSetup(t *testing.T) {
 	}
 	if strings.Contains(installer, `exec 9>"${TARGET_LOCK}"`) {
 		t.Fatal("installer must not truncate the production updater lock")
+	}
+	if strings.Contains(installer, `stat -Lc '%F:%U:%G:%a'`) {
+		t.Fatal("installer must not depend on GNU stat's size-sensitive regular-file description")
 	}
 	if strings.Contains(installer, `rm -f -- "${SHARED_HOST_SETUP_LOCK}"`) {
 		t.Fatal("installer must never unlink the permanent shared host-setup lock")

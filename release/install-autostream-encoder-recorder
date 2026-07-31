@@ -150,7 +150,9 @@ else
 fi
 if [[ ${input_stage_status} -ne 0 ]]; then
   finish_installer_signal_transaction
-  die "could not create the installer staging directory (mktemp status ${input_stage_status})"
+  printf 'install-autostream-encoder-recorder: could not create the installer staging directory (mktemp status %s)\n' \
+    "${input_stage_status}" >&2
+  exit "${input_stage_status}"
 fi
 if [[ ! ( -n ${INPUT_STAGE} &&
   ${INPUT_STAGE} == /var/tmp/autostream-encoder-recorder-install.* &&
@@ -1368,13 +1370,15 @@ chown root:root "${SHARED_HOST_SETUP_LOCK_FD_PATH}"
 chmod 0600 "${SHARED_HOST_SETUP_LOCK_FD_PATH}"
 shared_host_setup_lock_fd_identity="$(stat -Lc '%d:%i' -- "${SHARED_HOST_SETUP_LOCK_FD_PATH}")"
 [[ -f ${SHARED_HOST_SETUP_LOCK} && ! -L ${SHARED_HOST_SETUP_LOCK} &&
-  $(stat -Lc '%F:%U:%G:%a' -- "${SHARED_HOST_SETUP_LOCK_FD_PATH}") == "regular file:root:root:600" &&
+  -f ${SHARED_HOST_SETUP_LOCK_FD_PATH} &&
+  $(stat -Lc '%U:%G:%a' -- "${SHARED_HOST_SETUP_LOCK_FD_PATH}") == "root:root:600" &&
   $(stat -c '%U:%G:%a' -- "${SHARED_HOST_SETUP_LOCK}") == "root:root:600" &&
   ${shared_host_setup_lock_fd_identity} == "$(stat -c '%d:%i' -- "${SHARED_HOST_SETUP_LOCK}")" ]] || \
   die "shared host-setup lock identity changed while being opened"
 flock -n 8 || die "another AutoStream installer is provisioning shared host state"
 [[ -f ${SHARED_HOST_SETUP_LOCK} && ! -L ${SHARED_HOST_SETUP_LOCK} &&
-  $(stat -Lc '%F:%U:%G:%a' -- "${SHARED_HOST_SETUP_LOCK_FD_PATH}") == "regular file:root:root:600" &&
+  -f ${SHARED_HOST_SETUP_LOCK_FD_PATH} &&
+  $(stat -Lc '%U:%G:%a' -- "${SHARED_HOST_SETUP_LOCK_FD_PATH}") == "root:root:600" &&
   $(stat -c '%U:%G:%a' -- "${SHARED_HOST_SETUP_LOCK}") == "root:root:600" &&
   ${shared_host_setup_lock_fd_identity} == "$(stat -c '%d:%i' -- "${SHARED_HOST_SETUP_LOCK}")" ]] || \
   die "shared host-setup lock identity changed after acquisition"
@@ -1401,13 +1405,15 @@ chown root:root "${TARGET_LOCK_FD_PATH}"
 chmod 0600 "${TARGET_LOCK_FD_PATH}"
 target_lock_fd_identity="$(stat -Lc '%d:%i' -- "${TARGET_LOCK_FD_PATH}")"
 [[ -f ${TARGET_LOCK} && ! -L ${TARGET_LOCK} &&
-  $(stat -Lc '%F:%U:%G:%a' -- "${TARGET_LOCK_FD_PATH}") == "regular file:root:root:600" &&
+  -f ${TARGET_LOCK_FD_PATH} &&
+  $(stat -Lc '%U:%G:%a' -- "${TARGET_LOCK_FD_PATH}") == "root:root:600" &&
   $(stat -c '%U:%G:%a' -- "${TARGET_LOCK}") == "root:root:600" &&
   ${target_lock_fd_identity} == "$(stat -c '%d:%i' -- "${TARGET_LOCK}")" ]] || \
   die "updater lock descriptor/path identity changed while being opened"
 flock -n 9 || die "another privileged update is already active for ${UNIT_NAME}"
 [[ -f ${TARGET_LOCK} && ! -L ${TARGET_LOCK} &&
-  $(stat -Lc '%F:%U:%G:%a' -- "${TARGET_LOCK_FD_PATH}") == "regular file:root:root:600" &&
+  -f ${TARGET_LOCK_FD_PATH} &&
+  $(stat -Lc '%U:%G:%a' -- "${TARGET_LOCK_FD_PATH}") == "root:root:600" &&
   $(stat -c '%U:%G:%a' -- "${TARGET_LOCK}") == "root:root:600" &&
   ${target_lock_fd_identity} == "$(stat -c '%d:%i' -- "${TARGET_LOCK}")" ]] || \
   die "updater lock descriptor/path identity changed after acquisition"
