@@ -61,7 +61,7 @@ jobs:
             echo "Version must look like v1.2.3, not ${version}. Remove the dot after v." >&2
             exit 1
           fi
-          if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
+          if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Version must look like v1.2.3; got ${version}" >&2
             exit 1
           fi
@@ -83,6 +83,16 @@ jobs:
         shell: bash
         run: sudo bash release/test-install-autostream-encoder-recorder-integration.sh
 
+      - name: Validate release archive verifier syntax
+        shell: bash
+        run: |
+          bash -n .github/scripts/verify-release-archive.sh
+          bash -n .github/scripts/test-verify-release-archive.sh
+
+      - name: Test release archive verifier
+        shell: bash
+        run: bash .github/scripts/test-verify-release-archive.sh .github/scripts/verify-release-archive.sh
+
       - name: Package linux artifacts
         shell: bash
         run: |
@@ -101,10 +111,77 @@ jobs:
             cp .env.example "${root}/.env.example"
             cp systemd/*.service.example "${root}/systemd/"
             cp release/README.install.md "${root}/README.install.md"
+            sed -i "s/vX\\.Y\\.Z/${version}/g" "${root}/README.install.md"
+            if grep -F 'vX.Y.Z' "${root}/README.install.md"; then
+              echo "Packaged install guide still contains an unresolved release version." >&2
+              exit 1
+            fi
             cp release/install-autostream-encoder-recorder "${root}/install-autostream-encoder-recorder"
             chmod 0755 "${root}/install-autostream-encoder-recorder"
+            jq -n \
+              --arg version "${version}" \
+              --arg commit "${GITHUB_SHA}" \
+              --arg build_date "${build_date}" \
+              --arg arch "${arch}" \
+              --arg archive_name "${artifact}.tar.gz" \
+              --arg archive_root "${artifact}" \
+              '{
+                schema_version: 1,
+                component: "encoder-recorder",
+                source_version: $version,
+                commit: $commit,
+                build_date: $build_date,
+                platform: {
+                  os: "linux",
+                  arch: $arch
+                },
+                archive: {
+                  name: $archive_name,
+                  root: $archive_root
+                },
+                compatibility: {
+                  minimum_agent_version: "v1.0.0",
+                  minimum_panel_version: null,
+                  rollback_compatible: true,
+                  database_schema: "none"
+                }
+              }' > "${root}/artifact-manifest.json"
+            jq -e \
+              --arg version "${version}" \
+              --arg commit "${GITHUB_SHA}" \
+              --arg build_date "${build_date}" \
+              --arg arch "${arch}" \
+              --arg archive_name "${artifact}.tar.gz" \
+              --arg archive_root "${artifact}" \
+              '((keys | sort) ==
+                 ["archive", "build_date", "commit", "compatibility", "component", "platform", "schema_version", "source_version"]) and
+               (.schema_version == 1) and
+               (.component == "encoder-recorder") and
+               (.source_version == $version) and
+               (.commit == $commit) and
+               (.commit | test("^[0-9a-f]{40}$")) and
+               (.build_date == $build_date) and
+               (.build_date |
+                 test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+               (.platform | type == "object") and
+               ((.platform | keys | sort) == ["arch", "os"]) and
+               (.platform.os == "linux") and
+               (.platform.arch == $arch) and
+               (.archive | type == "object") and
+               ((.archive | keys | sort) == ["name", "root"]) and
+               (.archive.name == $archive_name) and
+               (.archive.root == $archive_root) and
+               (.compatibility | type == "object") and
+               ((.compatibility | keys | sort) ==
+                 ["database_schema", "minimum_agent_version", "minimum_panel_version", "rollback_compatible"]) and
+               (.compatibility.minimum_agent_version == "v1.0.0") and
+               (.compatibility.minimum_panel_version == null) and
+               (.compatibility.rollback_compatible == true) and
+               (.compatibility.database_schema == "none")' \
+              "${root}/artifact-manifest.json" > /dev/null
             (cd "${root}" && find . -type f ! -path './checksums.txt' -print0 | sort -z | xargs -0 sha256sum > checksums.txt)
             tar -C staging -czf "artifacts/${artifact}.tar.gz" "${artifact}"
+            bash .github/scripts/verify-release-archive.sh "artifacts/${artifact}.tar.gz" "${artifact}"
             (cd artifacts && sha256sum "${artifact}.tar.gz" > "${artifact}.tar.gz.sha256")
             checksum_path="artifacts/${artifact}.tar.gz.sha256"
             test "$(wc -l < "${checksum_path}")" -eq 1
@@ -148,6 +225,10 @@ jobs:
             fi
             (cd artifacts && sha256sum --check --strict "${name}.sha256")
             size="$(stat -c %s "${path}")"
+            if [[ ! "${size}" =~ ^[1-9][0-9]*$ ]] || (( size > 268435456 )); then
+              echo "Archive ${name} must be between 1 and 268435456 bytes." >&2
+              exit 1
+            fi
             release_artifacts="$(
               jq -c \
                 --arg arch "${arch}" \
@@ -204,9 +285,41 @@ jobs:
                .os == "linux" and
                (.arch == "amd64" or .arch == "arm64") and
                (.name | type == "string") and
-               (.size | type == "number" and . > 0) and
+               (.size | type == "number" and . > 0 and . <= 268435456) and
                (.sha256 | test("^[0-9a-f]{64}$"))))' \
             artifacts/release-manifest.json > /dev/null
+
+          for arch in amd64 arm64; do
+            name="${ARTIFACT_PREFIX}_${RELEASE_VERSION}_linux_${arch}.tar.gz"
+            root="${ARTIFACT_PREFIX}_${RELEASE_VERSION}_linux_${arch}"
+            internal_manifest="${RUNNER_TEMP}/${root}-artifact-manifest.json"
+            tar -xOf "artifacts/${name}" "${root}/artifact-manifest.json" > "${internal_manifest}"
+            internal_manifest_sha="$(sha256sum "${internal_manifest}" | awk 'NR == 1 { print $1 }')"
+            tar -xOf "artifacts/${name}" "${root}/checksums.txt" |
+              grep -Fx -- "${internal_manifest_sha}  ./artifact-manifest.json" > /dev/null
+            jq -e \
+              --slurpfile internal "${internal_manifest}" \
+              --arg arch "${arch}" \
+              --arg name "${name}" \
+              --arg root "${root}" \
+              '($internal | length == 1) and
+               ($internal[0].component == .components[0].service) and
+               ($internal[0].source_version == .components[0].source_version) and
+               ($internal[0].commit == .components[0].commit) and
+               ($internal[0].platform.os == "linux") and
+               ($internal[0].platform.arch == $arch) and
+               ($internal[0].archive.name == $name) and
+               ($internal[0].archive.root == $root) and
+               ($internal[0].compatibility.minimum_agent_version == .minimum_agent_version) and
+               ($internal[0].compatibility.minimum_panel_version == null) and
+               ($internal[0].compatibility.rollback_compatible == .components[0].rollback_compatible) and
+               ($internal[0].compatibility.database_schema == .components[0].database_schema) and
+               ([.components[0].artifacts[] |
+                 select(.os == $internal[0].platform.os and
+                        .arch == $internal[0].platform.arch and
+                        .name == $internal[0].archive.name)] | length == 1)' \
+              artifacts/release-manifest.json > /dev/null
+          done
 
           (cd artifacts && sha256sum release-manifest.json > release-manifest.json.sha256)
           if [[ "$(wc -l < artifacts/release-manifest.json.sha256)" != "1" ]]; then

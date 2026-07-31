@@ -27,18 +27,109 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		`readonly BACKUP_ROOT="${BACKUP_BASE}/install-migrations"`,
 		`readonly BACKUP_DIR="${BACKUP_ROOT}/encoder-recorder"`,
 		"sha256sum --check --strict",
-		"release-manifest.json",
+		"artifact-manifest.json",
+		`(.component == $component)`,
+		`(.compatibility.minimum_agent_version == "v1.0.0")`,
+		`(.compatibility.minimum_panel_version == null)`,
+		`(.compatibility.rollback_compatible == true)`,
+		`(.compatibility.database_schema == "none")`,
+		"release archive size must be between 1 and 268435456 bytes",
+		"release archive contains duplicate paths",
+		"staged release archive size differs from its verified source",
 		".artifact-sha256",
 		".version",
 		`flock -n 9`,
 		"root anchor directory has unsafe write or special mode bits",
-		`[[ ${version_first_line} == "autostream-encoder-recorder ${VERSION}" ]]`,
-		`[[ ${managed_version_first_line} == "autostream-encoder-recorder ${VERSION}" ]]`,
+		`"${VERSION}" "${ARTIFACT_COMMIT}" "${ARTIFACT_BUILD_DATE}"`,
+		`[[ ${version_output} == "${expected_version_output}" ]]`,
+		`[[ ${managed_version_output} == "${expected_version_output}" ]]`,
+		`[[ ${current_version_first_line} == "autostream-encoder-recorder ${marker_version}" ]]`,
 		"root-only recovery evidence preserved at",
 		"systemctl daemon-reload",
 	} {
 		if !strings.Contains(installer, marker) {
 			t.Fatalf("service installer is missing %q", marker)
+		}
+	}
+	sourceSizeIndex := strings.Index(
+		installer,
+		`ARCHIVE_SOURCE_SIZE="$(stat -c %s -- "${ARCHIVE_SOURCE}")"`,
+	)
+	archiveCopyIndex := strings.Index(
+		installer,
+		`copy_stable_source "${ARCHIVE_SOURCE}" "${INPUT_STAGE}/${ARCHIVE_NAME}"`,
+	)
+	stagedSizeIndex := strings.Index(
+		installer,
+		`ARTIFACT_SIZE="$(stat -c %s -- "${INPUT_STAGE}/${ARCHIVE_NAME}")"`,
+	)
+	if sourceSizeIndex < 0 ||
+		archiveCopyIndex <= sourceSizeIndex ||
+		stagedSizeIndex <= archiveCopyIndex {
+		t.Fatal("installer must bound the source archive before copying it and compare the staged size afterward")
+	}
+	canonicalDuplicateIndex := strings.Index(
+		installer,
+		`awk '{ sub(/\/$/, ""); print }' "${INPUT_STAGE}/archive.list"`,
+	)
+	duplicateRejectIndex := strings.Index(
+		installer,
+		`[[ -z ${duplicate_paths} ]] || die "release archive contains duplicate paths"`,
+	)
+	archiveTypeIndex := strings.Index(
+		installer,
+		`tar -tvzf "${INPUT_STAGE}/${ARCHIVE_NAME}"`,
+	)
+	if canonicalDuplicateIndex < 0 ||
+		duplicateRejectIndex <= canonicalDuplicateIndex ||
+		archiveTypeIndex <= duplicateRejectIndex {
+		t.Fatal("installer must reject trailing-slash path aliases before archive type processing")
+	}
+	stateSnapshotIndex := strings.LastIndex(
+		installer,
+		"\nsnapshot_existing_state_directory\n",
+	)
+	earlyPublicPreflightIndex := strings.Index(
+		installer,
+		`preflight_public_path "${PUBLIC_ALIAS}" "${PUBLIC_BINARY}"`,
+	)
+	lastPublicPreflightIndex := strings.LastIndex(
+		installer,
+		`preflight_public_path "${PUBLIC_ALIAS}" "${PUBLIC_BINARY}"`,
+	)
+	accountMutationIndex := strings.Index(installer, "create_autostream_group_transactionally ||")
+	stateMutationIndex := strings.Index(
+		installer,
+		`state_directory_mutation_started=true`,
+	)
+	if stateSnapshotIndex < 0 ||
+		earlyPublicPreflightIndex < 0 ||
+		accountMutationIndex <= earlyPublicPreflightIndex ||
+		accountMutationIndex <= stateSnapshotIndex ||
+		lastPublicPreflightIndex <= accountMutationIndex ||
+		stateMutationIndex <= lastPublicPreflightIndex {
+		t.Fatal("installer must preflight public paths and snapshot state before account mutation, then revalidate before state normalization")
+	}
+	for _, marker := range []string{
+		"restore_existing_state_directory",
+		"failed to restore the previous state directory metadata",
+		`state_directory_previous_kind="directory"`,
+		`state_directory_previous_mode="$(stat -c '%a' -- "${STATE_DIR}")"`,
+		`state_directory_previous_identity="$(stat -c '%d:%i' -- "${STATE_DIR}")"`,
+	} {
+		if !strings.Contains(installer, marker) {
+			t.Fatalf("installer is missing transactional state-directory marker %q", marker)
+		}
+	}
+	for _, forbidden := range []string{
+		"ARCHIVE_CHECKSUM_SOURCE",
+		"MANIFEST_SOURCE",
+		"MANIFEST_CHECKSUM_SOURCE",
+		`"${INPUT_STAGE}/${ARCHIVE_NAME}.sha256"`,
+		`"${INPUT_STAGE}/release-manifest.json"`,
+	} {
+		if strings.Contains(installer, forbidden) {
+			t.Fatalf("manual installer must ignore external release metadata marker %q", forbidden)
 		}
 	}
 
@@ -52,8 +143,16 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		`run: sudo bash release/test-install-autostream-encoder-recorder-integration.sh`,
 		`cp release/install-autostream-encoder-recorder "${root}/install-autostream-encoder-recorder"`,
 		`chmod 0755 "${root}/install-autostream-encoder-recorder"`,
+		`> "${root}/artifact-manifest.json"`,
+		`sed -i "s/vX\\.Y\\.Z/${version}/g" "${root}/README.install.md"`,
+		`tar -xOf "artifacts/${name}" "${root}/artifact-manifest.json" > "${internal_manifest}"`,
+		`grep -Fx -- "${internal_manifest_sha}  ./artifact-manifest.json"`,
+		`(( size > 268435456 ))`,
+		`(.size | type == "number" and . > 0 and . <= 268435456)`,
+		`--slurpfile internal "${internal_manifest}"`,
 		`artifacts/autostream-encoder-recorder_${{ needs.release-host.outputs.version }}_linux_amd64.tar.gz`,
 		`artifacts/autostream-encoder-recorder_${{ needs.release-host.outputs.version }}_linux_arm64.tar.gz`,
+		`release-manifest.json.sha256`,
 	} {
 		if !strings.Contains(workflow, marker) {
 			t.Fatalf("host release workflow is missing installer packaging marker %q", marker)
@@ -84,6 +183,32 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		"idempotent reinstall",
 		"managed current link must be owned by root:root",
 		"another privileged update is already active",
+		"installer ignored shared host-setup lock contention",
+		"shared host-setup lock contention mutated transactional host state",
+		"cleanup-second-term-delivered",
+		"groupadd-term-delivered",
+		"useradd-term-delivered",
+		"groupadd TERM transaction exited with",
+		"useradd TERM transaction exited with",
+		`readonly SHARED_HOST_SETUP_LOCK="/run/autostream-updater/.autostream-runtime-host-setup.lock"`,
+		"archive-only fixture unexpectedly contains an archive sidecar",
+		"archive-only fixture unexpectedly contains release-manifest.json",
+		"installer accepted an archive with a duplicate path",
+		"trailing-slash archive alias did not fail at the canonical duplicate boundary",
+		"late public-path preflight created a persistent directory",
+		`assert_existing_state_unchanged "state preflight failure"`,
+		`assert_existing_state_unchanged "activation failure"`,
+		`assert_existing_archive_unchanged "archive preflight failure"`,
+		`assert_existing_archive_unchanged "archive activation failure"`,
+		"fresh late-failure rollback left persistent mutation",
+		"assert_preexisting_backups_unchanged",
+		"pre-existing canonical backup was not bound to the live legacy binary",
+		"assert_shared_managed_parent_unchanged",
+		"successful migration did not normalize the shared managed parent",
+		"corrupt archive did not fail at the inner checksum boundary",
+		"mismatched artifact metadata did not fail at the manifest boundary",
+		"binary identity mismatch did not fail at the binary verification boundary",
+		"installer read unrelated external release metadata",
 		"AUTOSTREAM_ENCODER_RECORDER_INSTALLER_TEST_MOUNT_NS",
 		"autostream-encoder-recorder-installer-test-scratch /mnt",
 		"mount --rbind /usr /mnt/usr-lower",
@@ -407,8 +532,12 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 		integration[preflightStart:firstInstallerRun],
 		`"${TARGET_LOCK}"`,
 	)
-	if targetLockPreflightIndex < 0 {
-		t.Fatal("installer integration fixture must reject a pre-existing updater target lock before mutation")
+	sharedLockPreflightIndex := strings.Index(
+		integration[preflightStart:firstInstallerRun],
+		`"${SHARED_HOST_SETUP_LOCK}"`,
+	)
+	if targetLockPreflightIndex < 0 || sharedLockPreflightIndex < 0 {
+		t.Fatal("installer integration fixture must reject pre-existing permanent lock paths before mutation")
 	}
 	legacyRuntimeStart := strings.Index(integration, "create_legacy_runtime_unit() {")
 	if legacyRuntimeStart < 0 {
@@ -603,13 +732,179 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 	guide := string(guideBytes)
 	for _, marker := range []string{
 		"sudo install -d -o root -g root -m 0755 /opt/autostream/releases/artifacts",
+		"sudo install -o root -g root -m 0644 /tmp/autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz",
 		"gh attestation verify autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz",
+		"scp autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz",
 		"sudo tar --no-same-owner --no-same-permissions -xzf autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz",
 		"sudo ./install-autostream-encoder-recorder",
+		"Manual installation does not require the archive `.sha256`",
 		"installer-owned",
 	} {
 		if !strings.Contains(guide, marker) {
 			t.Fatalf("install guide is missing simple installer marker %q", marker)
+		}
+	}
+	for _, forbidden := range []string{
+		"sha256sum --check --strict autostream-encoder-recorder_",
+		"gh attestation verify release-manifest.json",
+	} {
+		if strings.Contains(guide, forbidden) {
+			t.Fatalf("install guide retains a manual external metadata step %q", forbidden)
+		}
+	}
+}
+
+func TestEncoderRecorderInstallerTransactionsPrivilegedHostSetup(t *testing.T) {
+	root := filepath.Join("..", "..")
+	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install-autostream-encoder-recorder"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installer := string(installerBytes)
+
+	for _, marker := range []string{
+		"rollback_created_autostream_account()",
+		"rollback_journaled_directories()",
+		"rollback_created_release()",
+		"install_journaled_directory()",
+		"create_autostream_group_transactionally()",
+		"create_autostream_user_transactionally()",
+		"restore_existing_archive_directory()",
+		"snapshot_existing_archive_directory()",
+		"register_temporary_path()",
+		"create_registered_temporary_path()",
+		"INPUT_STAGE is the single temporary-path journal exception",
+		"input_stage_is_owned()",
+		"INPUT_STAGE_IDENTITY",
+		"restore_legacy_backup_state()",
+		"created_autostream_user=false",
+		"created_autostream_group=false",
+		"release_created=false",
+		"archive_directory_mutation_started=false",
+		"archive_directory_previous_identity",
+		"backup_previous_kind",
+		"backup_created_identity",
+		`created_identity="${journaled_directory_created_identity["${STATE_DIR}"]-}"`,
+		`created_identity="${journaled_directory_created_identity["${ARCHIVE_DIR}"]-}"`,
+		`managed_cleanup_identity="${temporary_path_identity["${managed_candidate}"]-}"`,
+		"cleanup_running=true",
+		"signal_transaction_active=false",
+		"deferred_termination_status=0",
+		"handle_installer_signal()",
+		"begin_installer_signal_transaction()",
+		"finish_installer_signal_transaction()",
+		"could not journal the published managed release identity",
+		`readonly SHARED_HOST_SETUP_LOCK="/run/autostream-updater/.autostream-runtime-host-setup.lock"`,
+		`exec 8<>"${SHARED_HOST_SETUP_LOCK}"`,
+		`flock -n 8`,
+		"another AutoStream installer is provisioning shared host state",
+		"shared host-setup lock identity changed after acquisition",
+		`exec 9<>"${TARGET_LOCK}"`,
+		`readonly TARGET_LOCK_FD_PATH="/proc/self/fd/9"`,
+		"updater lock descriptor/path identity changed",
+		"permanent updater lock",
+		"durable recovery backup",
+	} {
+		if !strings.Contains(installer, marker) {
+			t.Fatalf("installer is missing privileged transaction marker %q", marker)
+		}
+	}
+	if strings.Contains(installer, `exec 9>"${TARGET_LOCK}"`) {
+		t.Fatal("installer must not truncate the production updater lock")
+	}
+	if strings.Contains(installer, `rm -f -- "${SHARED_HOST_SETUP_LOCK}"`) {
+		t.Fatal("installer must never unlink the permanent shared host-setup lock")
+	}
+	if strings.Contains(installer, `rm -f -- "${TARGET_LOCK}"`) {
+		t.Fatal("installer must never unlink the permanent production updater lock")
+	}
+	if count := strings.Count(installer, "trap '' HUP INT TERM"); count != 4 {
+		t.Fatalf("installer may ignore termination signals only in immediate-exit and cleanup shielding, got %d sites", count)
+	}
+	for _, forbidden := range []string{
+		`$(create_registered_temporary_path`,
+		`$(install_journaled_directory`,
+	} {
+		if strings.Contains(installer, forbidden) {
+			t.Fatalf("installer must update rollback journals in the parent shell, found %q", forbidden)
+		}
+	}
+	sharedLockIndex := strings.Index(installer, "flock -n 8")
+	firstJournaledAnchorIndex := strings.Index(installer, "ensure_root_anchor_directory /usr\n")
+	if sharedLockIndex < 0 || firstJournaledAnchorIndex <= sharedLockIndex {
+		t.Fatal("installer must acquire the shared host-setup lock before journaled host mutations")
+	}
+	cleanupStart := strings.Index(installer, "cleanup() {")
+	if cleanupStart < 0 {
+		t.Fatal("installer cleanup function is missing")
+	}
+	cleanupEnd := strings.Index(installer[cleanupStart:], "\n}\ntrap cleanup EXIT")
+	if cleanupEnd < 0 {
+		t.Fatal("installer cleanup function boundary is missing")
+	}
+	cleanup := installer[cleanupStart : cleanupStart+cleanupEnd]
+	cleanupMaskIndex := strings.Index(cleanup, "trap '' HUP INT TERM")
+	cleanupTrapRemovalIndex := strings.Index(cleanup, "trap - EXIT")
+	cleanupRollbackIndex := strings.Index(cleanup, "rollback_activation")
+	if cleanupMaskIndex < 0 ||
+		cleanupTrapRemovalIndex <= cleanupMaskIndex ||
+		cleanupRollbackIndex <= cleanupTrapRemovalIndex {
+		t.Fatal("installer cleanup must mask repeated termination signals before removing its EXIT trap and rolling back")
+	}
+	for _, transaction := range []struct {
+		start string
+		end   string
+		steps []string
+	}{
+		{
+			start: "create_autostream_group_transactionally() {",
+			end:   "\n}\n\ncreate_autostream_user_transactionally()",
+			steps: []string{
+				"begin_installer_signal_transaction",
+				"groupadd --system autostream",
+				"created_autostream_group=true",
+				`created_autostream_group_record="${created_record}"`,
+				"finish_installer_signal_transaction",
+			},
+		},
+		{
+			start: "create_autostream_user_transactionally() {",
+			end:   "\n}\n\nsnapshot_existing_state_directory()",
+			steps: []string{
+				"begin_installer_signal_transaction",
+				"useradd --system",
+				"created_autostream_user=true",
+				`created_autostream_user_record="${created_record}"`,
+				"finish_installer_signal_transaction",
+			},
+		},
+		{
+			start: "install_journaled_directory() {",
+			end:   "\n}\n\nrollback_journaled_directories()",
+			steps: []string{
+				"begin_installer_signal_transaction",
+				`install -d -o "${owner}"`,
+				`journaled_directory_created_identity["${path}"]="${created_identity}"`,
+				"finish_installer_signal_transaction",
+			},
+		},
+	} {
+		start := strings.Index(installer, transaction.start)
+		if start < 0 {
+			t.Fatalf("installer transaction helper is missing %q", transaction.start)
+		}
+		endOffset := strings.Index(installer[start:], transaction.end)
+		if endOffset < 0 {
+			t.Fatalf("installer transaction helper boundary is missing %q", transaction.end)
+		}
+		body := installer[start : start+endOffset]
+		previous := -1
+		for _, step := range transaction.steps {
+			index := strings.Index(body, step)
+			if index <= previous {
+				t.Fatalf("installer transaction helper %q has unsafe journal ordering at %q", transaction.start, step)
+			}
+			previous = index
 		}
 	}
 }

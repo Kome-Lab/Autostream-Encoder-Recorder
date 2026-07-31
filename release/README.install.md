@@ -7,46 +7,34 @@ This archive contains the Linux binary, systemd example, and placeholder environ
 - Linux amd64 or arm64 matching the archive name, with systemd and `sudo`.
 - `jq`, `sha256sum`, `flock`, and GNU `tar`.
 - `ffmpeg` installed on the host and available on `PATH`.
-- `gh` installed and authenticated to GitHub for release-attestation
-  verification.
+- `gh` installed and authenticated on the administrator workstation used to
+  verify the release before upload. The server does not need `gh`, a GitHub
+  token, or GitHub network access for manual installation.
 - Network access to the Control Panel, output relay, and configured providers.
 - A Control Panel configured with independent random `AUTOSTREAM_SECRET_ENCRYPTION_KEY` and `AUTOSTREAM_STREAM_INGEST_SIGNING_KEY` values of at least 32 bytes; placeholders are rejected by Node operations.
 
 ## Install a verified managed release
 
-Download these four release assets to `/tmp`:
+Download only
+`autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz` (`arm64` on an arm64
+host). On the administrator workstation, verify that exact archive before
+uploading it:
 
-- `autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz` (or `arm64`)
-- the matching `.tar.gz.sha256`
-- `release-manifest.json`
-- `release-manifest.json.sha256`
+```bash
+gh attestation verify autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz --repo Kome-Lab/Autostream-Encoder-Recorder --signer-workflow Kome-Lab/Autostream-Encoder-Recorder/.github/workflows/release-host.yml --deny-self-hosted-runners
+scp autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz operator@encoder.example.com:/tmp/
+```
 
-For an amd64 host, copy them into a root-owned staging directory:
+On the server, copy the one uploaded archive into a root-owned staging
+directory, extract it there without renaming its top-level directory, leave the
+original `.tar.gz` beside that directory until the installer finishes, and run
+the installer:
 
 ```bash
 sudo install -d -o root -g root -m 0755 /opt/autostream/releases
 sudo install -d -o root -g root -m 0755 /opt/autostream/releases/artifacts
 sudo install -o root -g root -m 0644 /tmp/autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz /opt/autostream/releases/artifacts/autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz
-sudo install -o root -g root -m 0644 /tmp/autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz.sha256 /opt/autostream/releases/artifacts/autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz.sha256
-sudo install -o root -g root -m 0644 /tmp/release-manifest.json /opt/autostream/releases/artifacts/release-manifest.json
-sudo install -o root -g root -m 0644 /tmp/release-manifest.json.sha256 /opt/autostream/releases/artifacts/release-manifest.json.sha256
 cd /opt/autostream/releases/artifacts
-```
-
-Still as the ordinary login user, verify both the exact archive that will be
-extracted as root and its manifest:
-
-```bash
-gh attestation verify autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz --repo Kome-Lab/Autostream-Encoder-Recorder --signer-workflow Kome-Lab/Autostream-Encoder-Recorder/.github/workflows/release-host.yml --deny-self-hosted-runners
-gh attestation verify release-manifest.json --repo Kome-Lab/Autostream-Encoder-Recorder --signer-workflow Kome-Lab/Autostream-Encoder-Recorder/.github/workflows/release-host.yml --deny-self-hosted-runners
-sha256sum --check --strict autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz.sha256
-sha256sum --check --strict release-manifest.json.sha256
-```
-
-Only after every command above succeeds, extract the root-owned archive without
-renaming its top-level directory and run the installer:
-
-```bash
 sudo test ! -e autostream-encoder-recorder_vX.Y.Z_linux_amd64
 sudo test ! -L autostream-encoder-recorder_vX.Y.Z_linux_amd64
 sudo tar --no-same-owner --no-same-permissions -xzf autostream-encoder-recorder_vX.Y.Z_linux_amd64.tar.gz
@@ -54,13 +42,20 @@ cd autostream-encoder-recorder_vX.Y.Z_linux_amd64
 sudo ./install-autostream-encoder-recorder
 ```
 
+Manual installation does not require the archive `.sha256`,
+`release-manifest.json`, or `release-manifest.json.sha256`. Those assets remain
+published for managed-updater compatibility and are ignored by this installer
+even when they are present.
+
 For arm64, replace `amd64` with `arm64` in the archive and directory names.
 
-The installer verifies the copied release inputs, exact manifest tuple, archive
-layout, inner checksums, architecture, and binary version before changing the
-host. It creates the `autostream` service account when absent, seeds the
-verified rollback release, preserves an existing environment file byte for
-byte, installs the systemd unit, and exposes
+The installer makes a stable private copy of the adjacent archive, calculates
+and records its SHA-256, then verifies the archive layout, inner checksums,
+exact `artifact-manifest.json` tuple, architecture, and binary
+version/commit/build date before changing persistent host state. It creates the
+`autostream` service account when absent, seeds the verified rollback release,
+preserves an existing environment file byte for byte, installs the systemd
+unit, and exposes
 `/usr/local/bin/autostream-encoder-recorder` plus the `encoder-recorder` alias.
 It requires `ffmpeg` to already be installed and does not install packages,
 write Node configuration, or start the service.
@@ -121,8 +116,9 @@ the running binary and local service identity to the update helper. Its exact
 response fields are version, service_id, service_type, and config_revision.
 Block this exact path at any public reverse proxy.
 
-Do not fabricate `.artifact-sha256` or `.version` from an unverified local
-binary. Releases without `release-manifest.json` remain manual-only; publish a
-new release instead of modifying an existing release asset.
+Do not fabricate `.artifact-sha256`, `.version`, `artifact-manifest.json`, or
+`checksums.txt` from an unverified local binary. A manual-install archive
+without its verified internal manifest is rejected; publish a new release
+instead of modifying an existing release asset.
 
 Do not commit real `.env` files, provider credentials, tokens, logs, screenshots, or verification record.
