@@ -723,6 +723,13 @@ func TestManagerStopTransitionsToStopped(t *testing.T) {
 			t.Fatal(err)
 		}
 		if status.Status == "stopped" {
+			retry, retryErr := manager.Stop("stream-01")
+			if !errors.Is(retryErr, ErrAlreadyStopped) {
+				t.Fatalf("retry stop error = %v, want ErrAlreadyStopped", retryErr)
+			}
+			if retry.StreamID != "stream-01" || retry.Status != "stopped" {
+				t.Fatalf("retry stop snapshot = %#v", retry)
+			}
 			return
 		}
 		select {
@@ -731,6 +738,57 @@ func TestManagerStopTransitionsToStopped(t *testing.T) {
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+func TestManagerStopReceiptSurvivesRestartForItsExactTarget(t *testing.T) {
+	root := t.TempDir()
+	job := lifecycle.StreamJob{StreamID: "stream-a", Name: "Stream A", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key"}
+	beforeRestart := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &fakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	if _, err := beforeRestart.Start(job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := beforeRestart.Stop(job.StreamID); err != nil {
+		t.Fatal(err)
+	}
+
+	afterRestart := &Manager{ArchiveRoot: root}
+	snapshot, err := afterRestart.Stop(job.StreamID)
+	if !errors.Is(err, ErrAlreadyStopped) {
+		t.Fatalf("stop after restart error = %v, want ErrAlreadyStopped", err)
+	}
+	if snapshot.StreamID != job.StreamID || snapshot.Status != "stopped" {
+		t.Fatalf("stop after restart snapshot = %#v", snapshot)
+	}
+}
+
+func TestManagerStartClearsDurableStopReceipt(t *testing.T) {
+	root := t.TempDir()
+	manager := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &fakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	if err := manager.writeStopReceipt("stream-a", stopReceipt{StreamID: "stream-a", ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(lifecycle.StreamJob{StreamID: "stream-a", Name: "Stream A", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key"}); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh manager models the process-local state loss caused by a service
+	// restart. It must not rediscover the pre-start receipt from disk.
+	afterRestart := &Manager{ArchiveRoot: root}
+	if exists, err := afterRestart.hasStopReceipt("stream-a"); err != nil || exists {
+		t.Fatalf("start did not durably clear stop receipt across restart: exists=%v err=%v", exists, err)
+	}
+	if _, err := manager.Stop("stream-a"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagerExpiredStopReceiptDoesNotAcknowledgeUnknownTarget(t *testing.T) {
+	manager := &Manager{ArchiveRoot: t.TempDir()}
+	if err := manager.writeStopReceipt("stream-a", stopReceipt{StreamID: "stream-a", ExpiresAt: time.Now().UTC().Add(-time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Stop("stream-a"); !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("expired receipt stop error = %v, want ErrNotRunning", err)
 	}
 }
 

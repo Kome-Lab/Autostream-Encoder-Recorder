@@ -24,6 +24,7 @@ jobs:
     name: Build Linux host artifacts
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: read
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -34,13 +35,30 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Require successful CI for exact release commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ci_runs="${RUNNER_TEMP}/release-ci-runs.json"
+          gh api \
+            --header 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&per_page=100" \
+            > "${ci_runs}"
+          if ! jq -e \
+            --arg sha "${GITHUB_SHA}" \
+            'any(.workflow_runs[]?; .head_sha == $sha and .status == "completed" and .conclusion == "success")' \
+            "${ci_runs}" > /dev/null; then
+            echo "No successful ci.yml run exists for release commit ${GITHUB_SHA}. Run CI for this exact ref before retrying the release." >&2
+            exit 1
+          fi
+          echo "Verified successful ci.yml run for ${GITHUB_SHA}."
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.mod
-
-      - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Resolve release metadata
         id: meta
@@ -67,21 +85,6 @@ jobs:
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "push_release=${push_release}" >> "${GITHUB_OUTPUT}"
-
-      - name: Test
-        run: go test ./...
-
-      - name: Validate installer syntax
-        shell: bash
-        run: bash -n release/install-autostream-encoder-recorder
-
-      - name: Validate installer integration fixture syntax
-        shell: bash
-        run: bash -n release/test-install-autostream-encoder-recorder-integration.sh
-
-      - name: Test installer integration scenarios
-        shell: bash
-        run: sudo bash release/test-install-autostream-encoder-recorder-integration.sh
 
       - name: Validate release archive verifier syntax
         shell: bash

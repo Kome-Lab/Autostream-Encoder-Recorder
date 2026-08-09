@@ -1197,6 +1197,150 @@ func TestStartStopProcessEndpoints(t *testing.T) {
 	if strings.Contains(stopRes.Body.String(), `"pid"`) {
 		t.Fatalf("process pid leaked in stop response: %s", stopRes.Body.String())
 	}
+
+	repeatedStopReq := httptest.NewRequest(http.MethodPost, "/streams/stream-01/stop", nil)
+	repeatedStopReq.Header.Set("Authorization", "Bearer service-token")
+	repeatedStopRes := httptest.NewRecorder()
+	handler.ServeHTTP(repeatedStopRes, repeatedStopReq)
+	if repeatedStopRes.Code != http.StatusAccepted || !strings.Contains(repeatedStopRes.Body.String(), "already_stopped") {
+		t.Fatalf("repeated stop status = %d body = %s", repeatedStopRes.Code, repeatedStopRes.Body.String())
+	}
+}
+
+func TestStopEndpointRejectsDifferentActiveStream(t *testing.T) {
+	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
+	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
+	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
+	root := t.TempDir()
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+
+	startReq := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"active-stream","name":"Active Stream","input_url":"srt://input.example.com:9000"}`))
+	startReq.Header.Set("Authorization", "Bearer service-token")
+	startRes := httptest.NewRecorder()
+	handler.ServeHTTP(startRes, startReq)
+	if startRes.Code != http.StatusAccepted {
+		t.Fatalf("start status = %d body = %s", startRes.Code, startRes.Body.String())
+	}
+
+	stopReq := httptest.NewRequest(http.MethodPost, "/streams/requested-stream/stop", nil)
+	stopReq.Header.Set("Authorization", "Bearer service-token")
+	stopRes := httptest.NewRecorder()
+	handler.ServeHTTP(stopRes, stopReq)
+	if stopRes.Code != http.StatusConflict || !strings.Contains(stopRes.Body.String(), `"code":"stream_already_running"`) {
+		t.Fatalf("mismatched stop status = %d body = %s", stopRes.Code, stopRes.Body.String())
+	}
+	if current := processManager.CurrentStreamID(); current != "active-stream" {
+		t.Fatalf("active stream changed after mismatched stop: %q", current)
+	}
+}
+
+func TestStopEndpointRetriesKnownStoppedTargetWithoutAffectingSuccessor(t *testing.T) {
+	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
+	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
+	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
+	root := t.TempDir()
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+
+	startA := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-a","name":"Stream A","input_url":"srt://input.example.com:9000"}`))
+	startA.Header.Set("Authorization", "Bearer service-token")
+	startARes := httptest.NewRecorder()
+	handler.ServeHTTP(startARes, startA)
+	if startARes.Code != http.StatusAccepted {
+		t.Fatalf("start stream-a status = %d body = %s", startARes.Code, startARes.Body.String())
+	}
+
+	stopA := httptest.NewRequest(http.MethodPost, "/streams/stream-a/stop", nil)
+	stopA.Header.Set("Authorization", "Bearer service-token")
+	stopARes := httptest.NewRecorder()
+	handler.ServeHTTP(stopARes, stopA)
+	if stopARes.Code != http.StatusAccepted {
+		t.Fatalf("initial stop stream-a status = %d body = %s", stopARes.Code, stopARes.Body.String())
+	}
+
+	deadline := time.After(time.Second)
+	for {
+		snapshot, err := processManager.Status("stream-a")
+		if err == nil && snapshot.Status == "stopped" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("stream-a did not become stopped: snapshot=%#v err=%v", snapshot, err)
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	startB := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-b","name":"Stream B","input_url":"srt://input.example.com:9000"}`))
+	startB.Header.Set("Authorization", "Bearer service-token")
+	startBRes := httptest.NewRecorder()
+	handler.ServeHTTP(startBRes, startB)
+	if startBRes.Code != http.StatusAccepted {
+		t.Fatalf("start stream-b status = %d body = %s", startBRes.Code, startBRes.Body.String())
+	}
+
+	retryA := httptest.NewRequest(http.MethodPost, "/streams/stream-a/stop", nil)
+	retryA.Header.Set("Authorization", "Bearer service-token")
+	retryARes := httptest.NewRecorder()
+	handler.ServeHTTP(retryARes, retryA)
+	if retryARes.Code != http.StatusAccepted || !strings.Contains(retryARes.Body.String(), `"status":"already_stopped"`) {
+		t.Fatalf("retry stop stream-a status = %d body = %s", retryARes.Code, retryARes.Body.String())
+	}
+	if snapshot, err := processManager.Status("stream-b"); err != nil || snapshot.Status != "running" {
+		t.Fatalf("stream-b changed after retrying stream-a stop: snapshot=%#v err=%v", snapshot, err)
+	}
+}
+
+func TestStopEndpointUsesDurableTargetReceiptAfterRestartWithoutAffectingSuccessor(t *testing.T) {
+	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
+	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
+	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
+	root := t.TempDir()
+
+	beforeRestart := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	if _, err := beforeRestart.Start(lifecycle.StreamJob{StreamID: "stream-a", Name: "Stream A", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := beforeRestart.Stop("stream-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	afterRestart := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	handler := NewServerWithProcessManager("encoder_recorder", afterRestart)
+	startB := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-b","name":"Stream B","input_url":"srt://input.example.com:9000"}`))
+	startB.Header.Set("Authorization", "Bearer service-token")
+	startBRes := httptest.NewRecorder()
+	handler.ServeHTTP(startBRes, startB)
+	if startBRes.Code != http.StatusAccepted {
+		t.Fatalf("start stream-b status = %d body = %s", startBRes.Code, startBRes.Body.String())
+	}
+
+	retryA := httptest.NewRequest(http.MethodPost, "/streams/stream-a/stop", nil)
+	retryA.Header.Set("Authorization", "Bearer service-token")
+	retryARes := httptest.NewRecorder()
+	handler.ServeHTTP(retryARes, retryA)
+	if retryARes.Code != http.StatusAccepted || !strings.Contains(retryARes.Body.String(), `"status":"already_stopped"`) {
+		t.Fatalf("post-restart retry status = %d body = %s", retryARes.Code, retryARes.Body.String())
+	}
+	if snapshot, err := afterRestart.Status("stream-b"); err != nil || snapshot.Status != "running" {
+		t.Fatalf("stream-b changed after post-restart retry for stream-a: snapshot=%#v err=%v", snapshot, err)
+	}
+}
+
+func TestStopEndpointRejectsUnknownStreamWhenIdle(t *testing.T) {
+	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
+	processManager := &streamproc.Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+
+	req := httptest.NewRequest(http.MethodPost, "/streams/unknown-stream/stop", nil)
+	req.Header.Set("Authorization", "Bearer service-token")
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusNotFound || !strings.Contains(res.Body.String(), `"code":"stream_not_running"`) {
+		t.Fatalf("unknown stop status = %d body = %s", res.Code, res.Body.String())
+	}
 }
 
 func TestStartEndpointAcceptsRuntimeStreamKeyWithoutEnvLeak(t *testing.T) {

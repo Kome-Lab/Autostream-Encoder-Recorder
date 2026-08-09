@@ -798,7 +798,18 @@ func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Ma
 			return
 		}
 		snapshot, err := processManager.Stop(r.PathValue("id"))
+		if errors.Is(err, streamproc.ErrAlreadyStopped) {
+			if audioManager != nil {
+				audioManager.StopBridge(r.PathValue("id"))
+			}
+			writeJSON(w, http.StatusAccepted, map[string]string{"status": "already_stopped"})
+			return
+		}
 		if errors.Is(err, streamproc.ErrNotRunning) {
+			if currentStreamID := processManager.CurrentStreamID(); currentStreamID != "" && currentStreamID != r.PathValue("id") {
+				writeJSON(w, http.StatusConflict, map[string]string{"code": "stream_already_running"})
+				return
+			}
 			writeJSON(w, http.StatusNotFound, map[string]string{"code": "stream_not_running"})
 			return
 		}

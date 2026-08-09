@@ -139,8 +139,6 @@ func TestEncoderRecorderReleaseShipsManagedServiceInstaller(t *testing.T) {
 	}
 	workflow := string(workflowBytes)
 	for _, marker := range []string{
-		`run: bash -n release/install-autostream-encoder-recorder`,
-		`run: sudo bash release/test-install-autostream-encoder-recorder-integration.sh`,
 		`cp release/install-autostream-encoder-recorder "${root}/install-autostream-encoder-recorder"`,
 		`chmod 0755 "${root}/install-autostream-encoder-recorder"`,
 		`> "${root}/artifact-manifest.json"`,

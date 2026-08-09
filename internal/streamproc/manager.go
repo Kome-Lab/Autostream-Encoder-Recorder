@@ -24,6 +24,12 @@ import (
 
 var (
 	ErrAlreadyRunning = errors.New("stream process is already running")
+	// ErrAlreadyStopped identifies a known stream whose media process has
+	// already entered a non-running terminal or stop-in-progress state.  It is
+	// deliberately distinct from ErrNotRunning: callers can safely make a
+	// target-specific retry a no-op without treating an unknown stream ID as a
+	// successful stop.
+	ErrAlreadyStopped = errors.New("stream process is already stopped")
 	ErrNotRunning     = errors.New("stream process is not running")
 )
 
@@ -92,6 +98,7 @@ func (p execProcess) Kill() error {
 
 type Manager struct {
 	ArchiveRoot              string
+	StopReceiptTTL           time.Duration
 	FFmpegBin                string
 	Profile                  ffmpeg.EncoderProfile
 	Starter                  Starter
@@ -216,6 +223,11 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	if err := m.validateInputForLayout(job, layout); err != nil {
+		return Snapshot{}, err
+	}
+	// A reused stream ID must never inherit an old stop receipt: a delayed
+	// stop for a previous run must be able to stop this newly started target.
+	if err := m.clearStopReceipt(job.StreamID); err != nil {
 		return Snapshot{}, err
 	}
 	startedAt := job.StartedAt
@@ -356,9 +368,26 @@ func relayOutputTarget(template, streamID string) string {
 func (m *Manager) Stop(streamID string) (Snapshot, error) {
 	m.mu.Lock()
 	tracked, ok := m.processes[streamID]
-	if !ok || tracked.snapshot.Status != "running" {
+	if !ok {
 		m.mu.Unlock()
+		alreadyStopped, receiptErr := m.hasStopReceipt(streamID)
+		if receiptErr != nil {
+			return Snapshot{}, receiptErr
+		}
+		if alreadyStopped {
+			return Snapshot{StreamID: streamID, Status: "stopped"}, ErrAlreadyStopped
+		}
 		return Snapshot{}, ErrNotRunning
+	}
+	if tracked.snapshot.Status != "running" {
+		snapshot := tracked.snapshot
+		m.mu.Unlock()
+		switch snapshot.Status {
+		case "stopping", "packaging", "stopped", "failed", "package_failed":
+			return snapshot, ErrAlreadyStopped
+		default:
+			return Snapshot{}, ErrNotRunning
+		}
 	}
 	tracked.snapshot.Status = "stopping"
 	snapshot := tracked.snapshot
@@ -372,6 +401,9 @@ func (m *Manager) Stop(streamID string) (Snapshot, error) {
 		Timestamp: time.Now().UTC(),
 	})
 	if err := m.stopProcessGracefully(tracked.process, tracked.done); err != nil {
+		return Snapshot{}, err
+	}
+	if err := m.recordStopReceipt(streamID); err != nil {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
@@ -441,7 +473,17 @@ func (m *Manager) stopProcessGracefully(process RunningProcess, done <-chan erro
 	case <-done:
 		return nil
 	case <-time.After(stopGracePeriod()):
-		return process.Kill()
+		if err := process.Kill(); err != nil {
+			return err
+		}
+		// A durable stop receipt must only be written after the process wait has
+		// observed exit. Killing a process is not itself proof that it is gone.
+		select {
+		case <-done:
+			return nil
+		case <-time.After(stopGracePeriod()):
+			return errors.New("stream process did not exit after kill")
+		}
 	}
 }
 
