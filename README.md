@@ -25,9 +25,9 @@ AUTOSTREAM_NODE_CONFIG=/etc/autostream-encoder-recorder/config.yml
 AUTOSTREAM_ENV=production
 AUTOSTREAM_BIND_ADDR=127.0.0.1:8081
 AUTOSTREAM_CONFIG_REVISION=1
-AUTOSTREAM_OUTPUT_RELAY_URL=rtmp://127.0.0.1/autostream/{stream_id}
-# URL only keeps an existing fixed stream-key Relay compatible.
-# AUTOSTREAM_OUTPUT_RELAY_MODE=legacy_stream_key
+AUTOSTREAM_OUTPUT_RELAY_URL=
+AUTOSTREAM_OUTPUT_RELAY_MODE=direct
+# Set a Relay URL and an explicit Relay mode only when a Relay is intended.
 ```
 
 `AUTOSTREAM_CONFIG_REVISION` is a root-owned positive integer used by the local
@@ -79,7 +79,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 `AUTOSTREAM_ARCHIVE_DIR=/var/lib/autostream/archives`、`FFMPEG_BIN=ffmpeg`、`TZ`は必要なhostだけで上書きします。上記はコード既定値と重複するため標準envには不要です。
 
-`AUTOSTREAM_ENV=production`ではControl Panel runtime configとoutput relayが自動的に必須になります。signed ingest tokenは環境に関係なく既定で必須です。YouTube stream key、RTMPS URL、Drive folder IDなどのoperational secretはenv fallbackから読まず、Control Panelから受け取ったstream runtime configだけを使います。
+`AUTOSTREAM_ENV=production`でも、通常はControl Panel runtime configだけで直接YouTube Live APIへ送信します。固定Relayを使う場合だけRelay URL、Relay mode、`AUTOSTREAM_REQUIRE_OUTPUT_RELAY=true`を明示してください。通常の直接送信ではRelay URLを空にし、`AUTOSTREAM_OUTPUT_RELAY_MODE=direct`を設定します。signed ingest tokenは環境に関係なく既定で必須です。YouTube stream key、RTMPS URL、Drive folder IDなどのoperational secretはenv fallbackから読まず、Control Panelから受け取ったstream runtime configだけを使います。
 
 `AUTOSTREAM_NODE_CONFIG`が未作成の間はNode Agentがpendingとして待機します。Auto Configure後に`config.yml`が不正、service registrationが失敗、またはruntime config fetchが失敗した場合はfail closedします。
 
@@ -97,9 +97,9 @@ The non-secret `retention_days` archive config controls local final archive clea
 
 `AUTOSTREAM_OUTPUT_RELAY_MODE` has exactly three non-secret values:
 `direct`, `legacy_stream_key`, and `live_api_static`. With no Relay URL and
-Relay output is not required (`AUTOSTREAM_REQUIRE_OUTPUT_RELAY=false` outside
-production), the effective mode is `direct`. When Relay output is required
-(including production), a missing URL is
+When Relay output is not explicitly required, the effective mode is `direct`.
+When Relay output is explicitly required (`AUTOSTREAM_REQUIRE_OUTPUT_RELAY=true`),
+a missing URL is
 unavailable/fail-closed and no output Relay capability is advertised. With a
 Relay URL and no mode, Encoder/Recorder
 preserves the existing `legacy_stream_key` route: it accepts only a Control

@@ -87,14 +87,15 @@ func FromEnv() Policy {
 	)
 }
 
-// RequireRelayFromEnv shares the production-safe requirement decision between
+// RequireRelayFromEnv shares the explicit Relay requirement decision between
 // capability reporting, HTTP preflight/dry-run, and stream process startup.
+// Direct YouTube Live API output is the normal path; a Relay is opt-in.
 func RequireRelayFromEnv() bool {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv("AUTOSTREAM_REQUIRE_OUTPUT_RELAY")))
-	if raw == "1" || raw == "true" || raw == "yes" || raw == "on" {
-		return true
+	if raw != "" {
+		return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
 	}
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("AUTOSTREAM_ENV")), "production")
+	return false
 }
 
 func (p Policy) ValidateConfiguration() error {

@@ -779,7 +779,7 @@ func TestPreflightEndpointTreatsYouTubeEnvAsOptionalRuntimeConfig(t *testing.T) 
 	}
 }
 
-func TestPreflightEndpointRequiresOutputRelayInProduction(t *testing.T) {
+func TestPreflightEndpointAcceptsDirectOutputInProductionByDefault(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	t.Setenv("AUTOSTREAM_ENV", "production")
 	exe, err := os.Executable()
@@ -807,11 +807,11 @@ func TestPreflightEndpointRequiresOutputRelayInProduction(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Ready {
-		t.Fatalf("expected production preflight to fail without output relay: %#v", body.Checks)
+	if !body.Ready {
+		t.Fatalf("expected production preflight to allow direct output by default: %#v", body.Checks)
 	}
-	if !hasPreflightCheck(body.Checks, "output_relay", "missing") {
-		t.Fatalf("missing output relay production failure: %#v", body.Checks)
+	if !hasPreflightCheck(body.Checks, "output_relay", "compatibility_mode") {
+		t.Fatalf("missing direct output compatibility check: %#v", body.Checks)
 	}
 }
 

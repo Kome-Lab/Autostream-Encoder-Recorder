@@ -629,16 +629,17 @@ func TestNewManagerFromEnvRequiresInputAllowedHostsByDefault(t *testing.T) {
 	}
 }
 
-func TestNewManagerFromEnvRequiresOutputRelayInProduction(t *testing.T) {
+func TestNewManagerFromEnvDefaultsToDirectInProduction(t *testing.T) {
 	t.Setenv("AUTOSTREAM_ENV", "production")
 	manager := NewManagerFromEnv()
-	if !manager.RequireOutputRelay {
-		t.Fatal("expected production manager to require output relay")
+	if manager.RequireOutputRelay {
+		t.Fatal("production should default to direct output when Relay is not explicitly required")
 	}
 }
 
-func TestNewManagerFromEnvFailsClosedBeforeFFmpegStartInProductionWithoutRelay(t *testing.T) {
+func TestNewManagerFromEnvFailsClosedBeforeFFmpegStartWhenRelayIsExplicitlyRequired(t *testing.T) {
 	t.Setenv("AUTOSTREAM_ENV", "production")
+	t.Setenv("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", "true")
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", t.TempDir())
 	t.Setenv("FFMPEG_BIN", "ffmpeg")
 	t.Setenv("AUTOSTREAM_INPUT_ALLOWED_HOSTS", "source.example.com")

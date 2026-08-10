@@ -19,6 +19,7 @@ func TestEnvExampleUsesPanelManagedNodeCredentials(t *testing.T) {
 		"AUTOSTREAM_CONFIG_REVISION":                 true,
 		"AUTOSTREAM_BIND_ADDR":                       true,
 		"AUTOSTREAM_OUTPUT_RELAY_URL":                true,
+		"AUTOSTREAM_OUTPUT_RELAY_MODE":               true,
 		"AUTOSTREAM_OUTPUT_RELAY_BINDING_ID":         true,
 		"AUTOSTREAM_ENCODER_RECORDER_PORT":           true,
 		"AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT": true,
@@ -89,7 +90,7 @@ func TestLocalComposeDoesNotRestoreLegacyCredentialInputs(t *testing.T) {
 	}
 }
 
-func TestProductionComposeUsesRelayServiceDNSOnDefaultNetwork(t *testing.T) {
+func TestProductionComposeDefaultsToDirectOutputAndKeepsRelayOptIn(t *testing.T) {
 	body, err := os.ReadFile("docker-compose.prod.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -100,8 +101,9 @@ func TestProductionComposeUsesRelayServiceDNSOnDefaultNetwork(t *testing.T) {
 		"ports: !override",
 		`127.0.0.1:${AUTOSTREAM_ENCODER_RECORDER_PORT:-8081}:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}`,
 		"AUTOSTREAM_ENV: production",
-		"AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://output-relay:1935/autostream/{stream_id}",
-		"AUTOSTREAM_OUTPUT_RELAY_MODE: ${AUTOSTREAM_OUTPUT_RELAY_MODE:-legacy_stream_key}",
+		"AUTOSTREAM_OUTPUT_RELAY_URL: ${AUTOSTREAM_OUTPUT_RELAY_URL:-}",
+		"AUTOSTREAM_OUTPUT_RELAY_MODE: ${AUTOSTREAM_OUTPUT_RELAY_MODE:-direct}",
+		"AUTOSTREAM_REQUIRE_OUTPUT_RELAY: ${AUTOSTREAM_REQUIRE_OUTPUT_RELAY:-false}",
 		"AUTOSTREAM_OUTPUT_RELAY_BINDING_ID: ${AUTOSTREAM_OUTPUT_RELAY_BINDING_ID:-}",
 		"\n    depends_on:\n      output-relay:\n        condition: service_started\n",
 		"./config:/etc/autostream-encoder-recorder:ro",
@@ -136,9 +138,9 @@ func TestStaticRelayBindingIDIsNonSecretAndMatchesControlPanelPolicy(t *testing.
 		t.Fatal(".env.example must expose a non-secret static relay binding ID placeholder")
 	}
 	for _, required := range []string{
-		"AUTOSTREAM_OUTPUT_RELAY_MODE=legacy_stream_key",
+		"AUTOSTREAM_OUTPUT_RELAY_MODE=direct",
+		"legacy_stream_key",
 		"AUTOSTREAM_OUTPUT_RELAY_MODE=live_api_static",
-		"Leave AUTOSTREAM_OUTPUT_RELAY_MODE unset",
 		"relay_binding_id",
 	} {
 		if !strings.Contains(string(env), required) {
@@ -152,7 +154,7 @@ func TestStaticRelayBindingIDIsNonSecretAndMatchesControlPanelPolicy(t *testing.
 	}
 	for _, required := range []string{
 		"AUTOSTREAM_OUTPUT_RELAY_BINDING_ID",
-		"AUTOSTREAM_REQUIRE_OUTPUT_RELAY=false",
+		"AUTOSTREAM_REQUIRE_OUTPUT_RELAY=true",
 		"unavailable/fail-closed",
 		"relay_binding_id",
 		"relay-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",

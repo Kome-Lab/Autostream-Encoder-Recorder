@@ -93,3 +93,22 @@ func TestPolicyAuthorizesOnlySupportedOutputBeforeSecretResolution(t *testing.T)
 		t.Fatalf("direct authorization local=%t err=%v", usesLocalRelay, err)
 	}
 }
+
+func TestRequireRelayFromEnvDefaultsToDirectAndHonorsExplicitOverride(t *testing.T) {
+	t.Setenv("AUTOSTREAM_ENV", "production")
+
+	t.Setenv("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", "")
+	if RequireRelayFromEnv() {
+		t.Fatal("production must allow direct output when no explicit Relay requirement is configured")
+	}
+
+	t.Setenv("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", "false")
+	if RequireRelayFromEnv() {
+		t.Fatal("explicit false must allow a direct production output configuration")
+	}
+
+	t.Setenv("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", "true")
+	if !RequireRelayFromEnv() {
+		t.Fatal("explicit true must require a Relay")
+	}
+}
