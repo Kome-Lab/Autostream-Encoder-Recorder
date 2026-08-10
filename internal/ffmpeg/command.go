@@ -42,8 +42,9 @@ func BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(inputURL, outputT
 	args := []string{
 		"-hide_banner", "-y", "-i", input,
 		"-map", "0:v:0?", "-map", "0:a:0?",
-		"-c:v", "libx264", "-preset", "veryfast", "-b:v", p.VideoBitrate,
-		"-r", itoa(p.FPS), "-g", itoa(p.FPS * p.KeyframeSec),
+		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
+		"-r", itoa(p.FPS), "-g", itoa(p.FPS * p.KeyframeSec), "-keyint_min", itoa(p.FPS * p.KeyframeSec), "-sc_threshold", "0",
+		"-x264-params", "repeat-headers=1:open-gop=0",
 		"-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate),
 	}
 	if progressPath != "" {
@@ -77,7 +78,8 @@ func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(audio
 		"-i", filepath.Clean(input),
 		"-map", "0:v:0", "-map", "1:a:0",
 		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
-		"-r", itoa(p.FPS), "-g", itoa(p.FPS * p.KeyframeSec),
+		"-r", itoa(p.FPS), "-g", itoa(p.FPS * p.KeyframeSec), "-keyint_min", itoa(p.FPS * p.KeyframeSec), "-sc_threshold", "0",
+		"-x264-params", "repeat-headers=1:open-gop=0",
 		"-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate),
 	}
 	if progressPath != "" {

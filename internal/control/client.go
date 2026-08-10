@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/example/autostream-encoder-recorder/internal/observability"
+	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/version"
 )
 
@@ -163,6 +164,12 @@ type RuntimeYouTubeStreamConfig struct {
 	ActiveRuntime    map[string]any `json:"active_runtime,omitempty"`
 }
 
+type RuntimeYouTubeOutputPolicy struct {
+	Mode           string
+	RelayBindingID string
+	Ready          bool
+}
+
 type RuntimeArchiveStreamConfig struct {
 	StreamID         string         `json:"stream_id"`
 	AssignmentRole   string         `json:"assignment_role"`
@@ -174,13 +181,17 @@ type RuntimeArchiveStreamConfig struct {
 }
 
 func (cfg RuntimeConfig) YouTubeConfigForStream(streamID string) (RuntimeYouTubeStreamConfig, bool) {
+	return cfg.youtubeConfigForStream(streamID, true)
+}
+
+func (cfg RuntimeConfig) youtubeConfigForStream(streamID string, readyOnly bool) (RuntimeYouTubeStreamConfig, bool) {
 	streamID = strings.TrimSpace(streamID)
 	var fallback RuntimeYouTubeStreamConfig
 	for _, item := range cfg.StreamYouTubeConfigs {
 		if streamID != "" && strings.TrimSpace(item.StreamID) != streamID {
 			continue
 		}
-		if !item.Ready {
+		if readyOnly && !item.Ready {
 			continue
 		}
 		if strings.TrimSpace(item.AssignmentRole) == "primary" {
@@ -194,6 +205,44 @@ func (cfg RuntimeConfig) YouTubeConfigForStream(streamID string) (RuntimeYouTube
 		return fallback, true
 	}
 	return RuntimeYouTubeStreamConfig{}, false
+}
+
+func (cfg RuntimeConfig) YouTubeOutputModeForStream(streamID string) (string, bool) {
+	policy, ok := cfg.YouTubeOutputPolicyForStream(streamID)
+	return policy.Mode, ok
+}
+
+func (cfg RuntimeConfig) YouTubeOutputPolicyForStream(streamID string) (RuntimeYouTubeOutputPolicy, bool) {
+	youtube, ok := cfg.youtubeConfigForStream(streamID, false)
+	if !ok {
+		return RuntimeYouTubeOutputPolicy{}, false
+	}
+	policy := RuntimeYouTubeOutputPolicy{
+		Mode: strings.ToLower(strings.TrimSpace(youtube.Mode())),
+		// Binding IDs are exact non-secret identity fences. Preserve raw runtime
+		// input so surrounding whitespace cannot be normalized into a valid ID.
+		RelayBindingID: runtimeMapRawString(youtube.YouTubeConfig, "relay_binding_id"),
+		Ready:          youtube.Ready,
+	}
+	for _, profile := range cfg.Profiles["youtube_output"] {
+		if strings.TrimSpace(profile.ID) != strings.TrimSpace(youtube.YouTubeOutputID) {
+			continue
+		}
+		mode := runtimeMapString(profile.Config, "mode")
+		if mode == "" {
+			mode = runtimeMapString(profile.Config, "output_mode")
+		}
+		if mode = strings.ToLower(strings.TrimSpace(mode)); mode != "" {
+			policy.Mode = mode
+		}
+		if _, configured := profile.Config["relay_binding_id"]; configured {
+			// A profile explicitly clearing its binding must fail closed rather
+			// than retain a value from an older specialized runtime entry.
+			policy.RelayBindingID = runtimeMapRawString(profile.Config, "relay_binding_id")
+		}
+		break
+	}
+	return policy, policy.Mode != ""
 }
 
 func (cfg RuntimeConfig) ArchiveConfigForStream(streamID string) (RuntimeArchiveStreamConfig, bool) {
@@ -322,6 +371,21 @@ func runtimeMapString(values map[string]any, key string) string {
 	}
 }
 
+func runtimeMapRawString(values map[string]any, key string) string {
+	if values == nil {
+		return ""
+	}
+	value, ok := values[key]
+	if !ok {
+		return ""
+	}
+	typed, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return typed
+}
+
 func runtimeMapBool(values map[string]any, key string) (bool, bool) {
 	if values == nil {
 		return false, false
@@ -443,7 +507,9 @@ func isLocalDevHost(host string) bool {
 }
 
 func serviceCapabilities() map[string]any {
-	return map[string]any{
+	policy := outputrelay.FromEnv()
+	outputRelayMode, relayConfigValid := policy.CapabilityMode()
+	capabilities := map[string]any{
 		"ffmpeg":             true,
 		"record_final_mkv":   true,
 		"remux_final_mp4":    true,
@@ -455,6 +521,17 @@ func serviceCapabilities() map[string]any {
 		"default_resolution": "1920x1080",
 		"default_fps":        60,
 	}
+	if !relayConfigValid {
+		return capabilities
+	}
+	capabilities["output_relay_mode"] = outputRelayMode
+	if outputRelayMode == outputrelay.ModeLiveAPIStatic {
+		// ValidateConfiguration guarantees that static capability records carry
+		// a non-secret binding fence. Legacy fixed stream-key Relay bindings are
+		// intentionally never advertised as a Live API static capability.
+		capabilities["output_relay_binding_id"] = policy.BindingID
+	}
+	return capabilities
 }
 
 func reportHostname() string {

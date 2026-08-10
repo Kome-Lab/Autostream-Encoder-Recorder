@@ -16,6 +16,12 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/ffmpeg"
 	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
 	"github.com/example/autostream-encoder-recorder/internal/observability"
+	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
+)
+
+const (
+	staticRelayBindingID      = "relay-11111111-1111-1111-1111-111111111111"
+	otherStaticRelayBindingID = "relay-22222222-2222-2222-2222-222222222222"
 )
 
 type fakeStarter struct {
@@ -75,10 +81,10 @@ func testInputResolver(ctx context.Context, host string) ([]net.IP, error) {
 func TestManagerStartWritesMetadataAndMasksStreamKey(t *testing.T) {
 	root := t.TempDir()
 	starter := &fakeStarter{}
-	manager := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}"}
+	manager := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeLiveAPIStatic, OutputRelayBindingID: staticRelayBindingID}
 	snapshot, err := manager.Start(lifecycle.StreamJob{
 		StreamID: "stream-01", Name: "Morning Stream", InputURL: "rtsp://camera:camera-password@input.example.com/live/%70%61%74%68-token",
-		RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "secret-stream-key",
+		RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "secret-stream-key", YouTubeOutputMode: "live_api_relay_static", OutputRelayBindingID: staticRelayBindingID, YouTubeOutputReady: true,
 		StartedAt: time.Date(2026, 5, 29, 1, 2, 3, 0, time.UTC),
 	})
 	if err != nil {
@@ -136,6 +142,204 @@ func TestManagerStartWritesMetadataAndMasksStreamKey(t *testing.T) {
 	}
 }
 
+func TestManagerLegacyStreamKeyRelayStartsWithoutRetainingUpstreamTarget(t *testing.T) {
+	root := t.TempDir()
+	starter := &fakeStarter{}
+	manager := &Manager{
+		ArchiveRoot:          root,
+		FFmpegBin:            "ffmpeg",
+		Starter:              starter,
+		InputResolver:        testInputResolver,
+		AllowHostnameInputs:  true,
+		OutputRelayURL:       "rtmp://127.0.0.1/autostream/{stream_id}",
+		OutputRelayBindingID: "stale-binding-must-not-matter",
+	}
+
+	_, err := manager.Start(lifecycle.StreamJob{
+		StreamID: "stream-legacy-01", Name: "Legacy Stream", InputURL: "srt://input.example.com:9000",
+		RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "legacy-upstream-key", YouTubeOutputMode: "stream_key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(starter.args, " ")
+	for _, forbidden := range []string{"youtube.example.com", "legacy-upstream-key"} {
+		if strings.Contains(args, forbidden) {
+			t.Fatalf("legacy relay FFmpeg args leaked unused upstream material %q: %#v", forbidden, starter.args)
+		}
+	}
+	if !strings.Contains(args, "rtmp://127.0.0.1/autostream/stream-legacy-01") {
+		t.Fatalf("legacy relay must use its local output target: %#v", starter.args)
+	}
+	layout, err := archive.NewLayout(root, "stream-legacy-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := os.ReadFile(layout.TmpMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"youtube.example.com", "legacy-upstream-key"} {
+		if strings.Contains(string(metadata), forbidden) {
+			t.Fatalf("legacy relay metadata leaked unused upstream material %q: %s", forbidden, metadata)
+		}
+	}
+}
+
+func TestManagerRejectsLiveAPIWithStaticOutputRelayBeforeStartingFFmpeg(t *testing.T) {
+	root := t.TempDir()
+	starter := &fakeStarter{}
+	manager := &Manager{
+		ArchiveRoot:          root,
+		FFmpegBin:            "ffmpeg",
+		Starter:              starter,
+		InputResolver:        testInputResolver,
+		AllowHostnameInputs:  true,
+		OutputRelayURL:       "rtmp://127.0.0.1/autostream/{stream_id}",
+		OutputRelayMode:      outputrelay.ModeLiveAPIStatic,
+		OutputRelayBindingID: staticRelayBindingID,
+	}
+	_, err := manager.Start(lifecycle.StreamJob{
+		StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000",
+		RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "secret-stream-key", YouTubeOutputMode: "live_api",
+	})
+	if !errors.Is(err, ErrLiveAPIRequiresManagedOutputRelay) {
+		t.Fatalf("expected static relay live api rejection, got %v", err)
+	}
+	if starter.process != nil || len(starter.args) != 0 {
+		t.Fatalf("ffmpeg must not start for static relay live api: process=%#v args=%#v", starter.process, starter.args)
+	}
+}
+
+func TestManagerRejectsNonStaticYouTubeOutputModesWithStaticOutputRelayBeforeInputResolutionOrFFmpeg(t *testing.T) {
+	for _, outputMode := range []string{"stream_key", "live_api", "live_api_dry_run", ""} {
+		t.Run(outputMode, func(t *testing.T) {
+			root := t.TempDir()
+			starter := &fakeStarter{}
+			inputResolverCalls := 0
+			manager := &Manager{
+				ArchiveRoot:          root,
+				FFmpegBin:            "ffmpeg",
+				Starter:              starter,
+				AllowHostnameInputs:  true,
+				OutputRelayURL:       "rtmp://127.0.0.1/autostream/{stream_id}",
+				OutputRelayMode:      outputrelay.ModeLiveAPIStatic,
+				OutputRelayBindingID: staticRelayBindingID,
+				InputResolver: func(context.Context, string) ([]net.IP, error) {
+					inputResolverCalls++
+					return nil, errors.New("input target must not be resolved")
+				},
+			}
+
+			_, err := manager.Start(lifecycle.StreamJob{
+				StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000",
+				RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "caller-supplied-youtube-key",
+				YouTubeOutputMode: outputMode, OutputRelayBindingID: staticRelayBindingID, YouTubeOutputReady: true,
+			})
+			if !errors.Is(err, ErrLiveAPIRequiresManagedOutputRelay) {
+				t.Fatalf("output mode %q error = %v, want static relay rejection", outputMode, err)
+			}
+			if inputResolverCalls != 0 {
+				t.Fatalf("output mode %q resolved the input before static relay rejection", outputMode)
+			}
+			if starter.process != nil || len(starter.args) != 0 {
+				t.Fatalf("output mode %q started ffmpeg: process=%#v args=%#v", outputMode, starter.process, starter.args)
+			}
+		})
+	}
+}
+
+func TestManagerStartsStaticLiveAPIOutputRelayWithMatchingBindingWithoutYouTubeTarget(t *testing.T) {
+	root := t.TempDir()
+	starter := &fakeStarter{}
+	manager := &Manager{
+		ArchiveRoot:          root,
+		FFmpegBin:            "ffmpeg",
+		Starter:              starter,
+		InputResolver:        testInputResolver,
+		AllowHostnameInputs:  true,
+		OutputRelayURL:       "rtmp://127.0.0.1/autostream/{stream_id}",
+		OutputRelayMode:      outputrelay.ModeLiveAPIStatic,
+		OutputRelayBindingID: staticRelayBindingID,
+	}
+	snapshot, err := manager.Start(lifecycle.StreamJob{
+		StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000",
+		RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "caller-supplied-youtube-key",
+		YouTubeOutputMode: "live_api_relay_static", OutputRelayBindingID: staticRelayBindingID, YouTubeOutputReady: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "running" || starter.process == nil {
+		t.Fatalf("matching static relay binding did not start: snapshot=%#v process=%#v", snapshot, starter.process)
+	}
+	args := strings.Join(starter.args, " ")
+	if !strings.Contains(args, "rtmp://127.0.0.1/autostream/stream-01") || strings.Contains(args, "youtube.example.com") || strings.Contains(args, "caller-supplied-youtube-key") {
+		t.Fatalf("static live api relay must use only the local output target: %#v", starter.args)
+	}
+	layout, err := archive.NewLayout(root, "stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := os.ReadFile(layout.TmpMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(metadata), "youtube.example.com") || strings.Contains(string(metadata), "caller-supplied-youtube-key") {
+		t.Fatalf("static live api relay must not retain caller-supplied YouTube material: %s", metadata)
+	}
+}
+
+func TestManagerRejectsStaticLiveAPIOutputRelayBindingMismatchBeforeStartingFFmpeg(t *testing.T) {
+	root := t.TempDir()
+	starter := &fakeStarter{}
+	manager := &Manager{
+		ArchiveRoot:          root,
+		FFmpegBin:            "ffmpeg",
+		Starter:              starter,
+		InputResolver:        testInputResolver,
+		AllowHostnameInputs:  true,
+		OutputRelayURL:       "rtmp://127.0.0.1/autostream/{stream_id}",
+		OutputRelayMode:      outputrelay.ModeLiveAPIStatic,
+		OutputRelayBindingID: staticRelayBindingID,
+	}
+	_, err := manager.Start(lifecycle.StreamJob{
+		StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000",
+		YouTubeOutputMode: "live_api_relay_static", OutputRelayBindingID: otherStaticRelayBindingID, YouTubeOutputReady: true,
+	})
+	if !errors.Is(err, ErrLiveAPIRelayBindingMismatch) {
+		t.Fatalf("expected static relay binding mismatch, got %v", err)
+	}
+	if starter.process != nil || len(starter.args) != 0 {
+		t.Fatalf("ffmpeg must not start for a static relay binding mismatch: process=%#v args=%#v", starter.process, starter.args)
+	}
+}
+
+func TestManagerRejectsStaticLiveAPIOutputRelayWhenRuntimeIsNotReadyBeforeStartingFFmpeg(t *testing.T) {
+	root := t.TempDir()
+	starter := &fakeStarter{}
+	manager := &Manager{
+		ArchiveRoot:          root,
+		FFmpegBin:            "ffmpeg",
+		Starter:              starter,
+		InputResolver:        testInputResolver,
+		AllowHostnameInputs:  true,
+		OutputRelayURL:       "rtmp://127.0.0.1/autostream/{stream_id}",
+		OutputRelayMode:      outputrelay.ModeLiveAPIStatic,
+		OutputRelayBindingID: staticRelayBindingID,
+	}
+	_, err := manager.Start(lifecycle.StreamJob{
+		StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000",
+		YouTubeOutputMode: "live_api_relay_static", OutputRelayBindingID: staticRelayBindingID,
+	})
+	if !errors.Is(err, ErrLiveAPIRelayStaticNotReady) {
+		t.Fatalf("expected static live api unready rejection, got %v", err)
+	}
+	if starter.process != nil || len(starter.args) != 0 {
+		t.Fatalf("ffmpeg must not start for an unready static relay runtime: process=%#v args=%#v", starter.process, starter.args)
+	}
+}
+
 func TestWriteStartMetadataRedactsDirectRTMPSOutputTarget(t *testing.T) {
 	root := t.TempDir()
 	layout, err := archive.NewLayout(root, "stream-01")
@@ -179,13 +383,27 @@ func TestWriteStartMetadataRedactsDirectRTMPSOutputTarget(t *testing.T) {
 
 func TestManagerStartRequiresOutputRelayWhenConfigured(t *testing.T) {
 	root := t.TempDir()
-	manager := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &fakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, RequireOutputRelay: true}
+	inputResolverCalls := 0
+	manager := &Manager{
+		ArchiveRoot: root,
+		FFmpegBin:   "ffmpeg",
+		Starter:     &fakeStarter{},
+		InputResolver: func(context.Context, string) ([]net.IP, error) {
+			inputResolverCalls++
+			return nil, errors.New("input must not be resolved when the required relay is missing")
+		},
+		AllowHostnameInputs: true,
+		RequireOutputRelay:  true,
+	}
 	_, err := manager.Start(lifecycle.StreamJob{
 		StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000",
 		RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "secret-stream-key",
 	})
-	if err == nil || !strings.Contains(err.Error(), "output relay URL is required") {
+	if !errors.Is(err, outputrelay.ErrRelayRequired) {
 		t.Fatalf("expected output relay requirement to fail closed, got %v", err)
+	}
+	if inputResolverCalls != 0 {
+		t.Fatalf("required relay rejection must happen before input resolution, calls=%d", inputResolverCalls)
 	}
 }
 
@@ -448,9 +666,17 @@ func TestNewManagerFromEnvFailsClosedBeforeFFmpegStartInProductionWithoutRelay(t
 
 func TestNewManagerFromEnvReadsOutputRelayURL(t *testing.T) {
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://127.0.0.1/autostream/{stream_id}")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", outputrelay.ModeLiveAPIStatic)
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", staticRelayBindingID)
 	manager := NewManagerFromEnv()
 	if manager.OutputRelayURL != "rtmp://127.0.0.1/autostream/{stream_id}" {
 		t.Fatalf("unexpected output relay URL: %q", manager.OutputRelayURL)
+	}
+	if manager.OutputRelayBindingID != staticRelayBindingID {
+		t.Fatalf("unexpected output relay binding ID: %q", manager.OutputRelayBindingID)
+	}
+	if manager.OutputRelayMode != outputrelay.ModeLiveAPIStatic {
+		t.Fatalf("unexpected output relay mode: %q", manager.OutputRelayMode)
 	}
 }
 
@@ -541,6 +767,29 @@ func TestManagerRejectsDuplicateStartingStream(t *testing.T) {
 	starter.mu.Unlock()
 	if count != 1 {
 		t.Fatalf("expected one ffmpeg start, got %d", count)
+	}
+}
+
+func TestManagerStopRejectsStartingStream(t *testing.T) {
+	starter := &blockingStarter{started: make(chan struct{}), release: make(chan struct{})}
+	manager := &Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	job := lifecycle.StreamJob{StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key"}
+
+	startErr := make(chan error, 1)
+	go func() {
+		_, err := manager.Start(job)
+		startErr <- err
+	}()
+	<-starter.started
+	if _, err := manager.Stop(job.StreamID); !errors.Is(err, ErrStarting) {
+		t.Fatalf("stop starting stream error = %v, want ErrStarting", err)
+	}
+	close(starter.release)
+	if err := <-startErr; err != nil {
+		t.Fatalf("start stream: %v", err)
+	}
+	if _, err := manager.Stop(job.StreamID); err != nil {
+		t.Fatalf("stop running stream: %v", err)
 	}
 }
 

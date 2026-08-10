@@ -26,6 +26,8 @@ AUTOSTREAM_ENV=production
 AUTOSTREAM_BIND_ADDR=127.0.0.1:8081
 AUTOSTREAM_CONFIG_REVISION=1
 AUTOSTREAM_OUTPUT_RELAY_URL=rtmp://127.0.0.1/autostream/{stream_id}
+# URL only keeps an existing fixed stream-key Relay compatible.
+# AUTOSTREAM_OUTPUT_RELAY_MODE=legacy_stream_key
 ```
 
 `AUTOSTREAM_CONFIG_REVISION` is a root-owned positive integer used by the local
@@ -93,13 +95,39 @@ The non-secret `retention_days` archive config controls local final archive clea
 
 ## Production Output Relay
 
+`AUTOSTREAM_OUTPUT_RELAY_MODE` has exactly three non-secret values:
+`direct`, `legacy_stream_key`, and `live_api_static`. With no Relay URL and
+Relay output is not required (`AUTOSTREAM_REQUIRE_OUTPUT_RELAY=false` outside
+production), the effective mode is `direct`. When Relay output is required
+(including production), a missing URL is
+unavailable/fail-closed and no output Relay capability is advertised. With a
+Relay URL and no mode, Encoder/Recorder
+preserves the existing `legacy_stream_key` route: it accepts only a Control
+Panel `stream_key` output, clears its upstream URL/key/reference before input
+resolution or FFmpeg, and sends FFmpeg only to the local Relay target. It
+rejects `live_api`, `live_api_dry_run`, and an absent output mode.
+
+`live_api_static` is an explicit migration only. It requires a Relay URL and
+the non-secret `AUTOSTREAM_OUTPUT_RELAY_BINDING_ID`, which must exactly match
+the Control Panel YouTube Output profile's `relay_binding_id`. The profile must
+be `live_api_relay_static`, ready, and binding-fenced before start or dry-run.
+The binding format is exactly `relay-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+with lowercase hexadecimal UUID characters. The binding ID is an identity fence
+only; never put the Relay RTMPS URL,
+YouTube stream key, or watch URL in it. A Relay URL with `direct`, an unknown
+mode, or a URL-free non-direct mode is an invalid configuration. Production
+Compose defaults to `legacy_stream_key` for upgrade compatibility. To select
+`live_api_static`, set both the mode and binding in `.env`; Encoder/Recorder
+preflight rejects the configuration until the binding is supplied. A URL-only
+native/systemd configuration remains legacy compatible.
+
 本番では FFmpeg argv に YouTube stream key と upstream RTMPS URL を出しません。host配置ではFFmpegをloopback relayへ、Docker配置では通常のCompose network上の`output-relay:1935`へ出力します。
 
 ```text
 AUTOSTREAM_OUTPUT_RELAY_URL=rtmp://127.0.0.1/autostream/{stream_id}
 ```
 
-Docker production composeではEncoder/Recorderと`output-relay`を通常のCompose networkへ接続し、`AUTOSTREAM_OUTPUT_RELAY_URL=rtmp://output-relay:1935/autostream/{stream_id}`でservice DNSを使います。network namespaceは共有しません。`relay/nginx-rtmp.conf.example`を`relay/nginx-rtmp.conf`にコピーし、YouTube stream keyを置き換えてください。`relay/nginx-rtmp.conf`は`.gitignore`済みです。
+Docker production composeではEncoder/Recorderと`output-relay`を通常のCompose networkへ接続し、`AUTOSTREAM_OUTPUT_RELAY_URL=rtmp://output-relay:1935/autostream/{stream_id}`でservice DNSを使います。`docker-compose.prod.yml`は同時に`AUTOSTREAM_COMPOSE_OUTPUT_RELAY=1`をcontainer内へ設定し、この固定の`output-relay:1935`だけをrelayとして許可します。この設定は任意hostの許可ではないため、host/systemd配置へコピーしないでください。network namespaceは共有しません。`relay/nginx-rtmp.conf.example`を`relay/nginx-rtmp.conf`にコピーし、YouTube stream keyを置き換えてください。`relay/nginx-rtmp.conf`は`.gitignore`済みです。
 
 Dockerでは先に`config` directoryを作成してcontainer userが書き込めるようにし、PanelのAuto Configure commandと同じ引数をone-shot containerで実行します。host向けの`sudo autostream-encoder-recorder`とDocker one-shotは代替手段であり、両方は実行しません。
 

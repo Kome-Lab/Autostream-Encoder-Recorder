@@ -19,6 +19,7 @@ func TestEnvExampleUsesPanelManagedNodeCredentials(t *testing.T) {
 		"AUTOSTREAM_CONFIG_REVISION":                 true,
 		"AUTOSTREAM_BIND_ADDR":                       true,
 		"AUTOSTREAM_OUTPUT_RELAY_URL":                true,
+		"AUTOSTREAM_OUTPUT_RELAY_BINDING_ID":         true,
 		"AUTOSTREAM_ENCODER_RECORDER_PORT":           true,
 		"AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT": true,
 	}
@@ -64,6 +65,7 @@ func TestLocalComposeDoesNotRestoreLegacyCredentialInputs(t *testing.T) {
 		"AUTOSTREAM_BIND_ADDR: 0.0.0.0:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}",
 		`127.0.0.1:${AUTOSTREAM_ENCODER_RECORDER_PORT:-8081}:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}`,
 		`AUTOSTREAM_OUTPUT_RELAY_URL: ""`,
+		"AUTOSTREAM_OUTPUT_RELAY_MODE: direct",
 	} {
 		if !strings.Contains(local, required) {
 			t.Errorf("local compose is missing %q", required)
@@ -99,6 +101,8 @@ func TestProductionComposeUsesRelayServiceDNSOnDefaultNetwork(t *testing.T) {
 		`127.0.0.1:${AUTOSTREAM_ENCODER_RECORDER_PORT:-8081}:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}`,
 		"AUTOSTREAM_ENV: production",
 		"AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://output-relay:1935/autostream/{stream_id}",
+		"AUTOSTREAM_OUTPUT_RELAY_MODE: ${AUTOSTREAM_OUTPUT_RELAY_MODE:-legacy_stream_key}",
+		"AUTOSTREAM_OUTPUT_RELAY_BINDING_ID: ${AUTOSTREAM_OUTPUT_RELAY_BINDING_ID:-}",
 		"\n    depends_on:\n      output-relay:\n        condition: service_started\n",
 		"./config:/etc/autostream-encoder-recorder:ro",
 		"encoder-archives:/var/lib/autostream/archives",
@@ -114,9 +118,48 @@ func TestProductionComposeUsesRelayServiceDNSOnDefaultNetwork(t *testing.T) {
 		"\n    networks:",
 		"AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://127.0.0.1",
 		"./config:/etc/autostream-encoder-recorder\n",
+		"AUTOSTREAM_OUTPUT_RELAY_MODE: live_api_static",
+		"AUTOSTREAM_OUTPUT_RELAY_BINDING_ID: ${AUTOSTREAM_OUTPUT_RELAY_BINDING_ID:?",
 	} {
 		if strings.Contains(compose, forbidden) {
 			t.Errorf("production compose must not contain %q", forbidden)
+		}
+	}
+}
+
+func TestStaticRelayBindingIDIsNonSecretAndMatchesControlPanelPolicy(t *testing.T) {
+	env, err := os.ReadFile(".env.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(env), "AUTOSTREAM_OUTPUT_RELAY_BINDING_ID=relay-00000000-0000-0000-0000-000000000000") {
+		t.Fatal(".env.example must expose a non-secret static relay binding ID placeholder")
+	}
+	for _, required := range []string{
+		"AUTOSTREAM_OUTPUT_RELAY_MODE=legacy_stream_key",
+		"AUTOSTREAM_OUTPUT_RELAY_MODE=live_api_static",
+		"Leave AUTOSTREAM_OUTPUT_RELAY_MODE unset",
+		"relay_binding_id",
+	} {
+		if !strings.Contains(string(env), required) {
+			t.Errorf(".env.example is missing Relay mode compatibility guidance %q", required)
+		}
+	}
+
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"AUTOSTREAM_OUTPUT_RELAY_BINDING_ID",
+		"AUTOSTREAM_REQUIRE_OUTPUT_RELAY=false",
+		"unavailable/fail-closed",
+		"relay_binding_id",
+		"relay-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+		"non-secret",
+	} {
+		if !strings.Contains(string(readme), required) {
+			t.Errorf("README is missing static relay binding guidance %q", required)
 		}
 	}
 }

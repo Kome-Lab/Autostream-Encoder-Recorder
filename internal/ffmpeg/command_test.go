@@ -125,6 +125,7 @@ func TestBuildLiveArchiveArgsWithPreviewAddsBoundedIsolatedHLS(t *testing.T) {
 	if strings.Contains(teeOutput, "omit_endlist") {
 		t.Fatalf("preview must allow ENDLIST on graceful shutdown: %s", teeOutput)
 	}
+	assertBrowserCompatiblePreviewVideoArgs(t, args)
 }
 
 func TestBuildDiscordAudioLiveArchiveArgsWithPreviewAddsHLS(t *testing.T) {
@@ -139,6 +140,21 @@ func TestBuildDiscordAudioLiveArchiveArgsWithPreviewAddsHLS(t *testing.T) {
 	)
 	if teeOutput := args[len(args)-1]; !strings.Contains(teeOutput, "[f=hls:onfail=ignore:") {
 		t.Fatalf("discord audio output is missing isolated HLS preview: %s", teeOutput)
+	}
+	assertBrowserCompatiblePreviewVideoArgs(t, args)
+}
+
+func assertBrowserCompatiblePreviewVideoArgs(t *testing.T, args []string) {
+	t.Helper()
+	for _, want := range [][2]string{
+		{"-c:v", "libx264"},
+		{"-pix_fmt", "yuv420p"},
+		{"-g", "120"},
+		{"-keyint_min", "120"},
+		{"-sc_threshold", "0"},
+		{"-x264-params", "repeat-headers=1:open-gop=0"},
+	} {
+		assertArgValue(t, args, want[0], want[1])
 	}
 }
 
@@ -413,6 +429,31 @@ func TestValidateRelayOutputTargetAllowsOnlyLoopbackRTMP(t *testing.T) {
 	}
 }
 
+func TestValidateRelayOutputTargetAllowsExplicitComposeOwnedRelayOnly(t *testing.T) {
+	t.Setenv("AUTOSTREAM_COMPOSE_OUTPUT_RELAY", "1")
+	if err := ValidateRelayOutputTarget("rtmp://output-relay:1935/autostream/stream-01"); err != nil {
+		t.Fatalf("expected explicitly configured Compose relay target to pass: %v", err)
+	}
+	for _, target := range []string{
+		"rtmp://output-relay/autostream/stream-01",
+		"rtmps://output-relay:1935/autostream/stream-01",
+		"rtmp://output-relay:1936/autostream/stream-01",
+		"rtmp://output-relay.example.com:1935/autostream/stream-01",
+		"rtmp://other-relay:1935/autostream/stream-01",
+	} {
+		if err := ValidateRelayOutputTarget(target); err == nil {
+			t.Fatalf("expected non-Compose relay target %q to be rejected", target)
+		}
+	}
+}
+
+func TestValidateRelayOutputTargetRejectsComposeRelayWithoutExplicitIdentity(t *testing.T) {
+	t.Setenv("AUTOSTREAM_COMPOSE_OUTPUT_RELAY", "")
+	if err := ValidateRelayOutputTarget("rtmp://output-relay:1935/autostream/stream-01"); err == nil {
+		t.Fatal("expected Compose relay hostname to require explicit Compose identity")
+	}
+}
+
 func containsArg(args []string, want string) bool {
 	for _, arg := range args {
 		if arg == want {
@@ -420,6 +461,16 @@ func containsArg(args []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func assertArgValue(t *testing.T, args []string, flag, want string) {
+	t.Helper()
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == want {
+			return
+		}
+	}
+	t.Fatalf("missing %s %s in args: %#v", flag, want, args)
 }
 
 func TestParseProgress(t *testing.T) {

@@ -14,6 +14,8 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/version"
 )
 
+const testStaticRelayBindingID = "relay-11111111-1111-1111-1111-111111111111"
+
 func TestRegisterPostsServiceRegistration(t *testing.T) {
 	var gotAuth string
 	var got Registration
@@ -75,6 +77,101 @@ func TestHeartbeatPostsStatus(t *testing.T) {
 	}
 	if got.Commit != version.Commit || got.BuildDate != version.BuildDate {
 		t.Fatalf("heartbeat did not include build metadata: %#v", got)
+	}
+}
+
+func TestServiceCapabilitiesAdvertiseNonSecretOutputRelayMode(t *testing.T) {
+	t.Setenv("AUTOSTREAM_ENV", "development")
+	t.Setenv("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", "false")
+	t.Setenv("AUTOSTREAM_COMPOSE_OUTPUT_RELAY", "")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://127.0.0.1/autostream/{stream_id}")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", testStaticRelayBindingID)
+	capabilities := serviceCapabilities()
+	if got := capabilities["output_relay_mode"]; got != "legacy_stream_key" {
+		t.Fatalf("legacy output relay capability=%#v", capabilities)
+	}
+	if _, ok := capabilities["output_relay_binding_id"]; ok {
+		t.Fatalf("legacy output relay must not advertise a static binding: %#v", capabilities)
+	}
+
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "live_api_static")
+	capabilities = serviceCapabilities()
+	if got := capabilities["output_relay_mode"]; got != "live_api_static" {
+		t.Fatalf("static output relay capability=%#v", capabilities)
+	}
+	if got := capabilities["output_relay_binding_id"]; got != testStaticRelayBindingID {
+		t.Fatalf("static output relay binding capability=%#v", capabilities)
+	}
+	encoded, err := json.Marshal(capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "127.0.0.1") || strings.Contains(string(encoded), "autostream/{stream_id}") {
+		t.Fatalf("output relay capability leaked relay address: %s", encoded)
+	}
+
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "direct")
+	// A stale environment binding without a local relay must not make a
+	// direct-output service look statically bound.
+	if got := serviceCapabilities()["output_relay_mode"]; got != "direct" {
+		t.Fatalf("direct output capability=%#v", serviceCapabilities())
+	}
+	if _, ok := serviceCapabilities()["output_relay_binding_id"]; ok {
+		t.Fatalf("direct output capability must not advertise an empty relay binding: %#v", serviceCapabilities())
+	}
+
+	t.Setenv("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", "true")
+	if _, ok := serviceCapabilities()["output_relay_mode"]; ok {
+		t.Fatalf("missing required relay must omit output mode: %#v", serviceCapabilities())
+	}
+	if _, ok := serviceCapabilities()["output_relay_binding_id"]; ok {
+		t.Fatalf("missing required relay must omit output binding: %#v", serviceCapabilities())
+	}
+
+	t.Setenv("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", "false")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://127.0.0.1/autostream/{stream_id}")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "managed")
+	if _, ok := serviceCapabilities()["output_relay_mode"]; ok {
+		t.Fatalf("invalid relay configuration must omit output mode: %#v", serviceCapabilities())
+	}
+	if _, ok := serviceCapabilities()["output_relay_binding_id"]; ok {
+		t.Fatalf("invalid relay configuration must not advertise a binding: %#v", serviceCapabilities())
+	}
+
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", "")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://relay.example.com/autostream/{stream_id}")
+	if _, ok := serviceCapabilities()["output_relay_mode"]; ok {
+		t.Fatalf("non-loopback relay must omit output mode: %#v", serviceCapabilities())
+	}
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://output-relay:1935/autostream/{stream_id}")
+	if _, ok := serviceCapabilities()["output_relay_mode"]; ok {
+		t.Fatalf("compose relay without explicit identity must omit output mode: %#v", serviceCapabilities())
+	}
+	t.Setenv("AUTOSTREAM_COMPOSE_OUTPUT_RELAY", "1")
+	if got := serviceCapabilities()["output_relay_mode"]; got != "legacy_stream_key" {
+		t.Fatalf("explicit Compose relay capability=%#v", serviceCapabilities())
+	}
+
+	t.Setenv("AUTOSTREAM_COMPOSE_OUTPUT_RELAY", "")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "live_api_static")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", "relay-binding-static")
+	if _, ok := serviceCapabilities()["output_relay_mode"]; ok {
+		t.Fatalf("invalid static binding must omit output mode: %#v", serviceCapabilities())
+	}
+	if _, ok := serviceCapabilities()["output_relay_binding_id"]; ok {
+		t.Fatalf("invalid static binding must not advertise a binding: %#v", serviceCapabilities())
+	}
+
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", testStaticRelayBindingID)
+	if _, ok := serviceCapabilities()["output_relay_mode"]; ok {
+		t.Fatalf("URL-free static configuration must omit output mode: %#v", serviceCapabilities())
+	}
+	if _, ok := serviceCapabilities()["output_relay_binding_id"]; ok {
+		t.Fatalf("URL-free static configuration must omit a binding: %#v", serviceCapabilities())
 	}
 }
 
@@ -178,6 +275,9 @@ func TestRuntimeConfigFetchesScopedServiceConfig(t *testing.T) {
 	if youtubeConfig.Mode() != "stream_key" || youtubeConfig.RTMPURL() != "rtmps://a.rtmps.youtube.com/live2" {
 		t.Fatalf("unexpected youtube runtime config fields: %#v", youtubeConfig)
 	}
+	if mode, ok := cfg.YouTubeOutputModeForStream("stream-01"); !ok || mode != "stream_key" {
+		t.Fatalf("unexpected nonsecret YouTube output mode: mode=%q ok=%v", mode, ok)
+	}
 	if youtubeConfig.StreamKeySecretName() != "youtube_stream_key_runtime_stream-01" || !youtubeConfig.CompleteOnStop() {
 		t.Fatalf("unexpected youtube runtime secret reference: %#v", youtubeConfig)
 	}
@@ -210,6 +310,73 @@ func TestRuntimeConfigFetchesScopedServiceConfig(t *testing.T) {
 		if strings.Contains(string(body), rawSecret) {
 			t.Fatalf("runtime config must not include raw secret material %q: %s", rawSecret, body)
 		}
+	}
+}
+
+func TestRuntimeYouTubeOutputPolicyUsesTrustedProfileModeAndRelayBinding(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		youtube     map[string]any
+		profile     map[string]any
+		ready       bool
+		wantMode    string
+		wantBinding string
+		wantReady   bool
+	}{
+		{
+			name:        "specialized runtime config",
+			youtube:     map[string]any{"mode": "live_api_relay_static", "relay_binding_id": testStaticRelayBindingID},
+			ready:       true,
+			wantMode:    "live_api_relay_static",
+			wantBinding: testStaticRelayBindingID,
+			wantReady:   true,
+		},
+		{
+			name:        "surrounding binding whitespace is preserved for policy rejection",
+			youtube:     map[string]any{"mode": "live_api_relay_static", "relay_binding_id": " " + testStaticRelayBindingID},
+			ready:       true,
+			wantMode:    "live_api_relay_static",
+			wantBinding: " " + testStaticRelayBindingID,
+			wantReady:   true,
+		},
+		{
+			name:    "trusted profile overrides specialized config",
+			youtube: map[string]any{"mode": "stream_key"},
+			profile: map[string]any{
+				"mode":             "live_api_relay_static",
+				"relay_binding_id": testStaticRelayBindingID,
+			},
+			wantMode:    "live_api_relay_static",
+			wantBinding: testStaticRelayBindingID,
+			wantReady:   false,
+		},
+		{
+			name:        "explicitly cleared profile binding fails closed",
+			youtube:     map[string]any{"mode": "live_api_relay_static", "relay_binding_id": testStaticRelayBindingID},
+			profile:     map[string]any{"relay_binding_id": ""},
+			wantMode:    "live_api_relay_static",
+			wantBinding: "",
+			wantReady:   false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := RuntimeConfig{
+				StreamYouTubeConfigs: []RuntimeYouTubeStreamConfig{{
+					StreamID:        "stream-01",
+					AssignmentRole:  "primary",
+					YouTubeOutputID: "youtube-output-01",
+					Ready:           tt.ready,
+					YouTubeConfig:   tt.youtube,
+				}},
+				Profiles: map[string][]RuntimeProfile{
+					"youtube_output": {{ID: "youtube-output-01", Config: tt.profile}},
+				},
+			}
+			policy, ok := cfg.YouTubeOutputPolicyForStream("stream-01")
+			if !ok || policy.Mode != tt.wantMode || policy.RelayBindingID != tt.wantBinding || policy.Ready != tt.wantReady {
+				t.Fatalf("unexpected trusted YouTube output policy: %#v ok=%v", policy, ok)
+			}
+		})
 	}
 }
 

@@ -27,16 +27,19 @@ type Manager struct {
 }
 
 type StreamJob struct {
-	StreamID            string        `json:"stream_id"`
-	Name                string        `json:"name"`
-	InputURL            string        `json:"input_url"`
-	InputMode           string        `json:"input_mode,omitempty"`
-	RTMPURL             string        `json:"rtmp_url"`
-	StreamKey           string        `json:"stream_key,omitempty"`
-	StreamKeySecretName string        `json:"stream_key_secret_name,omitempty"`
-	StartedAt           time.Time     `json:"started_at"`
-	DryRun              bool          `json:"dry_run"`
-	ArchiveConfig       ArchiveConfig `json:"archive_config,omitempty"`
+	StreamID             string        `json:"stream_id"`
+	Name                 string        `json:"name"`
+	InputURL             string        `json:"input_url"`
+	InputMode            string        `json:"input_mode,omitempty"`
+	RTMPURL              string        `json:"rtmp_url"`
+	StreamKey            string        `json:"stream_key,omitempty"`
+	StreamKeySecretName  string        `json:"stream_key_secret_name,omitempty"`
+	YouTubeOutputMode    string        `json:"-"`
+	OutputRelayBindingID string        `json:"-"`
+	YouTubeOutputReady   bool          `json:"-"`
+	StartedAt            time.Time     `json:"started_at"`
+	DryRun               bool          `json:"dry_run"`
+	ArchiveConfig        ArchiveConfig `json:"archive_config,omitempty"`
 }
 
 type PackageJob struct {
@@ -166,6 +169,13 @@ func SafeErrorSummary(err error) string {
 }
 
 func (m Manager) DryRun(ctx context.Context, job StreamJob) (Result, error) {
+	return m.DryRunToOutputTarget(ctx, job, "")
+}
+
+// DryRunToOutputTarget keeps dry-run's command and metadata behavior aligned
+// with a live process that emits to a non-secret local Relay target.  An empty
+// outputTarget preserves the direct RTMPS compatibility path.
+func (m Manager) DryRunToOutputTarget(ctx context.Context, job StreamJob, outputTarget string) (Result, error) {
 	if job.StreamID == "" || job.Name == "" {
 		return Result{}, errors.New("stream id and name are required")
 	}
@@ -182,7 +192,13 @@ func (m Manager) DryRun(ctx context.Context, job StreamJob) (Result, error) {
 	if err := ffmpeg.ValidateInputTarget(job.InputURL); err != nil {
 		return Result{}, err
 	}
-	if err := ffmpeg.ValidateOutputTarget(job.RTMPURL, job.StreamKey); err != nil {
+	outputTarget = strings.TrimSpace(outputTarget)
+	if outputTarget == "" {
+		if err := ffmpeg.ValidateOutputTarget(job.RTMPURL, job.StreamKey); err != nil {
+			return Result{}, err
+		}
+		outputTarget = job.RTMPURL + "/" + job.StreamKey
+	} else if err := ffmpeg.ValidateRelayOutputTarget(outputTarget); err != nil {
 		return Result{}, err
 	}
 	runner := m.Runner
@@ -197,7 +213,7 @@ func (m Manager) DryRun(ctx context.Context, job StreamJob) (Result, error) {
 	if ffmpegBin == "" {
 		ffmpegBin = "ffmpeg"
 	}
-	liveArgs := BuildLiveArgs(job, layout.FinalMKV(), "", "", profile)
+	liveArgs := BuildLiveArgsToOutputTarget(job, outputTarget, layout.FinalMKV(), "", "", profile)
 	if err := runner.Run(ctx, ffmpegBin, liveArgs); err != nil {
 		return Result{}, err
 	}

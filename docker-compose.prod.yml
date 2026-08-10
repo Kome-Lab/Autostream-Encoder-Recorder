@@ -9,6 +9,13 @@ services:
       AUTOSTREAM_CONFIG_REVISION: ${AUTOSTREAM_CONFIG_REVISION:-1}
       AUTOSTREAM_BIND_ADDR: 0.0.0.0:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}
       AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://output-relay:1935/autostream/{stream_id}
+      # Keep existing fixed-key Relay installations compatible. Operators opt
+      # into live_api_static only after configuring the matching binding.
+      AUTOSTREAM_OUTPUT_RELAY_MODE: ${AUTOSTREAM_OUTPUT_RELAY_MODE:-legacy_stream_key}
+      AUTOSTREAM_OUTPUT_RELAY_BINDING_ID: ${AUTOSTREAM_OUTPUT_RELAY_BINDING_ID:-}
+      # Enables only this Compose-owned service DNS identity; it is not a
+      # general remote relay allowlist.
+      AUTOSTREAM_COMPOSE_OUTPUT_RELAY: "1"
     depends_on:
       output-relay:
         condition: service_started

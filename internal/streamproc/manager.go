@@ -19,18 +19,26 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/ffmpeg"
 	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
 	"github.com/example/autostream-encoder-recorder/internal/observability"
+	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/redaction"
 )
 
 var (
-	ErrAlreadyRunning = errors.New("stream process is already running")
+	ErrAlreadyRunning                    = errors.New("stream process is already running")
+	ErrLiveAPIRequiresManagedOutputRelay = outputrelay.ErrLiveAPIRequiresManagedOutputRelay
+	ErrLiveAPIRelayBindingMismatch       = outputrelay.ErrLiveAPIRelayBindingMismatch
+	ErrLiveAPIRelayStaticNotReady        = outputrelay.ErrLiveAPIRelayStaticNotReady
 	// ErrAlreadyStopped identifies a known stream whose media process has
 	// already entered a non-running terminal or stop-in-progress state.  It is
 	// deliberately distinct from ErrNotRunning: callers can safely make a
 	// target-specific retry a no-op without treating an unknown stream ID as a
 	// successful stop.
 	ErrAlreadyStopped = errors.New("stream process is already stopped")
-	ErrNotRunning     = errors.New("stream process is not running")
+	// ErrStarting identifies the narrow window after a stream reservation was
+	// accepted but before FFmpeg became a running process. It must not be
+	// normalized as an idle/no-process receipt by upstream callers.
+	ErrStarting   = errors.New("stream process is starting")
+	ErrNotRunning = errors.New("stream process is not running")
 )
 
 type Starter interface {
@@ -114,6 +122,8 @@ type Manager struct {
 	AllowHostnameInputs      bool
 	RequireInputAllowedHosts bool
 	OutputRelayURL           string
+	OutputRelayMode          string
+	OutputRelayBindingID     string
 	RequireOutputRelay       bool
 
 	mu        sync.Mutex
@@ -180,7 +190,11 @@ func NewManagerFromEnv() *Manager {
 		AllowHostnameInputs:      envBool("AUTOSTREAM_ALLOW_HOSTNAME_INPUTS", false),
 		RequireInputAllowedHosts: envBool("AUTOSTREAM_REQUIRE_INPUT_ALLOWED_HOSTS", true),
 		OutputRelayURL:           strings.TrimSpace(os.Getenv("AUTOSTREAM_OUTPUT_RELAY_URL")),
-		RequireOutputRelay:       envBool("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", strings.EqualFold(strings.TrimSpace(os.Getenv("AUTOSTREAM_ENV")), "production")),
+		OutputRelayMode:          strings.TrimSpace(os.Getenv("AUTOSTREAM_OUTPUT_RELAY_MODE")),
+		// Binding IDs are exact canonical identities; do not trim whitespace and
+		// accidentally turn an invalid persisted value into a trusted binding.
+		OutputRelayBindingID: os.Getenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID"),
+		RequireOutputRelay:   outputrelay.RequireRelayFromEnv(),
 		Packager: lifecycle.Manager{
 			ArchiveRoot: archiveRoot,
 			FFmpegBin:   ffmpegBin,
@@ -197,6 +211,16 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	if job.StreamID == "" || job.Name == "" {
 		return Snapshot{}, errors.New("stream id and name are required")
 	}
+	usesLocalRelay, err := m.AuthorizeOutputRelay(job)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if usesLocalRelay {
+		// A local Relay's downstream target is configured out of band.  Do not
+		// retain an upstream RTMPS target, key, or reference in process state,
+		// metadata, or later error paths once the Relay route was authorized.
+		clearUnusedYouTubeOutputTarget(&job)
+	}
 	if job.InputURL == "" {
 		return Snapshot{}, errors.New("input_url is required")
 	}
@@ -205,14 +229,16 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	if err := ffmpeg.ValidateInputTargetWithRuntimePolicy(validateCtx, job.InputURL, m.InputAllowedHosts, m.InputResolver, ffmpeg.RuntimeInputPolicy{AllowDirectHLS: m.AllowDirectHLS, AllowHostnameInputs: m.AllowHostnameInputs, RequireAllowedHosts: m.RequireInputAllowedHosts}); err != nil {
 		return Snapshot{}, err
 	}
-	if job.RTMPURL == "" {
-		return Snapshot{}, errors.New("rtmp_url is required")
-	}
-	if job.StreamKey == "" {
-		return Snapshot{}, errors.New("stream key is required")
-	}
-	if err := ffmpeg.ValidateOutputTarget(job.RTMPURL, job.StreamKey); err != nil {
-		return Snapshot{}, err
+	if !usesLocalRelay {
+		if job.RTMPURL == "" {
+			return Snapshot{}, errors.New("rtmp_url is required")
+		}
+		if job.StreamKey == "" {
+			return Snapshot{}, errors.New("stream key is required")
+		}
+		if err := ffmpeg.ValidateOutputTarget(job.RTMPURL, job.StreamKey); err != nil {
+			return Snapshot{}, err
+		}
 	}
 	outputTarget, err := m.liveOutputTarget(job)
 	if err != nil {
@@ -324,6 +350,29 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	return snapshot, nil
 }
 
+// OutputRelayPolicy returns the non-secret routing configuration.  An unset
+// mode with a configured URL is deliberately interpreted as the legacy fixed
+// stream-key Relay so existing host/systemd environments keep working.
+func (m *Manager) OutputRelayPolicy() outputrelay.Policy {
+	return outputrelay.NewWithRequireRelay(m.OutputRelayURL, m.OutputRelayMode, m.OutputRelayBindingID, m.RequireOutputRelay)
+}
+
+// AuthorizeOutputRelay must be called before resolving a YouTube key, an input
+// target, or starting FFmpeg.  It is shared with the HTTP layer to keep the
+// direct, legacy, and static-Live-API acceptance rules identical.
+func (m *Manager) AuthorizeOutputRelay(job lifecycle.StreamJob) (bool, error) {
+	return m.OutputRelayPolicy().AuthorizeYouTubeOutput(job.YouTubeOutputMode, job.YouTubeOutputReady, job.OutputRelayBindingID)
+}
+
+func clearUnusedYouTubeOutputTarget(job *lifecycle.StreamJob) {
+	if job == nil {
+		return
+	}
+	job.RTMPURL = ""
+	job.StreamKey = ""
+	job.StreamKeySecretName = ""
+}
+
 func (m *Manager) validateInputForLayout(job lifecycle.StreamJob, layout archive.Layout) error {
 	if job.InputMode == "discord_opus_rtp" {
 		if !strings.HasPrefix(strings.TrimSpace(job.InputURL), "internal_discord_audio:") {
@@ -343,13 +392,17 @@ func (m *Manager) validateInputForLayout(job lifecycle.StreamJob, layout archive
 }
 
 func (m *Manager) liveOutputTarget(job lifecycle.StreamJob) (string, error) {
-	if strings.TrimSpace(m.OutputRelayURL) == "" {
+	policy := m.OutputRelayPolicy()
+	if err := policy.ValidateConfiguration(); err != nil {
+		return "", err
+	}
+	if !policy.UsesLocalRelay() {
 		if m.RequireOutputRelay {
 			return "", errors.New("output relay URL is required")
 		}
 		return job.RTMPURL + "/" + job.StreamKey, nil
 	}
-	target := relayOutputTarget(m.OutputRelayURL, job.StreamID)
+	target := relayOutputTarget(policy.URL, job.StreamID)
 	if err := ffmpeg.ValidateRelayOutputTarget(target); err != nil {
 		return "", err
 	}
@@ -385,6 +438,8 @@ func (m *Manager) Stop(streamID string) (Snapshot, error) {
 		switch snapshot.Status {
 		case "stopping", "packaging", "stopped", "failed", "package_failed":
 			return snapshot, ErrAlreadyStopped
+		case "starting":
+			return snapshot, ErrStarting
 		default:
 			return Snapshot{}, ErrNotRunning
 		}

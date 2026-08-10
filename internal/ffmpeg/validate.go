@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 )
 
 var ErrUnsafeOutputTarget = errors.New("unsafe ffmpeg output target")
@@ -47,29 +49,7 @@ func ValidateOutputTarget(rtmpURL, streamKey string) error {
 }
 
 func ValidateRelayOutputTarget(outputTarget string) error {
-	outputTarget = strings.TrimSpace(outputTarget)
-	if outputTarget == "" || strings.ContainsAny(outputTarget, "|[]\r\n") {
-		return ErrUnsafeOutputTarget
-	}
-	parsed, err := url.Parse(outputTarget)
-	if err != nil {
-		return ErrUnsafeOutputTarget
-	}
-	if parsed.Scheme != "rtmp" && parsed.Scheme != "rtmps" {
-		return ErrUnsafeOutputTarget
-	}
-	if parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return ErrUnsafeOutputTarget
-	}
-	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
-	if host == "localhost" {
-		return nil
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return ErrUnsafeOutputTarget
-	}
-	if strings.TrimSpace(parsed.Path) == "" || parsed.Path == "/" {
+	if err := outputrelay.ValidateRelayTarget(outputTarget); err != nil {
 		return ErrUnsafeOutputTarget
 	}
 	return nil

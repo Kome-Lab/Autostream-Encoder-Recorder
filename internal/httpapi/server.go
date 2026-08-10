@@ -25,6 +25,7 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/ingesttoken"
 	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
 	"github.com/example/autostream-encoder-recorder/internal/observability"
+	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/streamproc"
 	"github.com/example/autostream-encoder-recorder/internal/version"
 	"github.com/example/autostream-encoder-recorder/internal/workerevents"
@@ -407,26 +408,32 @@ func pathInsideRoot(root, path string) bool {
 }
 
 func outputRelayPreflight() preflightCheck {
-	raw := strings.TrimSpace(os.Getenv("AUTOSTREAM_OUTPUT_RELAY_URL"))
-	required := requireOutputRelay()
-	if raw == "" {
-		if required {
+	policy := outputrelay.FromEnv()
+	if err := policy.ValidateConfiguration(); err != nil {
+		if errors.Is(err, outputrelay.ErrRelayRequired) {
 			return preflightCheck{ID: "output_relay", Status: "missing", Severity: "critical", Message: "AUTOSTREAM_OUTPUT_RELAY_URL is required in production to keep YouTube stream keys out of FFmpeg process arguments."}
 		}
+		message := "AUTOSTREAM_OUTPUT_RELAY_MODE and AUTOSTREAM_OUTPUT_RELAY_URL form an invalid output Relay configuration."
+		if errors.Is(err, outputrelay.ErrStaticBindingRequired) {
+			message = "AUTOSTREAM_OUTPUT_RELAY_BINDING_ID is required when AUTOSTREAM_OUTPUT_RELAY_MODE=live_api_static."
+		} else if errors.Is(err, outputrelay.ErrInvalidRelayBindingID) {
+			message = "AUTOSTREAM_OUTPUT_RELAY_BINDING_ID must match relay-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx using lowercase hexadecimal UUID characters."
+		} else if errors.Is(err, outputrelay.ErrUnsafeRelayTarget) {
+			message = "AUTOSTREAM_OUTPUT_RELAY_URL must resolve to a loopback RTMP/RTMPS relay target."
+		}
+		return preflightCheck{ID: "output_relay", Status: "invalid", Severity: "critical", Message: message}
+	}
+	if !policy.UsesLocalRelay() {
 		return preflightCheck{ID: "output_relay", Status: "compatibility_mode", Severity: "warning", Message: "Output relay is not configured; FFmpeg will use the direct RTMPS target in compatibility mode."}
 	}
-	target := relayOutputTargetForPreflight(raw, "preflight-stream")
+	target := relayOutputTargetForPreflight(policy.URL, "preflight-stream")
 	if err := ffmpeg.ValidateRelayOutputTarget(target); err != nil {
 		return preflightCheck{ID: "output_relay", Status: "invalid", Severity: "critical", Message: "AUTOSTREAM_OUTPUT_RELAY_URL must resolve to a loopback RTMP/RTMPS relay target."}
 	}
-	return preflightCheck{ID: "output_relay", Status: "ok", Severity: "critical", Message: "Output relay is configured; FFmpeg receives only the local relay target."}
-}
-
-func requireOutputRelay() bool {
-	if envBool("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", false) {
-		return true
+	if policy.Mode == outputrelay.ModeLiveAPIStatic {
+		return preflightCheck{ID: "output_relay", Status: "ok", Severity: "critical", Message: "Static Live API output Relay is configured; FFmpeg receives only the local relay target."}
 	}
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("AUTOSTREAM_ENV")), "production")
+	return preflightCheck{ID: "output_relay", Status: "ok", Severity: "critical", Message: "Legacy stream-key output Relay is configured; FFmpeg receives only the local relay target."}
 }
 
 func relayOutputTargetForPreflight(template, streamID string) string {
@@ -500,12 +507,28 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_youtube_stream_key_not_allowed"})
 			return
 		}
-		if strings.TrimSpace(job.StreamKey) == "" && strings.TrimSpace(job.StreamKeySecretName) != "" {
-			job.StreamKey = "<RUNTIME_STREAM_KEY>"
-		}
-		if missing := applyYouTubeRuntimeConfigFallback(&job); len(missing) > 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"code": "youtube_runtime_config_required", "missing": missing})
+		relayPolicy := outputrelay.FromEnv()
+		usesLocalRelay, err := relayPolicy.AuthorizeYouTubeOutput(job.YouTubeOutputMode, job.YouTubeOutputReady, job.OutputRelayBindingID)
+		if err != nil {
+			writeOutputRelayPolicyError(w, err, "dry_run_failed")
 			return
+		}
+		outputTarget := ""
+		if usesLocalRelay {
+			outputTarget = relayOutputTargetForPreflight(relayPolicy.URL, job.StreamID)
+			if err := ffmpeg.ValidateRelayOutputTarget(outputTarget); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"code": "dry_run_failed"})
+				return
+			}
+			clearUnusedYouTubeOutputTarget(&job)
+		} else {
+			if strings.TrimSpace(job.StreamKey) == "" && strings.TrimSpace(job.StreamKeySecretName) != "" {
+				job.StreamKey = "<RUNTIME_STREAM_KEY>"
+			}
+			if missing := applyYouTubeRuntimeConfigFallback(&job); len(missing) > 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"code": "youtube_runtime_config_required", "missing": missing})
+				return
+			}
 		}
 		archiveRoot := os.Getenv("AUTOSTREAM_ARCHIVE_DIR")
 		if archiveRoot == "" {
@@ -521,7 +544,7 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 			Runner:      &ffmpeg.DryRunRunner{},
 			Uploader:    archive.DryRunUploader{},
 		}
-		result, err := manager.DryRun(r.Context(), job)
+		result, err := manager.DryRunToOutputTarget(r.Context(), job, outputTarget)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "dry_run_failed"})
 			return
@@ -556,13 +579,22 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_youtube_stream_key_not_allowed"})
 			return
 		}
-		if err := resolveYouTubeRuntimeSecrets(r.Context(), &job, resolver); err != nil {
-			writeRuntimeSecretResolveError(w, err)
+		usesLocalRelay, err := processManager.AuthorizeOutputRelay(job)
+		if err != nil {
+			writeOutputRelayPolicyError(w, err, "start_stream_failed")
 			return
 		}
-		if missing := applyYouTubeRuntimeConfigFallback(&job); len(missing) > 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"code": "youtube_runtime_config_required", "missing": missing})
-			return
+		if usesLocalRelay {
+			clearUnusedYouTubeOutputTarget(&job)
+		} else {
+			if err := resolveYouTubeRuntimeSecrets(r.Context(), &job, resolver); err != nil {
+				writeRuntimeSecretResolveError(w, err)
+				return
+			}
+			if missing := applyYouTubeRuntimeConfigFallback(&job); len(missing) > 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"code": "youtube_runtime_config_required", "missing": missing})
+				return
+			}
 		}
 		if err := resolveArchiveRuntimeSecrets(r.Context(), &job, resolver); err != nil {
 			writeRuntimeSecretResolveError(w, err)
@@ -605,16 +637,40 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 	}
 }
 
+func writeOutputRelayPolicyError(w http.ResponseWriter, err error, fallbackCode string) {
+	switch {
+	case errors.Is(err, outputrelay.ErrLiveAPIRelayStaticNotReady):
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "live_api_relay_static_not_ready"})
+	case errors.Is(err, outputrelay.ErrLiveAPIRelayBindingMismatch):
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "live_api_relay_binding_mismatch"})
+	case errors.Is(err, outputrelay.ErrLiveAPIRequiresManagedOutputRelay):
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "live_api_requires_managed_output_relay"})
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"code": fallbackCode})
+	}
+}
+
+func clearUnusedYouTubeOutputTarget(job *lifecycle.StreamJob) {
+	if job == nil {
+		return
+	}
+	job.RTMPURL = ""
+	job.StreamKey = ""
+	job.StreamKeySecretName = ""
+}
+
 func applyYouTubeRuntimeConfig(ctx context.Context, job *lifecycle.StreamJob, provider RuntimeConfigProvider) error {
 	if job == nil || provider == nil || strings.TrimSpace(job.StreamID) == "" {
-		return nil
-	}
-	if strings.TrimSpace(job.RTMPURL) != "" && (strings.TrimSpace(job.StreamKey) != "" || strings.TrimSpace(job.StreamKeySecretName) != "") {
 		return nil
 	}
 	cfg, err := provider(ctx)
 	if err != nil {
 		return err
+	}
+	if policy, ok := cfg.YouTubeOutputPolicyForStream(job.StreamID); ok {
+		job.YouTubeOutputMode = policy.Mode
+		job.OutputRelayBindingID = policy.RelayBindingID
+		job.YouTubeOutputReady = policy.Ready
 	}
 	youtube, ok := cfg.YouTubeConfigForStream(job.StreamID)
 	if !ok {
@@ -811,6 +867,10 @@ func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Ma
 				return
 			}
 			writeJSON(w, http.StatusNotFound, map[string]string{"code": "stream_not_running"})
+			return
+		}
+		if errors.Is(err, streamproc.ErrStarting) {
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "stream_starting"})
 			return
 		}
 		if err != nil {
