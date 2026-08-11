@@ -2255,8 +2255,8 @@ func TestStartEndpointUsesDiscordAudioBridgeWhenInputURLIsEmpty(t *testing.T) {
 		t.Fatalf("start status = %d body = %s", res.Code, res.Body.String())
 	}
 	joinedArgs := strings.Join(starter.args, " ")
-	if !strings.Contains(joinedArgs, "discord-opus.sdp") || !strings.Contains(joinedArgs, "color=c=black") {
-		t.Fatalf("expected discord audio bridge ffmpeg args, got %#v", starter.args)
+	if !strings.Contains(joinedArgs, "discord-opus.sdp") || !strings.Contains(joinedArgs, "showwaves") || !strings.Contains(joinedArgs, "color=c=0x0b1020") {
+		t.Fatalf("expected discord audio visualizer ffmpeg args, got %#v", starter.args)
 	}
 	if _, err := os.Stat(filepath.Join(root, "tmp", "stream-01", "discord-opus.sdp")); err != nil {
 		t.Fatal(err)

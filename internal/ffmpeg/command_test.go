@@ -66,7 +66,7 @@ func TestBuildDiscordAudioLiveArchiveArgsToOutputTargetKeepsStreamKeyOutOfArgs(t
 func TestBuildDiscordAudioLiveArchiveArgsWithProgress(t *testing.T) {
 	args := BuildDiscordAudioLiveArchiveArgsWithTelemetry("/tmp/discord-opus.sdp", "rtmps://youtube.example.com/live2", "secret", "/tmp/final.mkv", "/tmp/progress.txt", "/tmp/audio-stats.txt", DefaultProfile())
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"lavfi", "color=c=black:s=1920x1080:r=60", "protocol_whitelist", "discord-opus.sdp", "1:a:0", "yuv420p", "astats=metadata=1"} {
+	for _, want := range []string{"lavfi", "color=c=0x0b1020:s=1920x1080:r=60", "showwaves", "protocol_whitelist", "discord-opus.sdp", "[v]", "1:a:0", "yuv420p", "astats=metadata=1"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in args: %#v", want, args)
 		}
