@@ -305,7 +305,11 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	if profile.Width == 0 {
 		profile = ffmpeg.DefaultProfile()
 	}
-	args := lifecycle.BuildLiveArgsToOutputTargetWithPreview(job, outputTarget, layout.FinalMKV(), layout.PreviewPlaylist(), layout.TmpFFmpegProgress(), layout.TmpFFmpegAudioStats(), profile)
+	watermarkPath, err := materializeWatermarkAsset(layout.TmpDir(), job.OverlayConfig)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	args := lifecycle.BuildLiveArgsToOutputTargetWithPreviewAndOverlay(job, outputTarget, layout.FinalMKV(), layout.PreviewPlaylist(), layout.TmpFFmpegProgress(), layout.TmpFFmpegAudioStats(), watermarkPath, profile)
 	starter := m.Starter
 	if starter == nil {
 		starter = ExecStarter{}

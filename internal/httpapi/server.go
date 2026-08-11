@@ -503,6 +503,10 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
 			return
 		}
+		if err := applyOverlayRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
+			return
+		}
 		if rawYouTubeStreamKeyInputDisallowed(job) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_youtube_stream_key_not_allowed"})
 			return
@@ -572,6 +576,10 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			return
 		}
 		if err := applyArchiveRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
+			return
+		}
+		if err := applyOverlayRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
 			return
 		}
@@ -699,6 +707,30 @@ func applyArchiveRuntimeConfig(ctx context.Context, job *lifecycle.StreamJob, pr
 	}
 	mergeRuntimeArchiveConfig(&job.ArchiveConfig, archiveRuntime)
 	return nil
+}
+
+func applyOverlayRuntimeConfig(ctx context.Context, job *lifecycle.StreamJob, provider RuntimeConfigProvider) error {
+	if job == nil || provider == nil || strings.TrimSpace(job.OverlayProfileID) == "" {
+		return nil
+	}
+	cfg, err := provider(ctx)
+	if err != nil {
+		return err
+	}
+	profileID := strings.TrimSpace(job.OverlayProfileID)
+	for _, profile := range cfg.Profiles["overlay"] {
+		if strings.TrimSpace(profile.ID) != profileID {
+			continue
+		}
+		job.OverlayConfig = make(map[string]any, 6)
+		for _, key := range []string{"watermark_enabled", "watermark_image_data_url", "watermark_canvas_width", "watermark_canvas_height", "watermark_fit_mode", "watermark_file_name", "watermark_image_name"} {
+			if value, ok := profile.Config[key]; ok {
+				job.OverlayConfig[key] = value
+			}
+		}
+		return nil
+	}
+	return errors.New("overlay runtime profile not found")
 }
 
 func mergeRuntimeArchiveConfig(dst *lifecycle.ArchiveConfig, src control.RuntimeArchiveStreamConfig) {

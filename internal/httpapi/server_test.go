@@ -1627,6 +1627,28 @@ func TestStartEndpointAppliesControlPanelYouTubeRuntimeConfigWithoutStaticRelay(
 	}
 }
 
+func TestApplyOverlayRuntimeConfigSelectsImageProfileWithoutExposingSecrets(t *testing.T) {
+	job := lifecycle.StreamJob{StreamID: "stream-01", OverlayProfileID: "overlay-01"}
+	provider := func(ctx context.Context) (control.RuntimeConfig, error) {
+		return control.RuntimeConfig{Profiles: map[string][]control.RuntimeProfile{
+			"overlay": {{ID: "overlay-01", Kind: "overlay", Config: map[string]any{
+				"watermark_enabled":        true,
+				"watermark_image_data_url": "data:image/png;base64,iVBORw0KGgo=",
+				"api_key_secret_name":      "must-not-be-used",
+			}}},
+		}}, nil
+	}
+	if err := applyOverlayRuntimeConfig(context.Background(), &job, provider); err != nil {
+		t.Fatal(err)
+	}
+	if job.OverlayConfig["watermark_image_data_url"] == nil || job.OverlayConfig["watermark_enabled"] != true {
+		t.Fatalf("overlay runtime profile was not applied: %#v", job.OverlayConfig)
+	}
+	if _, ok := job.OverlayConfig["api_key_secret_name"]; ok {
+		t.Fatalf("secret-like overlay config was copied into the job: %#v", job.OverlayConfig)
+	}
+}
+
 func TestStartEndpointRejectsTrustedLiveAPIWithStaticRelayBeforeSecretResolution(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()

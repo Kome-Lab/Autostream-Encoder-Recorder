@@ -27,19 +27,21 @@ type Manager struct {
 }
 
 type StreamJob struct {
-	StreamID             string        `json:"stream_id"`
-	Name                 string        `json:"name"`
-	InputURL             string        `json:"input_url"`
-	InputMode            string        `json:"input_mode,omitempty"`
-	RTMPURL              string        `json:"rtmp_url"`
-	StreamKey            string        `json:"stream_key,omitempty"`
-	StreamKeySecretName  string        `json:"stream_key_secret_name,omitempty"`
-	YouTubeOutputMode    string        `json:"-"`
-	OutputRelayBindingID string        `json:"-"`
-	YouTubeOutputReady   bool          `json:"-"`
-	StartedAt            time.Time     `json:"started_at"`
-	DryRun               bool          `json:"dry_run"`
-	ArchiveConfig        ArchiveConfig `json:"archive_config,omitempty"`
+	StreamID             string         `json:"stream_id"`
+	Name                 string         `json:"name"`
+	InputURL             string         `json:"input_url"`
+	InputMode            string         `json:"input_mode,omitempty"`
+	RTMPURL              string         `json:"rtmp_url"`
+	StreamKey            string         `json:"stream_key,omitempty"`
+	StreamKeySecretName  string         `json:"stream_key_secret_name,omitempty"`
+	YouTubeOutputMode    string         `json:"-"`
+	OutputRelayBindingID string         `json:"-"`
+	YouTubeOutputReady   bool           `json:"-"`
+	OverlayProfileID     string         `json:"overlay_profile_id,omitempty"`
+	OverlayConfig        map[string]any `json:"-"`
+	StartedAt            time.Time      `json:"started_at"`
+	DryRun               bool           `json:"dry_run"`
+	ArchiveConfig        ArchiveConfig  `json:"archive_config,omitempty"`
 }
 
 type PackageJob struct {
@@ -472,10 +474,14 @@ func BuildLiveArgsToOutputTarget(job StreamJob, outputTarget, archivePath, progr
 }
 
 func BuildLiveArgsToOutputTargetWithPreview(job StreamJob, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath string, profile ffmpeg.EncoderProfile) []string {
+	return BuildLiveArgsToOutputTargetWithPreviewAndOverlay(job, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, "", profile)
+}
+
+func BuildLiveArgsToOutputTargetWithPreviewAndOverlay(job StreamJob, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath string, profile ffmpeg.EncoderProfile) []string {
 	if job.InputMode == "discord_opus_rtp" {
-		return ffmpeg.BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, profile)
+		return ffmpeg.BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath, profile)
 	}
-	return ffmpeg.BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, profile)
+	return ffmpeg.BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath, profile)
 }
 
 func uploadArchiveFiles(ctx context.Context, uploader archive.ArchiveUploader, streamName, streamID string, startedAtJST time.Time, files []archive.File, metadataPath string, metadata *Metadata) (archive.UploadResult, error) {

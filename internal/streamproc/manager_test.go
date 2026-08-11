@@ -142,6 +142,38 @@ func TestManagerStartWritesMetadataAndMasksStreamKey(t *testing.T) {
 	}
 }
 
+func TestManagerStartMaterializesWatermarkAndAddsOverlayFilter(t *testing.T) {
+	root := t.TempDir()
+	starter := &fakeStarter{}
+	manager := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeLiveAPIStatic, OutputRelayBindingID: staticRelayBindingID}
+	_, err := manager.Start(lifecycle.StreamJob{
+		StreamID: "stream-watermark", Name: "Watermarked Stream", InputURL: "rtsp://input.example.com/live", YouTubeOutputMode: "live_api_relay_static", OutputRelayBindingID: staticRelayBindingID, YouTubeOutputReady: true,
+		OverlayProfileID: "overlay-01", OverlayConfig: map[string]any{"watermark_enabled": true, "watermark_image_data_url": "data:image/png;base64,iVBORw0KGgo="},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(starter.args, " ")
+	if !strings.Contains(joined, "-filter_complex") || !strings.Contains(joined, "overlay=W-w-32:32") {
+		t.Fatalf("watermark filter missing from FFmpeg args: %#v", starter.args)
+	}
+	if strings.Contains(joined, "data:image/") {
+		t.Fatalf("raw watermark data URL leaked into FFmpeg args: %#v", starter.args)
+	}
+	layout, err := archive.NewLayout(root, "stream-watermark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(layout.TmpDir(), ".watermark-*.png"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("watermark asset was not materialized: files=%v err=%v", files, err)
+	}
+	info, err := os.Stat(files[0])
+	if err != nil || info.Size() == 0 {
+		t.Fatalf("watermark asset is empty: info=%v err=%v", info, err)
+	}
+}
+
 func TestManagerLegacyStreamKeyRelayStartsWithoutRetainingUpstreamTarget(t *testing.T) {
 	root := t.TempDir()
 	starter := &fakeStarter{}

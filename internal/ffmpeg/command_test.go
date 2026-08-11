@@ -52,6 +52,29 @@ func TestBuildLiveArchiveArgsToOutputTargetKeepsStreamKeyOutOfArgs(t *testing.T)
 	}
 }
 
+func TestBuildLiveArchiveArgsWithWatermarkCompositesImageBeforeTee(t *testing.T) {
+	watermark := `C:\archives\tmp\.watermark-01.png`
+	args := BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(
+		"srt://input.example.com:9000",
+		"rtmp://127.0.0.1/autostream/stream-01",
+		`C:\archives\final.mkv`,
+		`C:\archives\preview\index.m3u8`,
+		"",
+		"",
+		watermark,
+		DefaultProfile(),
+	)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"-loop 1", watermark, "-filter_complex", "overlay=W-w-32:32", "[v]"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("watermark composition missing %q: %#v", want, args)
+		}
+	}
+	if strings.Contains(joined, "data:image/") {
+		t.Fatalf("raw watermark data URL leaked into FFmpeg args: %#v", args)
+	}
+}
+
 func TestBuildDiscordAudioLiveArchiveArgsToOutputTargetKeepsStreamKeyOutOfArgs(t *testing.T) {
 	args := BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetry("/tmp/discord-opus.sdp", "rtmp://127.0.0.1/autostream/stream-01", "/tmp/final.mkv", "/tmp/progress.txt", "/tmp/audio-stats.txt", DefaultProfile())
 	joined := strings.Join(args, " ")
@@ -142,6 +165,25 @@ func TestBuildDiscordAudioLiveArchiveArgsWithPreviewAddsHLS(t *testing.T) {
 		t.Fatalf("discord audio output is missing isolated HLS preview: %s", teeOutput)
 	}
 	assertBrowserCompatiblePreviewVideoArgs(t, args)
+}
+
+func TestBuildDiscordAudioLiveArchiveArgsWithWatermarkAddsThirdInput(t *testing.T) {
+	args := BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(
+		`C:\tmp\discord-opus.sdp`,
+		"rtmp://127.0.0.1/autostream/stream-01",
+		`C:\archives\final.mkv`,
+		"",
+		"",
+		"",
+		`C:\archives\tmp\.watermark-01.webp`,
+		DefaultProfile(),
+	)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"-loop 1", ".watermark-01.webp", "[2:v]", "overlay=W-w-32:32", "[v]"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("Discord watermark composition missing %q: %#v", want, args)
+		}
+	}
 }
 
 func assertBrowserCompatiblePreviewVideoArgs(t *testing.T, args []string) {

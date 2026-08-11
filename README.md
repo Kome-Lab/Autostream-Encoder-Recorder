@@ -116,10 +116,11 @@ with lowercase hexadecimal UUID characters. The binding ID is an identity fence
 only; never put the Relay RTMPS URL,
 YouTube stream key, or watch URL in it. A Relay URL with `direct`, an unknown
 mode, or a URL-free non-direct mode is an invalid configuration. Production
-Compose defaults to `legacy_stream_key` for upgrade compatibility. To select
+Production Compose defaults to `direct`, so a fixed Relay is not required for
+normal YouTube Live API output. Existing native/systemd hosts that already set
+only a Relay URL remain `legacy_stream_key` compatible. To select
 `live_api_static`, set both the mode and binding in `.env`; Encoder/Recorder
-preflight rejects the configuration until the binding is supplied. A URL-only
-native/systemd configuration remains legacy compatible.
+preflight rejects the configuration until the binding is supplied.
 
 本番では FFmpeg argv に YouTube stream key と upstream RTMPS URL を出しません。host配置ではFFmpegをloopback relayへ、Docker配置では通常のCompose network上の`output-relay:1935`へ出力します。
 

@@ -37,16 +37,30 @@ func BuildLiveArchiveArgsToOutputTargetWithTelemetry(inputURL, outputTarget, arc
 }
 
 func BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(inputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath string, p EncoderProfile) []string {
+	return BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(inputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, "", p)
+}
+
+func BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(inputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath string, p EncoderProfile) []string {
 	output := filepath.Clean(archivePath)
 	input := ResolveInputTarget(inputURL)
 	args := []string{
 		"-hide_banner", "-y", "-i", input,
-		"-map", "0:v:0?", "-map", "0:a:0?",
+	}
+	if strings.TrimSpace(watermarkPath) != "" {
+		args = append(args,
+			"-loop", "1", "-i", filepath.Clean(watermarkPath),
+			"-filter_complex", watermarkFilter(p),
+			"-map", "[v]", "-map", "0:a:0?",
+		)
+	} else {
+		args = append(args, "-map", "0:v:0?", "-map", "0:a:0?")
+	}
+	args = append(args,
 		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
-		"-r", itoa(p.FPS), "-g", itoa(p.FPS * p.KeyframeSec), "-keyint_min", itoa(p.FPS * p.KeyframeSec), "-sc_threshold", "0",
+		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
 		"-x264-params", "repeat-headers=1:open-gop=0",
 		"-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate),
-	}
+	)
 	if progressPath != "" {
 		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
 	}
@@ -69,23 +83,34 @@ func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetry(audioSDPPath, o
 }
 
 func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath string, p EncoderProfile) []string {
+	return BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, "", p)
+}
+
+func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath string, p EncoderProfile) []string {
 	output := filepath.Clean(archivePath)
 	input := ResolveInputTarget(audioSDPPath)
 	// Discord-only jobs have no camera/video track. Render an audio-reactive
 	// waveform over a dark slate background so the preview is visibly alive
 	// instead of presenting a misleading black frame.
+	filter := discordAudioFilter(p)
 	args := []string{
 		"-hide_banner", "-y",
 		"-f", "lavfi", "-re", "-i", "color=c=0x0b1020:s=" + itoa(p.Width) + "x" + itoa(p.Height) + ":r=" + itoa(p.FPS),
 		"-protocol_whitelist", "file,udp,rtp",
 		"-i", filepath.Clean(input),
-		"-filter_complex", "[0:v]format=rgba[bg];[1:a]showwaves=s=" + itoa(p.Width) + "x" + itoa(p.Height/2) + ":mode=line:rate=30:colors=0x38bdf8,format=rgba[wave];[bg][wave]overlay=0:" + itoa(p.Height/4) + ":shortest=1,format=yuv420p[v]",
+	}
+	if strings.TrimSpace(watermarkPath) != "" {
+		args = append(args, "-loop", "1", "-i", filepath.Clean(watermarkPath))
+		filter = discordAudioWatermarkFilter(p)
+	}
+	args = append(args,
+		"-filter_complex", filter,
 		"-map", "[v]", "-map", "1:a:0",
 		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
-		"-r", itoa(p.FPS), "-g", itoa(p.FPS * p.KeyframeSec), "-keyint_min", itoa(p.FPS * p.KeyframeSec), "-sc_threshold", "0",
+		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
 		"-x264-params", "repeat-headers=1:open-gop=0",
 		"-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate),
-	}
+	)
 	if progressPath != "" {
 		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
 	}
@@ -93,6 +118,26 @@ func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(audio
 		args = append(args, "-filter:a", audioStatsFilter(audioStatsPath))
 	}
 	return append(args, "-f", "tee", buildLiveTeeOutput(outputTarget, output, previewPlaylistPath))
+}
+
+func watermarkFilter(p EncoderProfile) string {
+	return "[0:v]format=rgba[base];[1:v]format=rgba,scale=" + itoa(watermarkWidth(p)) + ":-1[wm];[base][wm]overlay=W-w-32:32:format=auto,format=yuv420p[v]"
+}
+
+func discordAudioFilter(p EncoderProfile) string {
+	return "[0:v]format=rgba[bg];[1:a]showwaves=s=" + itoa(p.Width) + "x" + itoa(p.Height/2) + ":mode=line:rate=30:colors=0x38bdf8,format=rgba[wave];[bg][wave]overlay=0:" + itoa(p.Height/4) + ":shortest=1,format=yuv420p[v]"
+}
+
+func discordAudioWatermarkFilter(p EncoderProfile) string {
+	return "[0:v]format=rgba[bg];[1:a]showwaves=s=" + itoa(p.Width) + "x" + itoa(p.Height/2) + ":mode=line:rate=30:colors=0x38bdf8,format=rgba[wave];[bg][wave]overlay=0:" + itoa(p.Height/4) + ":shortest=1,format=rgba[base];[2:v]format=rgba,scale=" + itoa(watermarkWidth(p)) + ":-1[wm];[base][wm]overlay=W-w-32:32:format=auto,format=yuv420p[v]"
+}
+
+func watermarkWidth(p EncoderProfile) int {
+	width := p.Width / 4
+	if width < 1 {
+		return 480
+	}
+	return width
 }
 
 func buildLiveTeeOutput(outputTarget, archivePath, previewPlaylistPath string) string {
