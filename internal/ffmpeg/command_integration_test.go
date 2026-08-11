@@ -28,7 +28,7 @@ func TestLiveTeePreviewWithFFmpeg(t *testing.T) {
 	createFFmpegFixture(t, ffmpegBin, input)
 	profile := EncoderProfile{Width: 160, Height: 90, FPS: 10, VideoBitrate: "300k", AudioBitrate: "64k", SampleRate: 48000, KeyframeSec: 2}
 
-	t.Run("writes playable bounded HLS and ENDLIST", func(t *testing.T) {
+	t.Run("writes playable start-to-now HLS and ENDLIST", func(t *testing.T) {
 		previewDir := filepath.Join(root, "preview output [one] O'Brien")
 		if err := os.MkdirAll(previewDir, 0o750); err != nil {
 			t.Fatal(err)
@@ -52,8 +52,8 @@ func TestLiveTeePreviewWithFFmpeg(t *testing.T) {
 		}
 		segmentPattern := regexp.MustCompile(`(?m)^segment-[0-9]{6}\.ts$`)
 		segments := segmentPattern.FindAllString(text, -1)
-		if len(segments) != 6 {
-			t.Fatalf("expected a six-segment rolling playlist, got %d:\n%s", len(segments), text)
+		if len(segments) < 7 || !strings.Contains(text, "#EXT-X-MEDIA-SEQUENCE:0") {
+			t.Fatalf("expected the complete start-to-now playlist, got %d segments:\n%s", len(segments), text)
 		}
 		for _, name := range segments {
 			info, err := os.Stat(filepath.Join(previewDir, name))

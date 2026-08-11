@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -57,8 +58,9 @@ func BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(input
 	}
 	args = append(args,
 		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
+		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
 		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
-		"-x264-params", "repeat-headers=1:open-gop=0",
+		"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr",
 		"-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate),
 	)
 	if progressPath != "" {
@@ -107,8 +109,9 @@ func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWat
 		"-filter_complex", filter,
 		"-map", "[v]", "-map", "1:a:0",
 		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
+		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
 		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
-		"-x264-params", "repeat-headers=1:open-gop=0",
+		"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr",
 		"-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate),
 	)
 	if progressPath != "" {
@@ -121,7 +124,7 @@ func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWat
 }
 
 func watermarkFilter(p EncoderProfile) string {
-	return "[0:v]format=rgba[base];[1:v]format=rgba,scale=" + itoa(watermarkWidth(p)) + ":-1[wm];[base][wm]overlay=W-w-32:32:format=auto,format=yuv420p[v]"
+	return "[0:v]format=rgba[base];[1:v]format=rgba,scale=" + itoa(watermarkWidth(p)) + ":-1[wm];[base][wm]overlay=W-w-32:H-h-32:format=auto,format=yuv420p[v]"
 }
 
 func discordAudioFilter(p EncoderProfile) string {
@@ -129,7 +132,7 @@ func discordAudioFilter(p EncoderProfile) string {
 }
 
 func discordAudioWatermarkFilter(p EncoderProfile) string {
-	return "[0:v]format=rgba[bg];[1:a]showwaves=s=" + itoa(p.Width) + "x" + itoa(p.Height/2) + ":mode=line:rate=30:colors=0x38bdf8,format=rgba[wave];[bg][wave]overlay=0:" + itoa(p.Height/4) + ":shortest=1,format=rgba[base];[2:v]format=rgba,scale=" + itoa(watermarkWidth(p)) + ":-1[wm];[base][wm]overlay=W-w-32:32:format=auto,format=yuv420p[v]"
+	return "[0:v]format=rgba[bg];[1:a]showwaves=s=" + itoa(p.Width) + "x" + itoa(p.Height/2) + ":mode=line:rate=30:colors=0x38bdf8,format=rgba[wave];[bg][wave]overlay=0:" + itoa(p.Height/4) + ":shortest=1,format=rgba[base];[2:v]format=rgba,scale=" + itoa(watermarkWidth(p)) + ":-1[wm];[base][wm]overlay=W-w-32:H-h-32:format=auto,format=yuv420p[v]"
 }
 
 func watermarkWidth(p EncoderProfile) int {
@@ -156,13 +159,37 @@ func buildLiveTeeOutput(outputTarget, archivePath, previewPlaylistPath string) s
 		"use_fifo=1",
 		"fifo_options=" + escapeTeeOptionValue("queue_size=1200:drop_pkts_on_overflow=1"),
 		"hls_time=2",
-		"hls_list_size=6",
-		"hls_delete_threshold=1",
-		"hls_flags=delete_segments+independent_segments+temp_file",
+		// Keep every segment for the lifetime of the active stream. The
+		// archive tmp directory is removed by the existing stop cleanup, so
+		// the preview can seek back to the beginning without a second muxer.
+		"hls_list_size=0",
+		"hls_flags=independent_segments+temp_file",
 		"hls_segment_filename=" + escapeTeeOptionValue(segmentPattern),
 	}
 	slaves = append(slaves, "["+strings.Join(options, ":")+"]"+escapeTeeSlaveURL(playlist))
 	return strings.Join(slaves, "|")
+}
+
+func cbrBufferSize(bitrate string) string {
+	value := strings.TrimSpace(bitrate)
+	if value == "" {
+		return value
+	}
+	suffix := ""
+	number := value
+	if last := value[len(value)-1:]; strings.ContainsAny(last, "kKmMgG") {
+		suffix = last
+		number = value[:len(value)-1]
+	}
+	parsed, err := strconv.ParseFloat(number, 64)
+	if err != nil || parsed <= 0 {
+		return value
+	}
+	doubled := parsed * 2
+	if doubled == float64(int64(doubled)) {
+		return strconv.FormatInt(int64(doubled), 10) + suffix
+	}
+	return strconv.FormatFloat(doubled, 'f', -1, 64) + suffix
 }
 
 func escapeTeeOptionValue(value string) string {

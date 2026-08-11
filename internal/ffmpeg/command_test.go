@@ -65,7 +65,7 @@ func TestBuildLiveArchiveArgsWithWatermarkCompositesImageBeforeTee(t *testing.T)
 		DefaultProfile(),
 	)
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"-loop 1", watermark, "-filter_complex", "overlay=W-w-32:32", "[v]"} {
+	for _, want := range []string{"-loop 1", watermark, "-filter_complex", "overlay=W-w-32:H-h-32", "[v]"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("watermark composition missing %q: %#v", want, args)
 		}
@@ -110,7 +110,7 @@ func TestBuildDiscordAudioLiveArchiveArgsResolvesInternalInputTarget(t *testing.
 	}
 }
 
-func TestBuildLiveArchiveArgsWithPreviewAddsBoundedIsolatedHLS(t *testing.T) {
+func TestBuildLiveArchiveArgsWithPreviewKeepsStartToNowDVR(t *testing.T) {
 	preview := `C:\Auto Stream\preview\index.m3u8`
 	args := BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(
 		"srt://input.example.com:9000",
@@ -132,9 +132,8 @@ func TestBuildLiveArchiveArgsWithPreviewAddsBoundedIsolatedHLS(t *testing.T) {
 		"queue_size=1200",
 		"drop_pkts_on_overflow=1",
 		"hls_time=2",
-		"hls_list_size=6",
-		"hls_delete_threshold=1",
-		"hls_flags=delete_segments+independent_segments+temp_file",
+		"hls_list_size=0",
+		"hls_flags=independent_segments+temp_file",
 		"hls_segment_filename=",
 		"segment-%06d.ts",
 	} {
@@ -149,6 +148,19 @@ func TestBuildLiveArchiveArgsWithPreviewAddsBoundedIsolatedHLS(t *testing.T) {
 		t.Fatalf("preview must allow ENDLIST on graceful shutdown: %s", teeOutput)
 	}
 	assertBrowserCompatiblePreviewVideoArgs(t, args)
+}
+
+func TestBuildLiveArchiveArgsUsesConfiguredVideoBitrateAsCBR(t *testing.T) {
+	args := BuildLiveArchiveArgsToOutputTargetWithTelemetry(
+		"srt://input.example.com:9000",
+		"rtmp://127.0.0.1/autostream/stream-01",
+		"/tmp/final.mkv", "", "", EncoderProfile{Width: 1920, Height: 1080, FPS: 60, VideoBitrate: "6800k", AudioBitrate: "160k", SampleRate: 48000, KeyframeSec: 2},
+	)
+	assertArgValue(t, args, "-b:v", "6800k")
+	assertArgValue(t, args, "-minrate:v", "6800k")
+	assertArgValue(t, args, "-maxrate:v", "6800k")
+	assertArgValue(t, args, "-bufsize:v", "13600k")
+	assertArgValue(t, args, "-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr")
 }
 
 func TestBuildDiscordAudioLiveArchiveArgsWithPreviewAddsHLS(t *testing.T) {
@@ -179,7 +191,7 @@ func TestBuildDiscordAudioLiveArchiveArgsWithWatermarkAddsThirdInput(t *testing.
 		DefaultProfile(),
 	)
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"-loop 1", ".watermark-01.webp", "[2:v]", "overlay=W-w-32:32", "[v]"} {
+	for _, want := range []string{"-loop 1", ".watermark-01.webp", "[2:v]", "overlay=W-w-32:H-h-32", "[v]"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("Discord watermark composition missing %q: %#v", want, args)
 		}
@@ -194,7 +206,7 @@ func assertBrowserCompatiblePreviewVideoArgs(t *testing.T, args []string) {
 		{"-g", "120"},
 		{"-keyint_min", "120"},
 		{"-sc_threshold", "0"},
-		{"-x264-params", "repeat-headers=1:open-gop=0"},
+		{"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr"},
 	} {
 		assertArgValue(t, args, want[0], want[1])
 	}

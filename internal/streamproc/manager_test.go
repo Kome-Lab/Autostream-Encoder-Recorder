@@ -106,7 +106,7 @@ func TestManagerStartWritesMetadataAndMasksStreamKey(t *testing.T) {
 	if !strings.Contains(joinedArgs, "ffmpeg-progress.txt") {
 		t.Fatalf("expected ffmpeg progress file in args: %s", joinedArgs)
 	}
-	for _, want := range []string{"f=hls", "onfail=ignore", "hls_time=2", "hls_list_size=6", "segment-%06d.ts"} {
+	for _, want := range []string{"f=hls", "onfail=ignore", "hls_time=2", "hls_list_size=0", "independent_segments", "segment-%06d.ts"} {
 		if !strings.Contains(joinedArgs, want) {
 			t.Fatalf("expected HLS preview option %q in args: %s", want, joinedArgs)
 		}
@@ -154,7 +154,7 @@ func TestManagerStartMaterializesWatermarkAndAddsOverlayFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(starter.args, " ")
-	if !strings.Contains(joined, "-filter_complex") || !strings.Contains(joined, "overlay=W-w-32:32") {
+	if !strings.Contains(joined, "-filter_complex") || !strings.Contains(joined, "overlay=W-w-32:H-h-32") {
 		t.Fatalf("watermark filter missing from FFmpeg args: %#v", starter.args)
 	}
 	if strings.Contains(joined, "data:image/") {
