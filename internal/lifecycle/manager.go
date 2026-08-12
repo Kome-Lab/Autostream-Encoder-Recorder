@@ -489,7 +489,7 @@ func BuildLiveArgsToOutputTargetWithPreview(job StreamJob, outputTarget, archive
 }
 
 func BuildLiveArgsToOutputTargetWithPreviewAndOverlay(job StreamJob, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath string, profile ffmpeg.EncoderProfile) []string {
-	if job.InputMode == "worker_scene_srt" {
+	if job.InputMode == "worker_scene_frames_srt" {
 		return ffmpeg.BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(job.InputURL, job.AudioInputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath, profile)
 	}
 	if job.InputMode == "discord_opus_rtp" {

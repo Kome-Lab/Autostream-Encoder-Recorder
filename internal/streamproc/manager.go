@@ -379,7 +379,7 @@ func clearUnusedYouTubeOutputTarget(job *lifecycle.StreamJob) {
 }
 
 func (m *Manager) validateInputForLayout(job lifecycle.StreamJob, layout archive.Layout) error {
-	if job.InputMode == "worker_scene_srt" {
+	if job.InputMode == "worker_scene_frames_srt" {
 		if !strings.HasPrefix(strings.TrimSpace(job.InputURL), "internal_worker_video:") {
 			return ffmpeg.ErrUnsafeInputTarget
 		}

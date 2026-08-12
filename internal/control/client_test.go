@@ -181,13 +181,13 @@ func TestServiceCapabilitiesAdvertiseWorkerVideoSRTOnlyWhenRouteIsConfigured(t *
 	t.Setenv("AUTOSTREAM_ENV", "production")
 	t.Setenv("AUTOSTREAM_WORKER_VIDEO_BIND_ADDR", "")
 	t.Setenv("AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST", "")
-	if _, ok := serviceCapabilities()["worker_video_ingest_srt"]; ok {
+	if _, ok := serviceCapabilities()["worker_frame_ingest_mjpeg_srt"]; ok {
 		t.Fatal("unconfigured production service must not advertise Worker video SRT ingest")
 	}
 
 	t.Setenv("AUTOSTREAM_WORKER_VIDEO_BIND_ADDR", "0.0.0.0:10080")
 	t.Setenv("AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST", "encoder.example.com")
-	if got := serviceCapabilities()["worker_video_ingest_srt"]; got != true {
+	if got := serviceCapabilities()["worker_frame_ingest_mjpeg_srt"]; got != true {
 		t.Fatalf("configured Worker video SRT capability = %#v, want true", got)
 	}
 }

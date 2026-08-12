@@ -1,10 +1,13 @@
 package videoingest
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"image/jpeg"
 	"io"
 	"net"
 	"net/url"
@@ -13,13 +16,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	srt "github.com/datarhei/gosrt"
 )
 
 const (
-	inputPrefix = "internal_worker_video:"
-	pbKeylen    = 32
+	inputPrefix            = "internal_worker_video:"
+	pbKeylen               = 32
+	encoderFrameInterval   = time.Second / 60
+	maxSceneFrameDimension = 3840
 )
 
 var (
@@ -187,8 +193,65 @@ func (m *Manager) run(record *bridgeRecord) {
 		return
 	}
 
-	_, _ = io.Copy(localConn, srtConn)
-	m.finish(record)
+	frames := make(chan []byte, 1)
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		readSceneFrames(srtConn, frames)
+	}()
+	ticker := time.NewTicker(encoderFrameInterval)
+	defer ticker.Stop()
+	var latest []byte
+	for {
+		select {
+		case frame := <-frames:
+			latest = frame
+		case <-ticker.C:
+			if len(latest) > 0 {
+				if _, err := localConn.Write(latest); err != nil {
+					m.finish(record)
+					return
+				}
+			}
+		case <-readDone:
+			m.finish(record)
+			return
+		}
+	}
+}
+
+// readSceneFrames converts the authenticated Worker byte stream into bounded,
+// validated JPEG images. Only the latest complete frame is retained; scene
+// updates cannot build an unbounded queue behind the final Encoder.
+func readSceneFrames(reader io.Reader, output chan []byte) {
+	buffered := bufio.NewReaderSize(reader, 256<<10)
+	for {
+		frame, err := jpeg.Decode(buffered)
+		if err != nil {
+			return
+		}
+		bounds := frame.Bounds()
+		if bounds.Dx() <= 0 || bounds.Dy() <= 0 || bounds.Dx() > maxSceneFrameDimension || bounds.Dy() > maxSceneFrameDimension {
+			return
+		}
+		var encoded bytes.Buffer
+		if err := jpeg.Encode(&encoded, frame, &jpeg.Options{Quality: 90}); err != nil {
+			return
+		}
+		data := append([]byte(nil), encoded.Bytes()...)
+		select {
+		case output <- data:
+		default:
+			select {
+			case <-output:
+			default:
+			}
+			select {
+			case output <- data:
+			default:
+			}
+		}
+	}
 }
 
 func acceptPublisher(record *bridgeRecord) srt.Conn {
@@ -314,7 +377,7 @@ func derivePassphrase(jobCredential string) (string, error) {
 }
 
 // ResolveInputTarget removes the internal marker before passing the
-// loopback-only MPEG-TS endpoint to FFmpeg.
+// loopback-only paced MJPEG endpoint to FFmpeg.
 func ResolveInputTarget(input string) (string, bool) {
 	input = strings.TrimSpace(input)
 	if !strings.HasPrefix(input, inputPrefix) {

@@ -129,7 +129,7 @@ func TestBuildWorkerVideoDiscordAudioArgsKeepsCredentialOutOfFFmpegAndAppliesWat
 		}
 	}
 	for _, required := range []string{
-		"-f mpegts -i tcp://127.0.0.1:41001",
+		"-f image2pipe -framerate 60 -c:v mjpeg -i tcp://127.0.0.1:41001",
 		"-protocol_whitelist file,udp,rtp -i " + filepath.Clean("C:/tmp/discord-opus.sdp"),
 		"[0:v]scale=1920:1080",
 		"[2:v]format=rgba,scale=1920:1080[wm]",

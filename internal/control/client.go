@@ -525,7 +525,7 @@ func serviceCapabilities() map[string]any {
 		"default_fps":        60,
 	}
 	if videoingest.NewManagerFromEnv().Available() {
-		capabilities["worker_video_ingest_srt"] = true
+		capabilities["worker_frame_ingest_mjpeg_srt"] = true
 	}
 	if !relayConfigValid {
 		return capabilities

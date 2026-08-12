@@ -178,6 +178,21 @@ func TestArchiveArtifactEndpointsRequireTokenAndSafeFinalFile(t *testing.T) {
 	if downloadRes.Header().Get("Content-Disposition") != `attachment; filename="final.mp4"` {
 		t.Fatalf("download content disposition = %q", downloadRes.Header().Get("Content-Disposition"))
 	}
+	if got := downloadRes.Header().Get("Content-Type"); got != "video/mp4" {
+		t.Fatalf("archive content type = %q, want video/mp4", got)
+	}
+
+	rangeReq := httptest.NewRequest(http.MethodGet, "/streams/stream-01/artifacts/final.mp4", nil)
+	rangeReq.Header.Set("Authorization", "Bearer service-token")
+	rangeReq.Header.Set("Range", "bytes=0-3")
+	rangeRes := httptest.NewRecorder()
+	handler.ServeHTTP(rangeRes, rangeReq)
+	if rangeRes.Code != http.StatusPartialContent || rangeRes.Body.String() != "arch" {
+		t.Fatalf("range status = %d body = %q", rangeRes.Code, rangeRes.Body.String())
+	}
+	if rangeRes.Header().Get("Content-Range") != "bytes 0-3/13" || rangeRes.Header().Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("archive range headers = %#v", rangeRes.Header())
+	}
 
 	unsafeReq := httptest.NewRequest(http.MethodGet, "/streams/stream-01/artifacts/bad..mp4", nil)
 	unsafeReq.Header.Set("Authorization", "Bearer service-token")
@@ -2358,7 +2373,7 @@ func TestStartEndpointOptInWorkerVideoReturnsOneTimeSRTCredentialWithoutLeakingI
 			t.Fatalf("FFmpeg args leaked worker video credential %q: %s", leaked, joinedArgs)
 		}
 	}
-	for _, want := range []string{"-f mpegts", "tcp://127.0.0.1:", "discord-opus.sdp", "-map [v] -map 1:a:0"} {
+	for _, want := range []string{"-f image2pipe", "-c:v mjpeg", "tcp://127.0.0.1:", "discord-opus.sdp", "-map [v] -map 1:a:0"} {
 		if !strings.Contains(joinedArgs, want) {
 			t.Fatalf("FFmpeg args missing %q: %s", want, joinedArgs)
 		}

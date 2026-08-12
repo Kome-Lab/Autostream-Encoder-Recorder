@@ -1,8 +1,12 @@
 package videoingest
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
-	"io"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"net"
 	"net/url"
 	"strings"
@@ -102,7 +106,7 @@ func TestDerivePassphraseIsDomainSeparatedAndDeterministic(t *testing.T) {
 	}
 }
 
-func TestEncryptedSRTBridgeForwardsMPEGTSBytesToCredentialFreeLoopback(t *testing.T) {
+func TestEncryptedSRTBridgePacesWorkerJPEGFramesToCredentialFreeLoopback(t *testing.T) {
 	manager := &Manager{Config: Config{BindAddr: "127.0.0.1:0", AdvertiseHost: "127.0.0.1"}}
 	bridge, err := manager.StartBridge("stream-01", "signed-worker-token")
 	if err != nil {
@@ -138,15 +142,20 @@ func TestEncryptedSRTBridgeForwardsMPEGTSBytesToCredentialFreeLoopback(t *testin
 		t.Fatal(err)
 	}
 
-	payload := []byte{0x47, 0x40, 0x00, 0x10, 0xde, 0xad, 0xbe, 0xef}
-	if _, err := srtConn.Write(payload); err != nil {
+	input := image.NewRGBA(image.Rect(0, 0, 4, 2))
+	input.Set(1, 1, color.RGBA{R: 255, A: 255})
+	var payload bytes.Buffer
+	if err := jpeg.Encode(&payload, input, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srtConn.Write(payload.Bytes()); err != nil {
 		t.Fatalf("write SRT payload: %v", err)
 	}
-	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(loopback, got); err != nil {
-		t.Fatalf("read loopback payload: %v", err)
+	got, err := jpeg.Decode(bufio.NewReader(loopback))
+	if err != nil {
+		t.Fatalf("decode loopback JPEG: %v", err)
 	}
-	if string(got) != string(payload) {
-		t.Fatalf("forwarded payload = %x, want %x", got, payload)
+	if got.Bounds().Dx() != 4 || got.Bounds().Dy() != 2 {
+		t.Fatalf("forwarded frame bounds = %v", got.Bounds())
 	}
 }

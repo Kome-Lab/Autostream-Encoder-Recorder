@@ -2,6 +2,7 @@ package archive
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -182,6 +183,87 @@ func TestEnsureDriveFolderUsesSharedDriveQueryOptions(t *testing.T) {
 	}
 }
 
+func TestEnsureArchiveFolderUsesSelectedFolderAsRoot(t *testing.T) {
+	created := make([]drive.File, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `{"files":[]}`)
+		case http.MethodPost:
+			var folder drive.File
+			if err := json.NewDecoder(r.Body).Decode(&folder); err != nil {
+				t.Errorf("decode folder request: %v", err)
+			}
+			created = append(created, folder)
+			_, _ = fmt.Fprintf(w, `{"id":"folder-%d"}`, len(created))
+		default:
+			t.Errorf("unexpected method: %s", r.Method)
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	svc, err := drive.NewService(context.Background(), option.WithEndpoint(server.URL+"/"), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploader := GoogleDriveAPIUploader{Config: GoogleDriveConfig{
+		FolderID: "selected-folder", BasePath: "AutoStream/legacy",
+	}}
+	started := time.Date(2026, 8, 12, 22, 9, 10, 0, time.FixedZone("JST", 9*60*60))
+	folderID, err := uploader.ensureArchiveFolder(context.Background(), svc, "Dev", "stream-uuid", started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if folderID != "folder-2" || len(created) != 2 {
+		t.Fatalf("archive hierarchy created unexpected folders: id=%q folders=%#v", folderID, created)
+	}
+	if created[0].Name != "Dev" || len(created[0].Parents) != 1 || created[0].Parents[0] != "selected-folder" {
+		t.Fatalf("stream folder must be directly below selected folder: %#v", created[0])
+	}
+	if created[1].Name != "20260812_220910_JST_stream-uuid" || len(created[1].Parents) != 1 || created[1].Parents[0] != "folder-1" {
+		t.Fatalf("run folder must be below stream folder: %#v", created[1])
+	}
+}
+
+func TestUploadFileUpdatesExistingNameInsteadOfCreatingDuplicate(t *testing.T) {
+	methods := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `{"files":[{"id":"existing-file","name":"final.mp4"}]}`)
+		case http.MethodPatch:
+			_, _ = io.WriteString(w, `{"id":"existing-file"}`)
+		default:
+			t.Errorf("unexpected method: %s", r.Method)
+			http.Error(w, "duplicate create is forbidden", http.StatusConflict)
+		}
+	}))
+	defer server.Close()
+
+	svc, err := drive.NewService(context.Background(), option.WithEndpoint(server.URL+"/"), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(t.TempDir(), "final.mp4")
+	if err := os.WriteFile(filePath, []byte("new-video"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	id, err := uploadFile(context.Background(), svc, "run-folder", File{LocalPath: filePath, DrivePath: "final.mp4"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "existing-file" {
+		t.Fatalf("updated file id = %q, want existing-file", id)
+	}
+	if len(methods) != 2 || !strings.HasPrefix(methods[0], "GET ") || !strings.HasPrefix(methods[1], "PATCH ") {
+		t.Fatalf("upload should list then update without create: %#v", methods)
+	}
+}
+
 func TestUploadFileUsesSharedDriveUploadOption(t *testing.T) {
 	var uploadRequest string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -242,12 +324,17 @@ func TestOAuthDriveUploadRefreshesTokenAndUsesBearer(t *testing.T) {
 
 	var uploadAuthorization string
 	driveServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.URL.Path, "/upload/drive/v3/files") {
-			t.Fatalf("unexpected Drive path: %s", r.URL.String())
-		}
 		uploadAuthorization = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"id":"uploaded-oauth-file"}`)
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/files") {
+			io.WriteString(w, `{"files":[]}`)
+			return
+		}
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/upload/drive/v3/files") {
+			io.WriteString(w, `{"id":"uploaded-oauth-file"}`)
+			return
+		}
+		t.Fatalf("unexpected Drive request: %s %s", r.Method, r.URL.String())
 	}))
 	defer driveServer.Close()
 

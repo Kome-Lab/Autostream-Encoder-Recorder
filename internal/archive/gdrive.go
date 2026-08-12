@@ -77,7 +77,7 @@ func (c GoogleDriveConfig) SafeSummary() map[string]any {
 
 func GoogleDriveConfigFromEnv() GoogleDriveConfig {
 	return GoogleDriveConfig{
-		BasePath:    envDefault("GDRIVE_BASE_PATH", "AutoStream"),
+		BasePath:    "",
 		SharedDrive: envBool("GOOGLE_DRIVE_SHARED_DRIVE", false),
 	}
 }
@@ -94,9 +94,6 @@ func (c GoogleDriveConfig) Validate() error {
 	}
 	if c.FolderID == "" {
 		return errors.New("folder_id is required")
-	}
-	if c.BasePath == "" {
-		return errors.New("base_path is required")
 	}
 	return nil
 }
@@ -154,13 +151,6 @@ func (u GoogleDriveAPIUploader) driveServiceWithOptions(ctx context.Context, oau
 
 func (u GoogleDriveAPIUploader) ensureArchiveFolder(ctx context.Context, svc *drive.Service, streamName, streamID string, startedAtJST time.Time) (string, error) {
 	parentID := u.Config.FolderID
-	for _, segment := range splitBasePath(u.Config.BasePath) {
-		id, err := ensureDriveFolder(ctx, svc, parentID, segment, u.Config.SharedDrive, u.Config.SharedDriveID)
-		if err != nil {
-			return "", err
-		}
-		parentID = id
-	}
 	streamFolder, err := ensureDriveFolder(ctx, svc, parentID, safeDriveName(streamName), u.Config.SharedDrive, u.Config.SharedDriveID)
 	if err != nil {
 		return "", err
@@ -221,6 +211,20 @@ func uploadFile(ctx context.Context, svc *drive.Service, folderID string, file F
 		return "", err
 	}
 	name := path.Base(file.DrivePath)
+	if existingID, err := findDriveFile(ctx, svc, folderID, name, sharedDrive); err != nil {
+		return "", err
+	} else if existingID != "" {
+		updated, err := svc.Files.Update(existingID, &drive.File{Name: name}).
+			SupportsAllDrives(sharedDrive).
+			Media(f, googleapi.ChunkSize(8*1024*1024)).
+			Fields("id").
+			Context(ctx).
+			Do()
+		if err != nil {
+			return "", err
+		}
+		return updated.Id, nil
+	}
 	created, err := svc.Files.Create(&drive.File{Name: name, Parents: []string{folderID}}).
 		SupportsAllDrives(sharedDrive).
 		Media(f, googleapi.ChunkSize(8*1024*1024)).
@@ -231,6 +235,27 @@ func uploadFile(ctx context.Context, svc *drive.Service, folderID string, file F
 		return "", err
 	}
 	return created.Id, nil
+}
+
+func findDriveFile(ctx context.Context, svc *drive.Service, folderID, name string, sharedDrive bool) (string, error) {
+	q := "mimeType != 'application/vnd.google-apps.folder' and trashed = false and name = '" + driveQueryLiteral(name) + "' and '" + driveQueryLiteral(folderID) + "' in parents"
+	call := svc.Files.List().
+		Q(q).
+		Fields("files(id,name)").
+		PageSize(1).
+		SupportsAllDrives(sharedDrive).
+		Context(ctx)
+	if sharedDrive {
+		call = call.IncludeItemsFromAllDrives(true)
+	}
+	list, err := call.Do()
+	if err != nil {
+		return "", err
+	}
+	if len(list.Files) == 0 {
+		return "", nil
+	}
+	return list.Files[0].Id, nil
 }
 
 func verifyOpenArchiveFile(file *os.File, expected os.FileInfo) error {
@@ -255,17 +280,6 @@ func googleDriveDryRun(files []File) UploadResult {
 	return result
 }
 
-func splitBasePath(value string) []string {
-	segments := strings.Split(strings.ReplaceAll(value, "\\", "/"), "/")
-	out := make([]string, 0, len(segments))
-	for _, segment := range segments {
-		if cleaned := safeDriveName(segment); cleaned != "" {
-			out = append(out, cleaned)
-		}
-	}
-	return out
-}
-
 func safeDriveName(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.ReplaceAll(value, "/", "_")
@@ -279,13 +293,6 @@ func safeDriveName(value string) string {
 func driveQueryLiteral(value string) string {
 	value = strings.ReplaceAll(value, `\`, `\\`)
 	return strings.ReplaceAll(value, `'`, `\'`)
-}
-
-func envDefault(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
 }
 
 func envBool(key string, fallback bool) bool {

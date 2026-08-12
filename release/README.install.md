@@ -66,13 +66,19 @@ Legacy public binaries are backed up only under the root-owned
 installer-owned implementation details used by managed update and rollback.
 Do not create or edit their release directories or marker files manually.
 
+Google Drive archive destinations use the selected folder itself as the archive
+root. The resulting hierarchy is `selected folder / stream name /
+YYYYMMDD_HHMMSS_JST_<stream-id> / final.mp4`; legacy `base_path` values are
+ignored. Re-running upload for the same stream execution updates a file with the
+same name in that run folder instead of creating another copy.
+
 Review the non-secret host settings in `/etc/autostream/encoder-recorder.env`.
 
 For Worker-rendered video, normally set
 `AUTOSTREAM_WORKER_VIDEO_BIND_ADDR=0.0.0.0:10080` and set
 `AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST` to the Encoder host name or IP that
 the assigned Worker can reach. Port `0` is also accepted for dynamic allocation
-in development. Production does not advertise the `worker_video_ingest_srt`
+in development. Production does not advertise the `worker_frame_ingest_mjpeg_srt`
 capability until both values are valid. Permit the configured UDP/SRT port
 between the assigned Worker and Encoder; do not place a passphrase in either
 setting. The per-job AES-256 passphrase is

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -687,7 +688,7 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			audioBridgeMode = true
 			job.InputURL = videoBridge.InputURL
 			job.AudioInputURL = audioBridge.InputURL
-			job.InputMode = "worker_scene_srt"
+			job.InputMode = "worker_scene_frames_srt"
 		} else if strings.TrimSpace(job.InputURL) == "" {
 			if audioManager == nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"code": "input_url_required"})
@@ -1181,7 +1182,11 @@ func downloadArchiveArtifact(archiveRoot string, verifier TokenVerifier) http.Ha
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_archive_artifact"})
 			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
+		contentType := mime.TypeByExtension(filepath.Ext(r.PathValue("name")))
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Disposition", `attachment; filename="`+safeContentDispositionName(r.PathValue("name"))+`"`)
 		http.ServeContent(w, r, r.PathValue("name"), info.ModTime(), file)
 	}

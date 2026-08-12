@@ -83,7 +83,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 `AUTOSTREAM_NODE_CONFIG`が未作成の間はNode Agentがpendingとして待機します。Auto Configure後に`config.yml`が不正、service registrationが失敗、またはruntime config fetchが失敗した場合はfail closedします。
 
-Worker映像生成を使うEncoder Nodeでは、通常`AUTOSTREAM_WORKER_VIDEO_BIND_ADDR=0.0.0.0:10080`と、Workerから到達できる実ホスト名またはIPを`AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST`へ設定し、UDP 10080をWorkerからEncoderへ許可します。開発時に動的portが必要な場合だけbind port 0も使用できます。productionでは両方が有効なときだけ`worker_video_ingest_srt` capabilityを広告します。各配信開始時にEncoderが設定済みUDP portでlistenerを確保し、Control Panel経由でWorkerへ秘密なしの`video_ingest.url`と一時passphraseを返します。passphraseはAES-256 SRTをGo受信層で終端するためだけに使い、SRT URL、FFmpeg argv、ログ、録画metadataには残しません。FFmpegはWorkerのvideo-only MPEG-TSと既存のBot Opus/RTP音声をloopbackで合流し、選択されたEncoder profileで最終CBR encodeした後、1920x1080のfull-frame alpha canvasとして保存されたウォーターマークを出力全面へ合成します（ロゴの右下位置はasset内で保持されます）。その同一映像をYouTube・preview HLS・MKVへ単一tee送出します。旧Control Panelが`worker_video_ingest`を送らない場合は従来のDiscord音声波形映像を維持します。
+Worker映像生成を使うEncoder Nodeでは、通常`AUTOSTREAM_WORKER_VIDEO_BIND_ADDR=0.0.0.0:10080`と、Workerから到達できる実ホスト名またはIPを`AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST`へ設定し、UDP 10080をWorkerからEncoderへ許可します。開発時に動的portが必要な場合だけbind port 0も使用できます。productionでは両方が有効なときだけ`worker_frame_ingest_mjpeg_srt` capabilityを広告します。各配信開始時にEncoderが設定済みUDP portでlistenerを確保し、Control Panel経由でWorkerへ秘密なしの`video_ingest.url`と一時passphraseを返します。passphraseはAES-256 SRTをGo受信層で終端するためだけに使い、SRT URL、FFmpeg argv、ログ、録画metadataには残しません。FFmpegはWorkerのJPEG scene framesと既存のBot Opus/RTP音声をloopbackで合流し、選択されたEncoder profileで最終CBR encodeした後、1920x1080のfull-frame alpha canvasとして保存されたウォーターマークを出力全面へ合成します（ロゴの右下位置はasset内で保持されます）。その同一映像をYouTube・preview HLS・MKVへ単一tee送出します。旧Control Panelが`worker_video_ingest`を送らない場合は従来のDiscord音声波形映像を維持します。
 
 Production mode では `/streams/start` と `/streams/dry-run` の request body に raw `stream_key` を含めると `raw_youtube_stream_key_not_allowed` で拒否します。Control Panel からは `stream_key_secret_name` と runtime secret resolve を使い、Encoder/Recorder の env や API response に YouTube stream key を残しません。
 
@@ -155,7 +155,7 @@ YOUTUBE_RTMP_URL=rtmps://a.rtmps.youtube.com/live2
 YOUTUBE_STREAM_KEY=<YOUTUBE_STREAM_KEY>
 ```
 
-Google Drive archive upload には env fallback を使いません。Control Panel の配信枠設定で OAuth account、folder ID、shared drive ID、archive file name を指定します。共有ドライブの folder ID を使う場合は stream archive settings で shared drive を有効化します。Uploader は Drive API に `supportsAllDrives=true` を付けて folder / file 操作を行います。
+Google Drive archive upload には env fallback を使いません。Control Panel の配信枠設定で OAuth account、folder ID、shared drive ID、archive file name を指定します。共有ドライブの folder ID を使う場合は stream archive settings で shared drive を有効化します。Uploader は Drive API に `supportsAllDrives=true` を付けて folder / file 操作を行います。保存階層は `指定folder / 配信枠名 / YYYYMMDD_HHMMSS_JST_<stream_id> / final.mp4` です。legacy `base_path` は無視し、同じ配信実行を再uploadすると同じ実行folder内の同名ファイルを更新します。
 
 Encoder/Recorder は Control Panel へ報告した final artifact を `AUTOSTREAM_ARCHIVE_DIR/final/<stream_id>/` 配下に一定期間保持します。Control Panel は割り当て済みの primary encoder に service token 付きで接続し、録画ファイルの download、rename、delete を行います。対象ファイル名は安全な basename と `.mp4`、`.mkv`、`.json`、`.jsonl`、`.vtt` に限定し、symlink と archive root 外への移動は拒否します。
 

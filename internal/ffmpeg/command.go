@@ -124,9 +124,10 @@ func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWat
 }
 
 // BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark
-// combines a Worker-rendered, video-only MPEG-TS scene with the existing Bot
-// Opus/RTP audio bridge. SRT is terminated by the Go ingest layer, so FFmpeg
-// only receives a credential-free loopback TCP endpoint.
+// combines Worker-rendered JPEG scene frames with the existing Bot Opus/RTP
+// audio bridge. Worker does not encode video: SRT is terminated by the Go
+// ingest layer and this final Encoder expands the image stream to the selected
+// output FPS, applies the watermark, encodes once, and feeds the shared tee.
 func BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(videoInputURL, audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath string, p EncoderProfile) []string {
 	output := filepath.Clean(archivePath)
 	videoInput := ResolveInputTarget(videoInputURL)
@@ -134,7 +135,7 @@ func BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPr
 	filter := workerSceneFilter(p)
 	args := []string{
 		"-hide_banner", "-y",
-		"-thread_queue_size", "512", "-f", "mpegts", "-i", videoInput,
+		"-thread_queue_size", "512", "-f", "image2pipe", "-framerate", "60", "-c:v", "mjpeg", "-i", videoInput,
 		"-thread_queue_size", "512", "-protocol_whitelist", "file,udp,rtp", "-i", filepath.Clean(audioInput),
 	}
 	if strings.TrimSpace(watermarkPath) != "" {
