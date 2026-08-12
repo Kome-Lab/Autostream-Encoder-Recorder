@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/datarhei/gosrt v0.11.0
-	golang.org/x/image v0.34.0
+	golang.org/x/image v0.41.0
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.292.0
 )
