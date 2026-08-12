@@ -40,6 +40,8 @@ type StreamJob struct {
 	YouTubeOutputReady   bool           `json:"-"`
 	OverlayProfileID     string         `json:"overlay_profile_id,omitempty"`
 	OverlayConfig        map[string]any `json:"-"`
+	EncoderAudioGainDB   float64        `json:"encoder_audio_gain_db,omitempty"`
+	WatermarkInputURL    string         `json:"-"`
 	StartedAt            time.Time      `json:"started_at"`
 	DryRun               bool           `json:"dry_run"`
 	ArchiveConfig        ArchiveConfig  `json:"archive_config,omitempty"`
@@ -489,13 +491,17 @@ func BuildLiveArgsToOutputTargetWithPreview(job StreamJob, outputTarget, archive
 }
 
 func BuildLiveArgsToOutputTargetWithPreviewAndOverlay(job StreamJob, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath string, profile ffmpeg.EncoderProfile) []string {
+	watermarkInput := watermarkPath
+	if strings.TrimSpace(job.WatermarkInputURL) != "" {
+		watermarkInput = job.WatermarkInputURL
+	}
 	if job.InputMode == "worker_scene_frames_srt" {
-		return ffmpeg.BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(job.InputURL, job.AudioInputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath, profile)
+		return ffmpeg.BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(job.InputURL, job.AudioInputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput, job.EncoderAudioGainDB, profile)
 	}
 	if job.InputMode == "discord_opus_rtp" {
-		return ffmpeg.BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath, profile)
+		return ffmpeg.BuildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput, job.EncoderAudioGainDB, profile)
 	}
-	return ffmpeg.BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath, profile)
+	return ffmpeg.BuildLiveArchiveArgsToOutputTargetWithRuntimeSettings(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput, job.EncoderAudioGainDB, profile)
 }
 
 func uploadArchiveFiles(ctx context.Context, uploader archive.ArchiveUploader, streamName, streamID string, startedAtJST time.Time, files []archive.File, metadataPath string, metadata *Metadata) (archive.UploadResult, error) {

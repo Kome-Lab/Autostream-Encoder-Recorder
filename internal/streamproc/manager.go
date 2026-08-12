@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/observability"
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/redaction"
+	"github.com/example/autostream-encoder-recorder/internal/watermarkfeed"
 )
 
 var (
@@ -37,8 +39,9 @@ var (
 	// ErrStarting identifies the narrow window after a stream reservation was
 	// accepted but before FFmpeg became a running process. It must not be
 	// normalized as an idle/no-process receipt by upstream callers.
-	ErrStarting   = errors.New("stream process is starting")
-	ErrNotRunning = errors.New("stream process is not running")
+	ErrStarting               = errors.New("stream process is starting")
+	ErrNotRunning             = errors.New("stream process is not running")
+	ErrInvalidRuntimeSettings = errors.New("invalid encoder runtime settings")
 )
 
 type Starter interface {
@@ -66,26 +69,53 @@ func (ExecStarter) Start(ctx context.Context, bin string, args []string) (Runnin
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	return execProcess{cmd: cmd, stdin: stdin}, nil
+	return &execProcess{cmd: cmd, stdin: stdin}, nil
 }
 
 type execProcess struct {
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdinMu sync.Mutex
 }
 
-func (p execProcess) PID() int {
+type runtimeCommander interface {
+	Command(target, command, argument string) error
+}
+
+func (p *execProcess) PID() int {
 	if p.cmd.Process == nil {
 		return 0
 	}
 	return p.cmd.Process.Pid
 }
 
-func (p execProcess) Wait() error {
+func (p *execProcess) Wait() error {
 	return p.cmd.Wait()
 }
 
-func (p execProcess) Terminate() error {
+func (p *execProcess) Command(target, command, argument string) error {
+	if target != "volume@gain" || command != "volume" {
+		return errors.New("unsupported ffmpeg runtime command")
+	}
+	value, err := strconv.ParseFloat(strings.TrimSuffix(argument, "dB"), 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < -60 || value > 24 {
+		return ErrInvalidRuntimeSettings
+	}
+	p.stdinMu.Lock()
+	defer p.stdinMu.Unlock()
+	if p.stdin == nil {
+		return errors.New("ffmpeg runtime command input is unavailable")
+	}
+	// FFmpeg's interactive c command expects: target, time, command, argument.
+	// A time of -1 applies the command immediately to the first matching
+	// named filter instance.
+	_, err = io.WriteString(p.stdin, "c\n"+target+" -1 "+command+" "+argument+"\n")
+	return err
+}
+
+func (p *execProcess) Terminate() error {
+	p.stdinMu.Lock()
+	defer p.stdinMu.Unlock()
 	if p.stdin == nil {
 		return nil
 	}
@@ -97,7 +127,7 @@ func (p execProcess) Terminate() error {
 	return closeErr
 }
 
-func (p execProcess) Kill() error {
+func (p *execProcess) Kill() error {
 	if p.cmd.Process == nil {
 		return nil
 	}
@@ -144,21 +174,25 @@ type ArchivePackager interface {
 }
 
 type trackedProcess struct {
-	snapshot Snapshot
-	process  RunningProcess
-	job      lifecycle.StreamJob
-	done     chan error
+	snapshot  Snapshot
+	process   RunningProcess
+	job       lifecycle.StreamJob
+	done      chan error
+	watermark *watermarkfeed.Source
+	runtimeMu sync.Mutex
 }
 
 type Snapshot struct {
-	StreamID     string            `json:"stream_id"`
-	Name         string            `json:"name"`
-	Status       string            `json:"status"`
-	PID          int               `json:"pid,omitempty"`
-	StartedAtJST string            `json:"started_at_jst"`
-	StoppedAtJST string            `json:"stopped_at_jst,omitempty"`
-	Archive      map[string]string `json:"archive"`
-	Error        string            `json:"error,omitempty"`
+	StreamID           string            `json:"stream_id"`
+	Name               string            `json:"name"`
+	Status             string            `json:"status"`
+	PID                int               `json:"pid,omitempty"`
+	StartedAtJST       string            `json:"started_at_jst"`
+	StoppedAtJST       string            `json:"stopped_at_jst,omitempty"`
+	Archive            map[string]string `json:"archive"`
+	Error              string            `json:"error,omitempty"`
+	EncoderAudioGainDB float64           `json:"encoder_audio_gain_db"`
+	OverlayProfileID   string            `json:"overlay_profile_id,omitempty"`
 }
 
 func NewManagerFromEnv() *Manager {
@@ -306,11 +340,19 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	if profile.Width == 0 {
 		profile = ffmpeg.DefaultProfile()
 	}
-	watermarkPath, err := materializeWatermarkAsset(layout.TmpDir(), job.OverlayConfig)
+	watermarkSource, err := watermarkfeed.New(job.OverlayConfig)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	args := lifecycle.BuildLiveArgsToOutputTargetWithPreviewAndOverlay(job, outputTarget, layout.FinalMKV(), layout.PreviewPlaylist(), layout.TmpFFmpegProgress(), layout.TmpFFmpegAudioStats(), watermarkPath, profile)
+	watermarkActive := true
+	defer func() {
+		if watermarkActive {
+			_ = watermarkSource.Close()
+		}
+	}()
+	job.WatermarkInputURL = watermarkSource.InputURL()
+	job.OverlayConfig = nil
+	args := lifecycle.BuildLiveArgsToOutputTargetWithPreviewAndOverlay(job, outputTarget, layout.FinalMKV(), layout.PreviewPlaylist(), layout.TmpFFmpegProgress(), layout.TmpFFmpegAudioStats(), "", profile)
 	starter := m.Starter
 	if starter == nil {
 		starter = ExecStarter{}
@@ -321,22 +363,26 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	snapshot := Snapshot{
-		StreamID:     job.StreamID,
-		Name:         job.Name,
-		Status:       "running",
-		PID:          process.PID(),
-		Archive:      lifecycle.ArchiveArtifacts(job.StreamID),
-		StartedAtJST: startedAt.In(jst()).Format(time.RFC3339),
+		StreamID:           job.StreamID,
+		Name:               job.Name,
+		Status:             "running",
+		PID:                process.PID(),
+		Archive:            lifecycle.ArchiveArtifacts(job.StreamID),
+		StartedAtJST:       startedAt.In(jst()).Format(time.RFC3339),
+		EncoderAudioGainDB: job.EncoderAudioGainDB,
+		OverlayProfileID:   job.OverlayProfileID,
 	}
 	if err := writeStartMetadata(layout, job, snapshot, args, m.ffmpegBin()); err != nil {
 		_ = process.Kill()
+		_ = watermarkSource.Close()
 		return Snapshot{}, err
 	}
 
 	done := make(chan error, 1)
 	m.mu.Lock()
-	m.processes[job.StreamID] = &trackedProcess{snapshot: snapshot, process: process, job: job, done: done}
+	m.processes[job.StreamID] = &trackedProcess{snapshot: snapshot, process: process, job: job, done: done, watermark: watermarkSource}
 	m.mu.Unlock()
+	watermarkActive = false
 	reservationActive = false
 
 	m.report(observability.Signal{
@@ -353,6 +399,55 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	go m.wait(job.StreamID, process, done)
 	go m.monitor(job.StreamID, layout.FinalMKV(), layout.TmpFFmpegProgress(), layout.TmpFFmpegAudioStats())
 	return snapshot, nil
+}
+
+type RuntimeSettings struct {
+	EncoderAudioGainDB float64
+	OverlayProfileID   string
+	OverlayConfig      map[string]any
+}
+
+func (m *Manager) UpdateRuntimeSettings(streamID string, settings RuntimeSettings) (Snapshot, error) {
+	if strings.TrimSpace(streamID) == "" || math.IsNaN(settings.EncoderAudioGainDB) || math.IsInf(settings.EncoderAudioGainDB, 0) || settings.EncoderAudioGainDB < -60 || settings.EncoderAudioGainDB > 24 {
+		return Snapshot{}, ErrInvalidRuntimeSettings
+	}
+	frame, err := watermarkfeed.Frame(settings.OverlayConfig)
+	if err != nil {
+		return Snapshot{}, errors.Join(ErrInvalidRuntimeSettings, err)
+	}
+	m.mu.Lock()
+	tracked, ok := m.processes[streamID]
+	if !ok || tracked.snapshot.Status != "running" || tracked.process == nil || tracked.watermark == nil {
+		m.mu.Unlock()
+		return Snapshot{}, ErrNotRunning
+	}
+	m.mu.Unlock()
+
+	tracked.runtimeMu.Lock()
+	defer tracked.runtimeMu.Unlock()
+	argument := strconv.FormatFloat(settings.EncoderAudioGainDB, 'f', 1, 64) + "dB"
+	commander, ok := tracked.process.(runtimeCommander)
+	if !ok {
+		return Snapshot{}, errors.New("ffmpeg runtime commands are unavailable")
+	}
+	if err := commander.Command("volume@gain", "volume", argument); err != nil {
+		return Snapshot{}, err
+	}
+	if err := tracked.watermark.Update(frame); err != nil {
+		return Snapshot{}, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.processes[streamID]
+	if !ok || current != tracked || current.snapshot.Status != "running" {
+		return Snapshot{}, ErrNotRunning
+	}
+	current.job.EncoderAudioGainDB = settings.EncoderAudioGainDB
+	current.job.OverlayProfileID = strings.TrimSpace(settings.OverlayProfileID)
+	current.snapshot.EncoderAudioGainDB = settings.EncoderAudioGainDB
+	current.snapshot.OverlayProfileID = strings.TrimSpace(settings.OverlayProfileID)
+	return current.snapshot, nil
 }
 
 // OutputRelayPolicy returns the non-secret routing configuration.  An unset
@@ -662,7 +757,12 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 		}
 	}
 	scrubTrackedProcessJob(tracked)
+	watermarkSource := tracked.watermark
+	tracked.watermark = nil
 	m.mu.Unlock()
+	if watermarkSource != nil {
+		_ = watermarkSource.Close()
+	}
 	if m.ProcessExitHook != nil {
 		m.ProcessExitHook(streamID)
 	}

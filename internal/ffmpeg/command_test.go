@@ -89,10 +89,13 @@ func TestBuildDiscordAudioLiveArchiveArgsToOutputTargetKeepsStreamKeyOutOfArgs(t
 func TestBuildDiscordAudioLiveArchiveArgsWithProgress(t *testing.T) {
 	args := BuildDiscordAudioLiveArchiveArgsWithTelemetry("/tmp/discord-opus.sdp", "rtmps://youtube.example.com/live2", "secret", "/tmp/final.mkv", "/tmp/progress.txt", "/tmp/audio-stats.txt", DefaultProfile())
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"lavfi", "color=c=0x0b1020:s=1920x1080:r=60", "showwaves", "protocol_whitelist", "discord-opus.sdp", "[v]", "1:a:0", "yuv420p", "astats=metadata=1"} {
+	for _, want := range []string{"lavfi", "color=c=0x0b1020:s=1920x1080:r=60", "showwaves", "protocol_whitelist", "discord-opus.sdp", "anullsrc=channel_layout=stereo:sample_rate=48000", "amix=inputs=2:duration=longest", "[v]", "[aout]", "yuv420p", "astats=metadata=1"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in args: %#v", want, args)
 		}
+	}
+	if !strings.Contains(joined, "eof_action=repeat:repeatlast=1:shortest=0") || strings.Contains(joined, "shortest=1") {
+		t.Fatalf("Discord audio waveform must keep the background alive during silence: %#v", args)
 	}
 	if strings.Contains(joined, " sh ") {
 		t.Fatalf("unexpected shell-style args: %#v", args)
@@ -132,9 +135,9 @@ func TestBuildWorkerVideoDiscordAudioArgsKeepsCredentialOutOfFFmpegAndAppliesWat
 		"-f image2pipe -framerate 60 -c:v mjpeg -i tcp://127.0.0.1:41001",
 		"-protocol_whitelist file,udp,rtp -i " + filepath.Clean("C:/tmp/discord-opus.sdp"),
 		"[0:v]scale=1920:1080",
-		"[2:v]format=rgba,scale=1920:1080[wm]",
+		"[3:v]format=rgba,scale=1920:1080[wm]",
 		"[base][wm]overlay=0:0",
-		"-map [v] -map 1:a:0",
+		"-map [v] -map [aout]",
 		"-minrate:v 8000k -maxrate:v 8000k -bufsize:v 16000k",
 		"-f tee",
 	} {
@@ -144,6 +147,31 @@ func TestBuildWorkerVideoDiscordAudioArgsKeepsCredentialOutOfFFmpegAndAppliesWat
 	}
 	if strings.Index(joined, "[0:v]scale=1920:1080") > strings.Index(joined, "[base][wm]overlay=0:0") {
 		t.Fatalf("watermark must be applied after the Worker scene normalization: %s", joined)
+	}
+}
+
+func TestBuildWorkerVideoRuntimeSettingsKeepStableNamedGainAndDynamicWatermarkInput(t *testing.T) {
+	args := BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(
+		"internal_worker_video:tcp://127.0.0.1:41001",
+		"internal_discord_audio:C:/tmp/discord-opus.sdp",
+		"rtmp://127.0.0.1/autostream/stream-01",
+		"C:/tmp/final.mkv",
+		"C:/tmp/preview/index.m3u8",
+		"C:/tmp/progress.txt",
+		"C:/tmp/audio-stats.txt",
+		"tcp://127.0.0.1:42001",
+		4.5,
+		DefaultProfile(),
+	)
+	joined := strings.Join(args, " ")
+	for _, required := range []string{
+		"-f image2pipe -framerate 2 -c:v png -i tcp://127.0.0.1:42001",
+		"volume@gain=4.5dB[aout]",
+		"[base][wm]overlay=0:0",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("missing %q in args: %s", required, joined)
+		}
 	}
 }
 
@@ -216,7 +244,7 @@ func TestBuildDiscordAudioLiveArchiveArgsWithPreviewAddsHLS(t *testing.T) {
 	assertBrowserCompatiblePreviewVideoArgs(t, args)
 }
 
-func TestBuildDiscordAudioLiveArchiveArgsWithWatermarkAddsThirdInput(t *testing.T) {
+func TestBuildDiscordAudioLiveArchiveArgsWithWatermarkAddsFourthInputAfterSilence(t *testing.T) {
 	args := BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(
 		`C:\tmp\discord-opus.sdp`,
 		"rtmp://127.0.0.1/autostream/stream-01",
@@ -228,7 +256,7 @@ func TestBuildDiscordAudioLiveArchiveArgsWithWatermarkAddsThirdInput(t *testing.
 		DefaultProfile(),
 	)
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"-loop 1", ".watermark-01.webp", "[2:v]format=rgba,scale=1920:1080[wm]", "[base][wm]overlay=0:0", "[v]"} {
+	for _, want := range []string{"-loop 1", ".watermark-01.webp", "anullsrc=channel_layout=stereo:sample_rate=48000", "[3:v]format=rgba,scale=1920:1080[wm]", "[base][wm]overlay=0:0", "[v]", "[aout]"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("Discord watermark composition missing %q: %#v", want, args)
 		}

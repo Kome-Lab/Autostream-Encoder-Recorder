@@ -1,6 +1,7 @@
 package streamproc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -18,6 +19,21 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/observability"
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 )
+
+type recordingWriteCloser struct{ bytes.Buffer }
+
+func (*recordingWriteCloser) Close() error { return nil }
+
+func TestExecProcessCommandUsesImmediateFFmpegFilterCommandSyntax(t *testing.T) {
+	stdin := &recordingWriteCloser{}
+	process := &execProcess{stdin: stdin}
+	if err := process.Command("volume@gain", "volume", "6.5dB"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stdin.String(), "c\nvolume@gain -1 volume 6.5dB\n"; got != want {
+		t.Fatalf("ffmpeg command input=%q, want %q", got, want)
+	}
+}
 
 const (
 	staticRelayBindingID      = "relay-11111111-1111-1111-1111-111111111111"
@@ -49,6 +65,12 @@ type fakeProcess struct {
 	done       chan error
 	terminated bool
 	killed     bool
+	commands   []string
+}
+
+func (p *fakeProcess) Command(target, command, argument string) error {
+	p.commands = append(p.commands, target+" "+command+" "+argument)
+	return nil
 }
 
 func (p *fakeProcess) PID() int {
@@ -142,13 +164,13 @@ func TestManagerStartWritesMetadataAndMasksStreamKey(t *testing.T) {
 	}
 }
 
-func TestManagerStartMaterializesWatermarkAndAddsOverlayFilter(t *testing.T) {
+func TestManagerStartUsesLiveWatermarkFeedAndAddsOverlayFilter(t *testing.T) {
 	root := t.TempDir()
 	starter := &fakeStarter{}
 	manager := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeLiveAPIStatic, OutputRelayBindingID: staticRelayBindingID}
 	_, err := manager.Start(lifecycle.StreamJob{
 		StreamID: "stream-watermark", Name: "Watermarked Stream", InputURL: "rtsp://input.example.com/live", YouTubeOutputMode: "live_api_relay_static", OutputRelayBindingID: staticRelayBindingID, YouTubeOutputReady: true,
-		OverlayProfileID: "overlay-01", OverlayConfig: map[string]any{"watermark_enabled": true, "watermark_image_data_url": "data:image/png;base64,iVBORw0KGgo="},
+		OverlayProfileID: "overlay-01", OverlayConfig: map[string]any{"watermark_enabled": true, "watermark_image_data_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAHnOcQAAAAABJRU5ErkJggg=="},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -160,17 +182,27 @@ func TestManagerStartMaterializesWatermarkAndAddsOverlayFilter(t *testing.T) {
 	if strings.Contains(joined, "data:image/") {
 		t.Fatalf("raw watermark data URL leaked into FFmpeg args: %#v", starter.args)
 	}
-	layout, err := archive.NewLayout(root, "stream-watermark")
+	if !strings.Contains(joined, "-f image2pipe -framerate 2 -c:v png -i tcp://127.0.0.1:") {
+		t.Fatalf("live watermark input missing from FFmpeg args: %#v", starter.args)
+	}
+}
+
+func TestManagerUpdatesAudioGainAndWatermarkWithoutRestart(t *testing.T) {
+	starter := &fakeStarter{}
+	manager := &Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeLiveAPIStatic, OutputRelayBindingID: staticRelayBindingID}
+	before, err := manager.Start(lifecycle.StreamJob{StreamID: "stream-runtime", Name: "Runtime", InputURL: "rtsp://input.example.com/live", YouTubeOutputMode: "live_api_relay_static", OutputRelayBindingID: staticRelayBindingID, YouTubeOutputReady: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, err := filepath.Glob(filepath.Join(layout.TmpDir(), ".watermark-*.png"))
-	if err != nil || len(files) != 1 {
-		t.Fatalf("watermark asset was not materialized: files=%v err=%v", files, err)
+	after, err := manager.UpdateRuntimeSettings("stream-runtime", RuntimeSettings{EncoderAudioGainDB: 6.5, OverlayProfileID: "overlay-02", OverlayConfig: map[string]any{"watermark_enabled": false}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	info, err := os.Stat(files[0])
-	if err != nil || info.Size() == 0 {
-		t.Fatalf("watermark asset is empty: info=%v err=%v", info, err)
+	if before.PID != after.PID || after.EncoderAudioGainDB != 6.5 || after.OverlayProfileID != "overlay-02" {
+		t.Fatalf("runtime settings restarted or were not reflected: before=%#v after=%#v", before, after)
+	}
+	if got := starter.process.commands; len(got) != 1 || got[0] != "volume@gain volume 6.5dB" {
+		t.Fatalf("FFmpeg runtime command=%#v", got)
 	}
 }
 

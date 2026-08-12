@@ -513,16 +513,17 @@ func serviceCapabilities() map[string]any {
 	policy := outputrelay.FromEnv()
 	outputRelayMode, relayConfigValid := policy.CapabilityMode()
 	capabilities := map[string]any{
-		"ffmpeg":             true,
-		"record_final_mkv":   true,
-		"remux_final_mp4":    true,
-		"google_drive_api":   true,
-		"archive_retry":      true,
-		"audio_ingest_opus":  true,
-		"health_endpoint":    true,
-		"package_endpoint":   true,
-		"default_resolution": "1920x1080",
-		"default_fps":        60,
+		"ffmpeg":                        true,
+		"record_final_mkv":              true,
+		"remux_final_mp4":               true,
+		"google_drive_api":              true,
+		"archive_retry":                 true,
+		"audio_ingest_opus":             true,
+		"health_endpoint":               true,
+		"package_endpoint":              true,
+		"live_encoder_runtime_settings": true,
+		"default_resolution":            "1920x1080",
+		"default_fps":                   60,
 	}
 	if videoingest.NewManagerFromEnv().Available() {
 		capabilities["worker_frame_ingest_mjpeg_srt"] = true

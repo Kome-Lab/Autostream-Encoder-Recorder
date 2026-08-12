@@ -297,6 +297,7 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	})
 	mux.HandleFunc("POST /streams/dry-run", dryRunStream(verifier, runtimeConfig))
 	mux.HandleFunc("POST /streams/start", startStream(processManager, audioManager, videoManager, verifier, resolver, runtimeConfig))
+	mux.HandleFunc("PUT /streams/{id}/runtime-settings", updateStreamRuntimeSettings(processManager, verifier, runtimeConfig))
 	mux.HandleFunc("POST /streams/{id}/stop", stopStream(processManager, audioManager, videoManager, verifier))
 	mux.HandleFunc("GET /streams/{id}/process-status", streamProcessStatus(processManager, verifier))
 	mux.HandleFunc("GET /streams/{id}/preview/{name}", streamPreview(processArchiveRoot, verifier))
@@ -309,6 +310,48 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	mux.HandleFunc("GET /streams/{id}/worker-events", recentWorkerEvents(eventManager, verifier))
 	mux.HandleFunc("POST /streams/{id}/audio/opus", discordOpusAudio(audioManager, processManager, verifier))
 	return securityHeaders(mux)
+}
+
+type runtimeSettingsRequest struct {
+	EncoderAudioGainDB float64 `json:"encoder_audio_gain_db"`
+	OverlayProfileID   string  `json:"overlay_profile_id"`
+}
+
+func updateStreamRuntimeSettings(processManager *streamproc.Manager, verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		if processManager == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "process_manager_not_configured"})
+			return
+		}
+		var body runtimeSettingsRequest
+		if status, err := decodeLimitedJSON(w, r, maxControlBodyBytes, &body); err != nil {
+			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
+			return
+		}
+		job := lifecycle.StreamJob{StreamID: r.PathValue("id"), OverlayProfileID: strings.TrimSpace(body.OverlayProfileID)}
+		if err := applyOverlayRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
+			return
+		}
+		snapshot, err := processManager.UpdateRuntimeSettings(job.StreamID, streamproc.RuntimeSettings{
+			EncoderAudioGainDB: body.EncoderAudioGainDB,
+			OverlayProfileID:   job.OverlayProfileID,
+			OverlayConfig:      job.OverlayConfig,
+		})
+		switch {
+		case errors.Is(err, streamproc.ErrInvalidRuntimeSettings):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_encoder_runtime_settings"})
+		case errors.Is(err, streamproc.ErrNotRunning):
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "stream_not_running"})
+		case err != nil:
+			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "encoder_runtime_settings_apply_failed"})
+		default:
+			writeJSON(w, http.StatusOK, publicProcessSnapshot(snapshot))
+		}
+	}
 }
 
 type preflightResponse struct {
@@ -1039,24 +1082,28 @@ func streamProcessStatus(processManager *streamproc.Manager, verifier TokenVerif
 }
 
 type processSnapshotResponse struct {
-	StreamID     string            `json:"stream_id"`
-	Name         string            `json:"name"`
-	Status       string            `json:"status"`
-	StartedAtJST string            `json:"started_at_jst"`
-	StoppedAtJST string            `json:"stopped_at_jst,omitempty"`
-	Archive      map[string]string `json:"archive"`
-	Error        string            `json:"error,omitempty"`
+	StreamID           string            `json:"stream_id"`
+	Name               string            `json:"name"`
+	Status             string            `json:"status"`
+	StartedAtJST       string            `json:"started_at_jst"`
+	StoppedAtJST       string            `json:"stopped_at_jst,omitempty"`
+	Archive            map[string]string `json:"archive"`
+	Error              string            `json:"error,omitempty"`
+	EncoderAudioGainDB float64           `json:"encoder_audio_gain_db"`
+	OverlayProfileID   string            `json:"overlay_profile_id,omitempty"`
 }
 
 func publicProcessSnapshot(snapshot streamproc.Snapshot) processSnapshotResponse {
 	return processSnapshotResponse{
-		StreamID:     snapshot.StreamID,
-		Name:         snapshot.Name,
-		Status:       snapshot.Status,
-		StartedAtJST: snapshot.StartedAtJST,
-		StoppedAtJST: snapshot.StoppedAtJST,
-		Archive:      snapshot.Archive,
-		Error:        snapshot.Error,
+		StreamID:           snapshot.StreamID,
+		Name:               snapshot.Name,
+		Status:             snapshot.Status,
+		StartedAtJST:       snapshot.StartedAtJST,
+		StoppedAtJST:       snapshot.StoppedAtJST,
+		Archive:            snapshot.Archive,
+		Error:              snapshot.Error,
+		EncoderAudioGainDB: snapshot.EncoderAudioGainDB,
+		OverlayProfileID:   snapshot.OverlayProfileID,
 	}
 }
 
