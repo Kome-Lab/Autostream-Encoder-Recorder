@@ -265,6 +265,67 @@ func TestPackageUsesRealFFmpegRemuxWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestPackageFallsBackToPreviewWhenFinalMKVRemuxFails(t *testing.T) {
+	ffmpegBin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skipf("ffmpeg is not available: %v", err)
+	}
+	root := t.TempDir()
+	layout, err := archive.NewLayout(root, "stream-preview-fallback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.TmpDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.FinalDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.PreviewDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	generate := exec.Command(ffmpegBin,
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=160x90:rate=15",
+		"-t", "1",
+		"-c:v", "libx264", "-pix_fmt", "yuv420p",
+		"-f", "hls", "-hls_time", "0.5", "-hls_list_size", "0",
+		"-hls_flags", "independent_segments",
+		layout.PreviewPlaylist(),
+	)
+	if output, err := generate.CombinedOutput(); err != nil {
+		t.Fatalf("generate preview HLS failed: %v\n%s", err, string(output))
+	}
+	// This is the truncated Matroska header produced when another tee slave
+	// aborts the original recording process. The HLS output is still valid.
+	if err := os.WriteFile(layout.FinalMKV(), []byte{0x1a, 0x45, 0xdf, 0xa3}, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.TmpLogs(), []byte("{}\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{ArchiveRoot: root, FFmpegBin: ffmpegBin, Uploader: archive.DryRunUploader{}}
+	result, err := manager.Package(context.Background(), PackageJob{
+		StreamID:  "stream-preview-fallback",
+		Name:      "Preview Fallback",
+		StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC),
+		DryRun:    true,
+	})
+	if err != nil {
+		t.Fatalf("expected HLS fallback package to succeed: %v", err)
+	}
+	info, err := os.Stat(layout.FinalMP4())
+	if err != nil {
+		t.Fatalf("expected final.mp4 after HLS fallback: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("final.mp4 is empty after HLS fallback")
+	}
+	if result.RemuxDurationMS <= 0 {
+		t.Fatalf("expected positive remux duration: %#v", result)
+	}
+}
+
 func TestPackageUsesArchiveConfigUploaderFactory(t *testing.T) {
 	root := t.TempDir()
 	layout, err := archive.NewLayout(root, "stream-01")

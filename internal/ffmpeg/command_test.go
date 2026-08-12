@@ -123,7 +123,7 @@ func TestBuildLiveArchiveArgsWithPreviewKeepsStartToNowDVR(t *testing.T) {
 	)
 	teeOutput := args[len(args)-1]
 	for _, want := range []string{
-		"[f=flv]",
+		"[f=flv:onfail=ignore]",
 		"[f=matroska]",
 		"f=hls",
 		"onfail=ignore",
@@ -141,8 +141,8 @@ func TestBuildLiveArchiveArgsWithPreviewKeepsStartToNowDVR(t *testing.T) {
 			t.Fatalf("missing %q in tee output: %s", want, teeOutput)
 		}
 	}
-	if strings.Count(teeOutput, "onfail=ignore") != 1 {
-		t.Fatalf("only the preview slave may ignore failures: %s", teeOutput)
+	if strings.Count(teeOutput, "onfail=ignore") != 2 {
+		t.Fatalf("live and preview slaves must ignore isolated output failures: %s", teeOutput)
 	}
 	if strings.Contains(teeOutput, "omit_endlist") {
 		t.Fatalf("preview must allow ENDLIST on graceful shutdown: %s", teeOutput)

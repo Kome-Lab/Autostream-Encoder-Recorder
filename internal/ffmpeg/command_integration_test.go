@@ -82,6 +82,35 @@ func TestLiveTeePreviewWithFFmpeg(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("live output failure does not stop archive or preview", func(t *testing.T) {
+		previewDir := filepath.Join(root, "provider failure preview")
+		if err := os.MkdirAll(previewDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		playlist := filepath.Join(previewDir, "index.m3u8")
+		// The parent is intentionally absent. This simulates a provider/relay
+		// connection that cannot be opened while keeping local outputs valid.
+		liveOutput := filepath.Join(root, "missing live parent", "live.flv")
+		archiveMKV := filepath.Join(root, "provider failure archive.mkv")
+		args := BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(input, liveOutput, archiveMKV, playlist, "", "", profile)
+		runFFmpeg(t, ffmpegBin, args)
+
+		archiveInfo, err := os.Stat(archiveMKV)
+		if err != nil {
+			t.Fatalf("archive output did not survive live output failure: %v", err)
+		}
+		if archiveInfo.Size() == 0 {
+			t.Fatal("archive output is empty after live output failure")
+		}
+		playlistBody, err := os.ReadFile(playlist)
+		if err != nil {
+			t.Fatalf("preview playlist did not survive live output failure: %v", err)
+		}
+		if !strings.Contains(string(playlistBody), "#EXT-X-ENDLIST") {
+			t.Fatalf("preview playlist is incomplete after live output failure:\n%s", playlistBody)
+		}
+	})
 }
 
 func createFFmpegFixture(t *testing.T, ffmpegBin, output string) {

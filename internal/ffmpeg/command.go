@@ -145,7 +145,10 @@ func watermarkWidth(p EncoderProfile) int {
 
 func buildLiveTeeOutput(outputTarget, archivePath, previewPlaylistPath string) string {
 	slaves := []string{
-		"[f=flv]" + escapeTeeSlaveURL(outputTarget),
+		// A transient live-provider or relay failure must not tear down the
+		// local recording and preview outputs.  The live output is optional;
+		// the archive is the durable source used by the Control Panel.
+		"[f=flv:onfail=ignore]" + escapeTeeSlaveURL(outputTarget),
 		"[f=matroska]" + escapeTeeSlaveURL(filepath.ToSlash(filepath.Clean(archivePath))),
 	}
 	if strings.TrimSpace(previewPlaylistPath) == "" {

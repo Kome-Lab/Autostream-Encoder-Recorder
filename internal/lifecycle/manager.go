@@ -318,7 +318,17 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 	remuxArgs := ffmpeg.BuildRemuxArgs(layout.FinalMKV(), remuxOutput)
 	remuxStarted := time.Now()
 	if err := runner.Run(ctx, ffmpegBin, remuxArgs); err != nil {
-		return Result{}, PackageError{Phase: "remux", Err: err}
+		// The live tee can leave a truncated Matroska header when an optional
+		// provider/relay slave fails. If the independent preview completed,
+		// recover the recording from its durable HLS playlist instead of losing
+		// the archive and its Control Panel artifact report.
+		if _, previewErr := safeRegularFileInfo(layout.PreviewPlaylist()); previewErr != nil {
+			return Result{}, PackageError{Phase: "remux", Err: err}
+		}
+		fallbackArgs := ffmpeg.BuildRemuxArgs(layout.PreviewPlaylist(), remuxOutput)
+		if fallbackErr := runner.Run(ctx, ffmpegBin, fallbackArgs); fallbackErr != nil {
+			return Result{}, PackageError{Phase: "remux", Err: err}
+		}
 	}
 	remuxDurationMS := time.Since(remuxStarted).Seconds() * 1000
 	if _, err := safeRegularFileInfo(remuxOutput); err != nil {
