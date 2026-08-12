@@ -18,10 +18,13 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/observability"
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/version"
+	"github.com/example/autostream-encoder-recorder/internal/videoingest"
 )
 
 const ServiceType = "encoder_recorder"
 const RuntimeSecretLeaseActiveCode = "runtime_secret_lease_active"
+
+const artifactReportMaxAttempts = 3
 
 var ErrRuntimeSecretLeaseActive = errors.New(RuntimeSecretLeaseActiveCode)
 
@@ -521,6 +524,9 @@ func serviceCapabilities() map[string]any {
 		"default_resolution": "1920x1080",
 		"default_fps":        60,
 	}
+	if videoingest.NewManagerFromEnv().Available() {
+		capabilities["worker_video_ingest_srt"] = true
+	}
 	if !relayConfigValid {
 		return capabilities
 	}
@@ -593,7 +599,60 @@ func (c Client) ReportArtifacts(ctx context.Context, streamID string, artifacts 
 	reportCtx, cancel := context.WithTimeout(ctx, envDuration("CONTROL_PANEL_ARTIFACT_REPORT_TIMEOUT_SEC", 5*time.Second))
 	defer cancel()
 	body := ArtifactReport{ServiceID: c.Config.ServiceID, StreamID: streamID, Artifacts: artifacts}
-	return c.post(reportCtx, "/services/stream-artifacts", body)
+	var reportErr error
+	for attempt := 1; attempt <= artifactReportMaxAttempts; attempt++ {
+		if err := reportCtx.Err(); err != nil {
+			return err
+		}
+		reportErr = c.post(reportCtx, "/services/stream-artifacts", body)
+		if reportErr == nil {
+			return nil
+		}
+		if err := reportCtx.Err(); err != nil {
+			return err
+		}
+		if attempt == artifactReportMaxAttempts || !retryableArtifactReportError(reportErr) {
+			return reportErr
+		}
+		if err := waitForArtifactReportRetry(reportCtx, artifactReportRetryDelay(attempt)); err != nil {
+			return err
+		}
+	}
+	return reportErr
+}
+
+func retryableArtifactReportError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var panelErr ControlPanelError
+	if errors.As(err, &panelErr) {
+		return panelErr.StatusCode == http.StatusRequestTimeout ||
+			panelErr.StatusCode == http.StatusTooManyRequests ||
+			(panelErr.StatusCode >= http.StatusInternalServerError && panelErr.StatusCode <= 599)
+	}
+	var transportErr *url.Error
+	return errors.As(err, &transportErr)
+}
+
+func artifactReportRetryDelay(attempt int) time.Duration {
+	switch attempt {
+	case 1:
+		return 100 * time.Millisecond
+	default:
+		return 250 * time.Millisecond
+	}
+}
+
+func waitForArtifactReportRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (c Client) Report(ctx context.Context, signal observability.Signal) error {

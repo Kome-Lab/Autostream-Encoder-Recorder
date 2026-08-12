@@ -123,8 +123,44 @@ func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWat
 	return append(args, "-f", "tee", buildLiveTeeOutput(outputTarget, output, previewPlaylistPath))
 }
 
+// BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark
+// combines a Worker-rendered, video-only MPEG-TS scene with the existing Bot
+// Opus/RTP audio bridge. SRT is terminated by the Go ingest layer, so FFmpeg
+// only receives a credential-free loopback TCP endpoint.
+func BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(videoInputURL, audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath string, p EncoderProfile) []string {
+	output := filepath.Clean(archivePath)
+	videoInput := ResolveInputTarget(videoInputURL)
+	audioInput := ResolveInputTarget(audioSDPPath)
+	filter := workerSceneFilter(p)
+	args := []string{
+		"-hide_banner", "-y",
+		"-thread_queue_size", "512", "-f", "mpegts", "-i", videoInput,
+		"-thread_queue_size", "512", "-protocol_whitelist", "file,udp,rtp", "-i", filepath.Clean(audioInput),
+	}
+	if strings.TrimSpace(watermarkPath) != "" {
+		args = append(args, "-loop", "1", "-i", filepath.Clean(watermarkPath))
+		filter = workerSceneWatermarkFilter(p)
+	}
+	args = append(args,
+		"-filter_complex", filter,
+		"-map", "[v]", "-map", "1:a:0",
+		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
+		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
+		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
+		"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr",
+		"-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate),
+	)
+	if progressPath != "" {
+		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
+	}
+	if audioStatsPath != "" {
+		args = append(args, "-filter:a", audioStatsFilter(audioStatsPath))
+	}
+	return append(args, "-f", "tee", buildLiveTeeOutput(outputTarget, output, previewPlaylistPath))
+}
+
 func watermarkFilter(p EncoderProfile) string {
-	return "[0:v]format=rgba[base];[1:v]format=rgba,scale=" + itoa(watermarkWidth(p)) + ":-1[wm];[base][wm]overlay=W-w-32:H-h-32:format=auto,format=yuv420p[v]"
+	return "[0:v]scale=" + itoa(p.Width) + ":" + itoa(p.Height) + ":force_original_aspect_ratio=decrease,pad=" + itoa(p.Width) + ":" + itoa(p.Height) + ":(ow-iw)/2:(oh-ih)/2:color=0x0b1020,setsar=1,format=rgba[base];[1:v]format=rgba,scale=" + itoa(p.Width) + ":" + itoa(p.Height) + "[wm];[base][wm]overlay=0:0:format=auto,format=yuv420p[v]"
 }
 
 func discordAudioFilter(p EncoderProfile) string {
@@ -132,15 +168,15 @@ func discordAudioFilter(p EncoderProfile) string {
 }
 
 func discordAudioWatermarkFilter(p EncoderProfile) string {
-	return "[0:v]format=rgba[bg];[1:a]showwaves=s=" + itoa(p.Width) + "x" + itoa(p.Height/2) + ":mode=line:rate=30:colors=0x38bdf8,format=rgba[wave];[bg][wave]overlay=0:" + itoa(p.Height/4) + ":shortest=1,format=rgba[base];[2:v]format=rgba,scale=" + itoa(watermarkWidth(p)) + ":-1[wm];[base][wm]overlay=W-w-32:H-h-32:format=auto,format=yuv420p[v]"
+	return "[0:v]format=rgba[bg];[1:a]showwaves=s=" + itoa(p.Width) + "x" + itoa(p.Height/2) + ":mode=line:rate=30:colors=0x38bdf8,format=rgba[wave];[bg][wave]overlay=0:" + itoa(p.Height/4) + ":shortest=1,format=rgba[base];[2:v]format=rgba,scale=" + itoa(p.Width) + ":" + itoa(p.Height) + "[wm];[base][wm]overlay=0:0:format=auto,format=yuv420p[v]"
 }
 
-func watermarkWidth(p EncoderProfile) int {
-	width := p.Width / 4
-	if width < 1 {
-		return 480
-	}
-	return width
+func workerSceneFilter(p EncoderProfile) string {
+	return "[0:v]scale=" + itoa(p.Width) + ":" + itoa(p.Height) + ":force_original_aspect_ratio=decrease,pad=" + itoa(p.Width) + ":" + itoa(p.Height) + ":(ow-iw)/2:(oh-ih)/2:color=0x0b1020,setsar=1,format=yuv420p[v]"
+}
+
+func workerSceneWatermarkFilter(p EncoderProfile) string {
+	return "[0:v]scale=" + itoa(p.Width) + ":" + itoa(p.Height) + ":force_original_aspect_ratio=decrease,pad=" + itoa(p.Width) + ":" + itoa(p.Height) + ":(ow-iw)/2:(oh-ih)/2:color=0x0b1020,setsar=1,format=rgba[base];[2:v]format=rgba,scale=" + itoa(p.Width) + ":" + itoa(p.Height) + "[wm];[base][wm]overlay=0:0:format=auto,format=yuv420p[v]"
 }
 
 func buildLiveTeeOutput(outputTarget, archivePath, previewPlaylistPath string) string {

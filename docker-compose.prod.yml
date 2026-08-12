@@ -8,6 +8,11 @@ services:
       AUTOSTREAM_NODE_CONFIG: /etc/autostream-encoder-recorder/config.yml
       AUTOSTREAM_CONFIG_REVISION: ${AUTOSTREAM_CONFIG_REVISION:-1}
       AUTOSTREAM_BIND_ADDR: 0.0.0.0:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}
+      # Worker scene video uses a separate encrypted SRT/UDP path. Leave the
+      # advertise host empty to keep the capability disabled until this host is
+      # intentionally configured and its firewall is restricted to Worker hosts.
+      AUTOSTREAM_WORKER_VIDEO_BIND_ADDR: 0.0.0.0:${AUTOSTREAM_WORKER_VIDEO_PORT:-10080}
+      AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST: ${AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST:-}
       # Direct YouTube Live API output is the default. Existing Relay
       # installations can opt in through the host .env file.
       AUTOSTREAM_OUTPUT_RELAY_URL: ${AUTOSTREAM_OUTPUT_RELAY_URL:-}
@@ -22,6 +27,7 @@ services:
         condition: service_started
     ports: !override
       - "127.0.0.1:${AUTOSTREAM_ENCODER_RECORDER_PORT:-8081}:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}"
+      - "${AUTOSTREAM_WORKER_VIDEO_PORT:-10080}:${AUTOSTREAM_WORKER_VIDEO_PORT:-10080}/udp"
     volumes:
       - ./config:/etc/autostream-encoder-recorder:ro
       - encoder-archives:/var/lib/autostream/archives

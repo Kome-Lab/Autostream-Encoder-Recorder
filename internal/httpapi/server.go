@@ -28,6 +28,7 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/streamproc"
 	"github.com/example/autostream-encoder-recorder/internal/version"
+	"github.com/example/autostream-encoder-recorder/internal/videoingest"
 	"github.com/example/autostream-encoder-recorder/internal/workerevents"
 )
 
@@ -132,8 +133,15 @@ func (v TokenVerifier) DiscordAudioClaims(header, streamID string) (ingesttoken.
 	return ingesttoken.Claims{}, false
 }
 
+func (v TokenVerifier) WorkerVideoClaims(token, streamID string) (ingesttoken.Claims, bool) {
+	return v.verifySignedIngestToken(strings.TrimSpace(token), ingesttoken.Expected{StreamID: streamID, ServiceType: "worker", Purpose: "worker_video", Audience: "encoder_recorder"})
+}
+
 func (v TokenVerifier) verifySignedIngest(header string, expected ingesttoken.Expected) (ingesttoken.Claims, bool) {
-	token := bearerToken(header)
+	return v.verifySignedIngestToken(bearerToken(header), expected)
+}
+
+func (v TokenVerifier) verifySignedIngestToken(token string, expected ingesttoken.Expected) (ingesttoken.Claims, bool) {
 	signingKey := strings.TrimSpace(v.IngestTokenSigningKey)
 	if signingKey == "" {
 		signingKey = control.StreamIngestSigningKey()
@@ -219,6 +227,10 @@ func NewServerWithManagersAndRuntimeConfig(serviceType string, processManager *s
 }
 
 func NewServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver, runtimeConfig RuntimeConfigProvider, updaterIdentity *UpdaterIdentityLatch) http.Handler {
+	return newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType, processManager, eventManager, verifier, resolver, runtimeConfig, updaterIdentity, videoingest.NewManagerFromEnv())
+}
+
+func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver, runtimeConfig RuntimeConfigProvider, updaterIdentity *UpdaterIdentityLatch, videoManager *videoingest.Manager) http.Handler {
 	if updaterIdentity == nil {
 		panic("encoder recorder updater identity latch is required")
 	}
@@ -239,6 +251,18 @@ func NewServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	audioManager := audioingest.NewManager(eventArchiveRoot)
 	audioManager.MaxPackets = envInt("AUDIO_INGEST_MAX_PACKETS", defaultDiscordAudioMaxPackets)
 	audioManager.MaxOpusSize = envInt("AUDIO_INGEST_MAX_OPUS_BYTES", defaultDiscordAudioMaxOpusBytes)
+	if processManager != nil {
+		previousProcessExitHook := processManager.ProcessExitHook
+		processManager.ProcessExitHook = func(streamID string) {
+			if previousProcessExitHook != nil {
+				previousProcessExitHook(streamID)
+			}
+			audioManager.StopBridge(streamID)
+			if videoManager != nil {
+				videoManager.StopBridge(streamID)
+			}
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -271,8 +295,8 @@ func NewServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 	})
 	mux.HandleFunc("POST /streams/dry-run", dryRunStream(verifier, runtimeConfig))
-	mux.HandleFunc("POST /streams/start", startStream(processManager, audioManager, verifier, resolver, runtimeConfig))
-	mux.HandleFunc("POST /streams/{id}/stop", stopStream(processManager, audioManager, verifier))
+	mux.HandleFunc("POST /streams/start", startStream(processManager, audioManager, videoManager, verifier, resolver, runtimeConfig))
+	mux.HandleFunc("POST /streams/{id}/stop", stopStream(processManager, audioManager, videoManager, verifier))
 	mux.HandleFunc("GET /streams/{id}/process-status", streamProcessStatus(processManager, verifier))
 	mux.HandleFunc("GET /streams/{id}/preview/{name}", streamPreview(processArchiveRoot, verifier))
 	mux.HandleFunc("GET /streams/{id}/audio-status", discordAudioStatus(audioManager, verifier))
@@ -557,7 +581,18 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 	}
 }
 
-func startStream(processManager *streamproc.Manager, audioManager *audioingest.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver, runtimeConfig RuntimeConfigProvider) http.HandlerFunc {
+type startStreamRequest struct {
+	lifecycle.StreamJob
+	WorkerVideoIngest      bool   `json:"worker_video_ingest,omitempty"`
+	WorkerVideoIngestToken string `json:"worker_video_ingest_token,omitempty"`
+}
+
+type startStreamResponse struct {
+	processSnapshotResponse
+	VideoIngest *videoingest.Bridge `json:"video_ingest,omitempty"`
+}
+
+func startStream(processManager *streamproc.Manager, audioManager *audioingest.Manager, videoManager *videoingest.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver, runtimeConfig RuntimeConfigProvider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireServiceToken(w, r, verifier) {
 			return
@@ -566,9 +601,14 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "process_manager_not_configured"})
 			return
 		}
-		var job lifecycle.StreamJob
-		if status, err := decodeLimitedJSON(w, r, maxControlBodyBytes, &job); err != nil {
+		var startRequest startStreamRequest
+		if status, err := decodeLimitedJSON(w, r, maxControlBodyBytes, &startRequest); err != nil {
 			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
+			return
+		}
+		job := startRequest.StreamJob
+		if !startRequest.WorkerVideoIngest && strings.TrimSpace(startRequest.WorkerVideoIngestToken) != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "worker_video_ingest_not_enabled"})
 			return
 		}
 		if err := applyYouTubeRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
@@ -609,7 +649,46 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			return
 		}
 		audioBridgeMode := false
-		if strings.TrimSpace(job.InputURL) == "" {
+		videoBridgeMode := false
+		var videoBridge videoingest.Bridge
+		if startRequest.WorkerVideoIngest {
+			if strings.TrimSpace(job.InputURL) != "" || strings.TrimSpace(job.InputMode) != "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"code": "worker_video_input_must_be_service_managed"})
+				return
+			}
+			if _, ok := verifier.WorkerVideoClaims(startRequest.WorkerVideoIngestToken, job.StreamID); !ok {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"code": "missing_or_invalid_worker_video_ingest_token"})
+				return
+			}
+			if audioManager == nil || videoManager == nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "worker_video_ingest_unavailable"})
+				return
+			}
+			if existing, statusErr := processManager.Status(job.StreamID); statusErr == nil && (existing.Status == "starting" || existing.Status == "running" || existing.Status == "stopping" || existing.Status == "packaging") {
+				writeJSON(w, http.StatusConflict, map[string]string{"code": "stream_already_running"})
+				return
+			}
+			videoBridge, err = videoManager.StartBridge(job.StreamID, startRequest.WorkerVideoIngestToken)
+			if err != nil {
+				if errors.Is(err, videoingest.ErrAlreadyRunning) {
+					writeJSON(w, http.StatusConflict, map[string]string{"code": "stream_already_running"})
+					return
+				}
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "worker_video_ingest_unavailable"})
+				return
+			}
+			videoBridgeMode = true
+			audioBridge, err := audioManager.StartBridge(job.StreamID)
+			if err != nil {
+				videoManager.StopBridge(job.StreamID)
+				writeJSON(w, http.StatusBadRequest, map[string]string{"code": "audio_bridge_failed"})
+				return
+			}
+			audioBridgeMode = true
+			job.InputURL = videoBridge.InputURL
+			job.AudioInputURL = audioBridge.InputURL
+			job.InputMode = "worker_scene_srt"
+		} else if strings.TrimSpace(job.InputURL) == "" {
 			if audioManager == nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"code": "input_url_required"})
 				return
@@ -622,12 +701,18 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			job.InputURL = bridge.InputURL
 			job.InputMode = "discord_opus_rtp"
 			audioBridgeMode = true
-		} else if strings.HasPrefix(strings.TrimSpace(job.InputURL), "internal_discord_audio:") {
+		} else if strings.HasPrefix(strings.TrimSpace(job.InputURL), "internal_discord_audio:") || strings.HasPrefix(strings.TrimSpace(job.InputURL), "internal_worker_video:") {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "internal_audio_input_not_allowed"})
 			return
 		}
 		snapshot, err := processManager.Start(job)
 		if errors.Is(err, streamproc.ErrAlreadyRunning) {
+			if audioBridgeMode && audioManager != nil {
+				audioManager.StopBridge(job.StreamID)
+			}
+			if videoBridgeMode && videoManager != nil {
+				videoManager.StopBridge(job.StreamID)
+			}
 			writeJSON(w, http.StatusConflict, map[string]string{"code": "stream_already_running"})
 			return
 		}
@@ -635,13 +720,21 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			if audioBridgeMode && audioManager != nil {
 				audioManager.StopBridge(job.StreamID)
 			}
+			if videoBridgeMode && videoManager != nil {
+				videoManager.StopBridge(job.StreamID)
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "start_stream_failed"})
 			return
 		}
 		if audioBridgeMode {
 			go reportDiscordAudioHealth(processManager, audioManager, job.StreamID)
 		}
-		writeJSON(w, http.StatusAccepted, publicProcessSnapshot(snapshot))
+		response := startStreamResponse{processSnapshotResponse: publicProcessSnapshot(snapshot)}
+		if videoBridgeMode {
+			response.VideoIngest = &videoBridge
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		writeJSON(w, http.StatusAccepted, response)
 	}
 }
 
@@ -876,7 +969,7 @@ func unsupportedServiceAccountArchiveConfig(cfg lifecycle.ArchiveConfig) bool {
 		strings.TrimSpace(cfg.ServiceAccountCredentialsSecretName) != ""
 }
 
-func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Manager, verifier TokenVerifier) http.HandlerFunc {
+func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Manager, videoManager *videoingest.Manager, verifier TokenVerifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireServiceToken(w, r, verifier) {
 			return
@@ -889,6 +982,9 @@ func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Ma
 		if errors.Is(err, streamproc.ErrAlreadyStopped) {
 			if audioManager != nil {
 				audioManager.StopBridge(r.PathValue("id"))
+			}
+			if videoManager != nil {
+				videoManager.StopBridge(r.PathValue("id"))
 			}
 			writeJSON(w, http.StatusAccepted, map[string]string{"status": "already_stopped"})
 			return
@@ -911,6 +1007,9 @@ func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Ma
 		}
 		if audioManager != nil {
 			audioManager.StopBridge(r.PathValue("id"))
+		}
+		if videoManager != nil {
+			videoManager.StopBridge(r.PathValue("id"))
 		}
 		writeJSON(w, http.StatusAccepted, publicProcessSnapshot(snapshot))
 	}

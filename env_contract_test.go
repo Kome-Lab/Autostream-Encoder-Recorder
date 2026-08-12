@@ -36,6 +36,28 @@ func TestEnvExampleUsesPanelManagedNodeCredentials(t *testing.T) {
 	}
 }
 
+func TestWorkerVideoSRTEnvContractKeepsJobCredentialOutOfEnvironment(t *testing.T) {
+	body, err := os.ReadFile(".env.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		"AUTOSTREAM_WORKER_VIDEO_BIND_ADDR=0.0.0.0:10080",
+		"AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST=encoder.example.com",
+		"FFmpeg argv",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf(".env.example is missing Worker video SRT guidance %q", required)
+		}
+	}
+	for key := range activeEnvKeys(text) {
+		if strings.Contains(key, "PASSPHRASE") || strings.Contains(key, "WORKER_VIDEO_INGEST_TOKEN") {
+			t.Errorf("job-scoped Worker video credential must not be an active env key: %s", key)
+		}
+	}
+}
+
 func TestBaseComposeOverridesHostOnlyBindAddress(t *testing.T) {
 	body, err := os.ReadFile("docker-compose.yml")
 	if err != nil {

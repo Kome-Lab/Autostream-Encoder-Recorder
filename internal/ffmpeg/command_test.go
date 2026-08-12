@@ -65,7 +65,7 @@ func TestBuildLiveArchiveArgsWithWatermarkCompositesImageBeforeTee(t *testing.T)
 		DefaultProfile(),
 	)
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"-loop 1", watermark, "-filter_complex", "overlay=W-w-32:H-h-32", "[v]"} {
+	for _, want := range []string{"-loop 1", watermark, "-filter_complex", "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080", "[1:v]format=rgba,scale=1920:1080[wm]", "[base][wm]overlay=0:0", "[v]"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("watermark composition missing %q: %#v", want, args)
 		}
@@ -107,6 +107,43 @@ func TestBuildDiscordAudioLiveArchiveArgsResolvesInternalInputTarget(t *testing.
 	}
 	if !strings.Contains(joined, "discord-opus.sdp") {
 		t.Fatalf("resolved SDP input missing: %#v", args)
+	}
+}
+
+func TestBuildWorkerVideoDiscordAudioArgsKeepsCredentialOutOfFFmpegAndAppliesWatermarkLast(t *testing.T) {
+	args := BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(
+		"internal_worker_video:tcp://127.0.0.1:41001",
+		"internal_discord_audio:C:/tmp/discord-opus.sdp",
+		"rtmp://127.0.0.1/autostream/stream-01",
+		"C:/tmp/final.mkv",
+		"C:/tmp/preview/index.m3u8",
+		"C:/tmp/progress.txt",
+		"C:/tmp/audio-stats.txt",
+		"C:/tmp/watermark.png",
+		DefaultProfile(),
+	)
+	joined := strings.Join(args, " ")
+	for _, forbidden := range []string{"internal_worker_video:", "passphrase", "worker-video-token"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("FFmpeg args expose internal credential material %q: %s", forbidden, joined)
+		}
+	}
+	for _, required := range []string{
+		"-f mpegts -i tcp://127.0.0.1:41001",
+		"-protocol_whitelist file,udp,rtp -i C:\\tmp\\discord-opus.sdp",
+		"[0:v]scale=1920:1080",
+		"[2:v]format=rgba,scale=1920:1080[wm]",
+		"[base][wm]overlay=0:0",
+		"-map [v] -map 1:a:0",
+		"-minrate:v 8000k -maxrate:v 8000k -bufsize:v 16000k",
+		"-f tee",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("missing %q in args: %s", required, joined)
+		}
+	}
+	if strings.Index(joined, "[0:v]scale=1920:1080") > strings.Index(joined, "[base][wm]overlay=0:0") {
+		t.Fatalf("watermark must be applied after the Worker scene normalization: %s", joined)
 	}
 }
 
@@ -191,7 +228,7 @@ func TestBuildDiscordAudioLiveArchiveArgsWithWatermarkAddsThirdInput(t *testing.
 		DefaultProfile(),
 	)
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"-loop 1", ".watermark-01.webp", "[2:v]", "overlay=W-w-32:H-h-32", "[v]"} {
+	for _, want := range []string{"-loop 1", ".watermark-01.webp", "[2:v]format=rgba,scale=1920:1080[wm]", "[base][wm]overlay=0:0", "[v]"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("Discord watermark composition missing %q: %#v", want, args)
 		}

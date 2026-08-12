@@ -1,8 +1,10 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -175,6 +177,21 @@ func TestServiceCapabilitiesAdvertiseNonSecretOutputRelayMode(t *testing.T) {
 	}
 }
 
+func TestServiceCapabilitiesAdvertiseWorkerVideoSRTOnlyWhenRouteIsConfigured(t *testing.T) {
+	t.Setenv("AUTOSTREAM_ENV", "production")
+	t.Setenv("AUTOSTREAM_WORKER_VIDEO_BIND_ADDR", "")
+	t.Setenv("AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST", "")
+	if _, ok := serviceCapabilities()["worker_video_ingest_srt"]; ok {
+		t.Fatal("unconfigured production service must not advertise Worker video SRT ingest")
+	}
+
+	t.Setenv("AUTOSTREAM_WORKER_VIDEO_BIND_ADDR", "0.0.0.0:10080")
+	t.Setenv("AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST", "encoder.example.com")
+	if got := serviceCapabilities()["worker_video_ingest_srt"]; got != true {
+		t.Fatalf("configured Worker video SRT capability = %#v, want true", got)
+	}
+}
+
 func TestReportArtifactsPostsLogicalPathsOnly(t *testing.T) {
 	var got ArtifactReport
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +217,139 @@ func TestReportArtifactsPostsLogicalPathsOnly(t *testing.T) {
 	if strings.Contains(string(body), `C:\`) || strings.Contains(string(body), "/var/lib/") {
 		t.Fatalf("local path leaked in artifact report: %s", body)
 	}
+}
+
+func TestReportArtifactsRetriesTransientHTTPFailure(t *testing.T) {
+	for _, statusCode := range []int{
+		http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
+	} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if calls == 1 {
+					writeJSONError(w, statusCode, "temporary_failure")
+					return
+				}
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			defer server.Close()
+
+			client := Client{Config: Config{ControlPanelURL: server.URL, Token: "secret-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: server.URL}}
+			artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
+			if err := client.ReportArtifacts(t.Context(), "stream-01", artifacts); err != nil {
+				t.Fatalf("ReportArtifacts() error = %v", err)
+			}
+			if calls != 2 {
+				t.Fatalf("request calls = %d, want 2", calls)
+			}
+		})
+	}
+}
+
+func TestReportArtifactsRetriesTransportFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	calls := 0
+	client := Client{
+		Config: Config{ControlPanelURL: server.URL, Token: "secret-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: server.URL},
+		HTTP: &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				return nil, errors.New("connection reset by peer")
+			}
+			return http.DefaultTransport.RoundTrip(req)
+		})},
+	}
+	artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
+	if err := client.ReportArtifacts(t.Context(), "stream-01", artifacts); err != nil {
+		t.Fatalf("ReportArtifacts() error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("request calls = %d, want 2", calls)
+	}
+}
+
+func TestReportArtifactsDoesNotRetryPermanentHTTPFailure(t *testing.T) {
+	for _, statusCode := range []int{http.StatusBadRequest, http.StatusConflict} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				writeJSONError(w, statusCode, "permanent_failure")
+			}))
+			defer server.Close()
+
+			client := Client{Config: Config{ControlPanelURL: server.URL, Token: "secret-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: server.URL}}
+			artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
+			err := client.ReportArtifacts(t.Context(), "stream-01", artifacts)
+			var panelErr ControlPanelError
+			if !errors.As(err, &panelErr) || panelErr.StatusCode != statusCode {
+				t.Fatalf("ReportArtifacts() error = %v, want HTTP %d ControlPanelError", err, statusCode)
+			}
+			if calls != 1 {
+				t.Fatalf("request calls = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestReportArtifactsBoundsTransientRetries(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		writeJSONError(w, http.StatusServiceUnavailable, "temporary_failure")
+	}))
+	defer server.Close()
+
+	client := Client{Config: Config{ControlPanelURL: server.URL, Token: "secret-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: server.URL}}
+	artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
+	err := client.ReportArtifacts(t.Context(), "stream-01", artifacts)
+	var panelErr ControlPanelError
+	if !errors.As(err, &panelErr) || panelErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("ReportArtifacts() error = %v, want HTTP 503 ControlPanelError", err)
+	}
+	if calls != artifactReportMaxAttempts {
+		t.Fatalf("request calls = %d, want %d", calls, artifactReportMaxAttempts)
+	}
+}
+
+func TestReportArtifactsStopsRetryWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		cancel()
+		writeJSONError(w, http.StatusServiceUnavailable, "temporary_failure")
+	}))
+	defer server.Close()
+
+	client := Client{Config: Config{ControlPanelURL: server.URL, Token: "secret-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: server.URL}}
+	artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
+	if err := client.ReportArtifacts(ctx, "stream-01", artifacts); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReportArtifacts() error = %v, want context canceled", err)
+	}
+	if calls != 1 {
+		t.Fatalf("request calls = %d, want 1", calls)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func writeJSONError(w http.ResponseWriter, statusCode int, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_, _ = io.WriteString(w, `{"code":"`+code+`"}`)
 }
 
 func TestReportSignalPostsViaControlPanel(t *testing.T) {

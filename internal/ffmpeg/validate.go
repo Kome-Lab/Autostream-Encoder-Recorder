@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
+	"github.com/example/autostream-encoder-recorder/internal/videoingest"
 )
 
 var ErrUnsafeOutputTarget = errors.New("unsafe ffmpeg output target")
@@ -73,6 +74,12 @@ func ValidateInputTarget(inputURL string) error {
 		}
 		return nil
 	}
+	if _, ok := videoingest.ResolveInputTarget(inputURL); ok {
+		return nil
+	}
+	if strings.HasPrefix(inputURL, "internal_worker_video:") {
+		return ErrUnsafeInputTarget
+	}
 	parsed, err := url.Parse(inputURL)
 	if err != nil {
 		return ErrUnsafeInputTarget
@@ -115,7 +122,7 @@ func ValidateInputTargetWithAllowedHosts(inputURL string, allowedHosts []string)
 		return err
 	}
 	allowedHosts = normalizeHostPatterns(allowedHosts)
-	if len(allowedHosts) == 0 || strings.HasPrefix(strings.TrimSpace(inputURL), "internal_discord_audio:") {
+	if len(allowedHosts) == 0 || strings.HasPrefix(strings.TrimSpace(inputURL), "internal_discord_audio:") || strings.HasPrefix(strings.TrimSpace(inputURL), "internal_worker_video:") {
 		return nil
 	}
 	parsed, err := url.Parse(strings.TrimSpace(inputURL))
@@ -143,7 +150,7 @@ func ValidateInputTargetWithRuntimePolicy(ctx context.Context, inputURL string, 
 		return err
 	}
 	inputURL = strings.TrimSpace(inputURL)
-	if strings.HasPrefix(inputURL, "internal_discord_audio:") {
+	if strings.HasPrefix(inputURL, "internal_discord_audio:") || strings.HasPrefix(inputURL, "internal_worker_video:") {
 		return nil
 	}
 	if policy.RequireAllowedHosts && len(normalizeHostPatterns(allowedHosts)) == 0 {
@@ -267,6 +274,9 @@ func ResolveInputTarget(inputURL string) string {
 	inputURL = strings.TrimSpace(inputURL)
 	if strings.HasPrefix(inputURL, "internal_discord_audio:") {
 		return filepath.Clean(strings.TrimPrefix(inputURL, "internal_discord_audio:"))
+	}
+	if target, ok := videoingest.ResolveInputTarget(inputURL); ok {
+		return target
 	}
 	return inputURL
 }

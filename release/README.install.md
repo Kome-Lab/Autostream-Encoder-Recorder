@@ -67,6 +67,17 @@ installer-owned implementation details used by managed update and rollback.
 Do not create or edit their release directories or marker files manually.
 
 Review the non-secret host settings in `/etc/autostream/encoder-recorder.env`.
+
+For Worker-rendered video, normally set
+`AUTOSTREAM_WORKER_VIDEO_BIND_ADDR=0.0.0.0:10080` and set
+`AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST` to the Encoder host name or IP that
+the assigned Worker can reach. Port `0` is also accepted for dynamic allocation
+in development. Production does not advertise the `worker_video_ingest_srt`
+capability until both values are valid. Permit the configured UDP/SRT port
+between the assigned Worker and Encoder; do not place a passphrase in either
+setting. The per-job AES-256 passphrase is
+returned only in the authenticated start response and is never written to an
+SRT URL, FFmpeg arguments, service logs, or archive metadata.
 `AUTOSTREAM_BIND_ADDR` accepts an arbitrary unprivileged port from `1024`
 through `65535`; the shipped systemd env uses the standard IPv4 loopback value
 `127.0.0.1:8081`. The binary retains the legacy `127.0.0.1:8080` fallback only

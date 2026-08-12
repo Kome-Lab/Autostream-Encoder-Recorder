@@ -154,7 +154,7 @@ func TestManagerStartMaterializesWatermarkAndAddsOverlayFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(starter.args, " ")
-	if !strings.Contains(joined, "-filter_complex") || !strings.Contains(joined, "overlay=W-w-32:H-h-32") {
+	if !strings.Contains(joined, "-filter_complex") || !strings.Contains(joined, "scale=1920:1080[wm]") || !strings.Contains(joined, "overlay=0:0") {
 		t.Fatalf("watermark filter missing from FFmpeg args: %#v", starter.args)
 	}
 	if strings.Contains(joined, "data:image/") {
@@ -1490,8 +1490,20 @@ func TestManagerArtifactReportFailureDoesNotFailCompletedArchive(t *testing.T) {
 
 func TestManagerPackageFailureDoesNotReportGDriveUploadFailed(t *testing.T) {
 	reporter := &fakeReporter{}
+	artifactReporter := &fakeArtifactReporter{}
+	archiveRoot := t.TempDir()
+	layout, err := archive.NewLayout(archiveRoot, "stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.FinalDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.FinalMetadata(), []byte(`{"stream_id":"stream-01"}`+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	packager := &fakePackager{root: t.TempDir(), err: errors.New("remux failed")}
-	manager := &Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: &fakeStarter{}, Reporter: reporter, Packager: packager, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	manager := &Manager{ArchiveRoot: archiveRoot, FFmpegBin: "ffmpeg", Starter: &fakeStarter{}, Reporter: reporter, ArtifactReporter: artifactReporter, Packager: packager, InputResolver: testInputResolver, AllowHostnameInputs: true}
 	job := lifecycle.StreamJob{
 		StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key",
 		StartedAt: time.Date(2026, 5, 31, 1, 2, 3, 0, time.UTC),
@@ -1515,11 +1527,121 @@ func TestManagerPackageFailureDoesNotReportGDriveUploadFailed(t *testing.T) {
 			if reporter.has("gdrive.upload_status") {
 				t.Fatalf("package failure must not be reported as gdrive upload failure: %#v", reporter.names())
 			}
+			if artifactReporter.callCount() != 0 {
+				t.Fatalf("package failure without final.mp4 must not report artifacts: %#v", artifactReporter.calls)
+			}
 			return
 		}
 		select {
 		case <-deadline:
 			t.Fatalf("archive failure was not reported: %#v", status)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestManagerPackageFailureReportsExistingLocalArtifactsWithoutChangingFailure(t *testing.T) {
+	reporter := &fakeReporter{}
+	artifactReporter := &fakeArtifactReporter{}
+	root := t.TempDir()
+	packageErr := lifecycle.PackageError{Phase: "upload", Err: errors.New("drive upload failed")}
+	packager := &fakePackager{root: root, err: packageErr, artifactsBeforeError: true}
+	manager := &Manager{
+		ArchiveRoot:         filepath.Join(root, "archives"),
+		FFmpegBin:           "ffmpeg",
+		Starter:             &fakeStarter{},
+		Reporter:            reporter,
+		ArtifactReporter:    artifactReporter,
+		Packager:            packager,
+		InputResolver:       testInputResolver,
+		AllowHostnameInputs: true,
+	}
+	job := lifecycle.StreamJob{
+		StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key",
+		StartedAt: time.Date(2026, 5, 31, 1, 2, 3, 0, time.UTC),
+	}
+	if _, err := manager.Start(job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Stop(job.StreamID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		status, err := manager.Status(job.StreamID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.Status == "package_failed" {
+			if status.Error != lifecycle.SafeErrorSummary(packageErr) {
+				t.Fatalf("package failure was replaced: got %q want %q", status.Error, lifecycle.SafeErrorSummary(packageErr))
+			}
+			for _, name := range []string{"final.mp4", "metadata.json"} {
+				if !artifactReporter.calledWith(job.StreamID, name) {
+					t.Fatalf("existing local artifact %s was not reported: %#v", name, artifactReporter.calls)
+				}
+			}
+			if !reporter.has("archive.artifact_report.completed") {
+				t.Fatalf("missing artifact report completion signal: %#v", reporter.names())
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("archive failure was not reported after local artifact reporting: %#v", status)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestManagerPackageFailureArtifactReportFailurePreservesOriginalFailure(t *testing.T) {
+	reporter := &fakeReporter{}
+	artifactReporter := &fakeArtifactReporter{err: errors.New("control panel unavailable")}
+	root := t.TempDir()
+	packageErr := lifecycle.PackageError{Phase: "retention", Err: errors.New("retention failed")}
+	manager := &Manager{
+		ArchiveRoot:         filepath.Join(root, "archives"),
+		FFmpegBin:           "ffmpeg",
+		Starter:             &fakeStarter{},
+		Reporter:            reporter,
+		ArtifactReporter:    artifactReporter,
+		Packager:            &fakePackager{root: root, err: packageErr, artifactsBeforeError: true},
+		InputResolver:       testInputResolver,
+		AllowHostnameInputs: true,
+	}
+	job := lifecycle.StreamJob{
+		StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key",
+		StartedAt: time.Date(2026, 5, 31, 1, 2, 3, 0, time.UTC),
+	}
+	if _, err := manager.Start(job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Stop(job.StreamID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		status, err := manager.Status(job.StreamID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.Status == "package_failed" {
+			if status.Error != lifecycle.SafeErrorSummary(packageErr) {
+				t.Fatalf("artifact report failure replaced package failure: got %q want %q", status.Error, lifecycle.SafeErrorSummary(packageErr))
+			}
+			if !artifactReporter.calledWith(job.StreamID, "final.mp4") {
+				t.Fatalf("existing final.mp4 was not submitted before report failure: %#v", artifactReporter.calls)
+			}
+			if !reporter.has("archive.artifact_report.failed") {
+				t.Fatalf("missing artifact report warning: %#v", reporter.names())
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("package failure was not preserved after artifact report failure: %#v", status)
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -1621,11 +1743,12 @@ type fakeReporter struct {
 }
 
 type fakePackager struct {
-	mu    sync.Mutex
-	root  string
-	err   error
-	delay time.Duration
-	jobs  []lifecycle.PackageJob
+	mu                   sync.Mutex
+	root                 string
+	err                  error
+	delay                time.Duration
+	artifactsBeforeError bool
+	jobs                 []lifecycle.PackageJob
 }
 
 type artifactReportCall struct {
@@ -1668,6 +1791,12 @@ func (r *fakeArtifactReporter) calledWith(streamID, name string) bool {
 	return false
 }
 
+func (r *fakeArtifactReporter) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
+}
+
 func (p *fakePackager) Package(ctx context.Context, job lifecycle.PackageJob) (lifecycle.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return lifecycle.Result{}, err
@@ -1682,7 +1811,7 @@ func (p *fakePackager) Package(ctx context.Context, job lifecycle.PackageJob) (l
 		case <-time.After(p.delay):
 		}
 	}
-	if p.err != nil {
+	if p.err != nil && !p.artifactsBeforeError {
 		return lifecycle.Result{}, p.err
 	}
 	layout, err := archive.NewLayout(filepath.Join(p.root, "archives"), job.StreamID)
@@ -1697,6 +1826,9 @@ func (p *fakePackager) Package(ctx context.Context, job lifecycle.PackageJob) (l
 	}
 	if err := os.WriteFile(layout.FinalMetadata(), []byte(`{"stream_id":"`+job.StreamID+`"}`+"\n"), 0o640); err != nil {
 		return lifecycle.Result{}, err
+	}
+	if p.err != nil {
+		return lifecycle.Result{}, p.err
 	}
 	return lifecycle.Result{
 		Layout: layout,

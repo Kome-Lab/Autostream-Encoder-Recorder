@@ -31,6 +31,7 @@ type StreamJob struct {
 	Name                 string         `json:"name"`
 	InputURL             string         `json:"input_url"`
 	InputMode            string         `json:"input_mode,omitempty"`
+	AudioInputURL        string         `json:"-"`
 	RTMPURL              string         `json:"rtmp_url"`
 	StreamKey            string         `json:"stream_key,omitempty"`
 	StreamKeySecretName  string         `json:"stream_key_secret_name,omitempty"`
@@ -488,6 +489,9 @@ func BuildLiveArgsToOutputTargetWithPreview(job StreamJob, outputTarget, archive
 }
 
 func BuildLiveArgsToOutputTargetWithPreviewAndOverlay(job StreamJob, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath string, profile ffmpeg.EncoderProfile) []string {
+	if job.InputMode == "worker_scene_srt" {
+		return ffmpeg.BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(job.InputURL, job.AudioInputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath, profile)
+	}
 	if job.InputMode == "discord_opus_rtp" {
 		return ffmpeg.BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWatermark(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkPath, profile)
 	}

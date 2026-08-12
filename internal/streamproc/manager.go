@@ -125,6 +125,7 @@ type Manager struct {
 	OutputRelayMode          string
 	OutputRelayBindingID     string
 	RequireOutputRelay       bool
+	ProcessExitHook          func(streamID string)
 
 	mu        sync.Mutex
 	processes map[string]*trackedProcess
@@ -378,6 +379,20 @@ func clearUnusedYouTubeOutputTarget(job *lifecycle.StreamJob) {
 }
 
 func (m *Manager) validateInputForLayout(job lifecycle.StreamJob, layout archive.Layout) error {
+	if job.InputMode == "worker_scene_srt" {
+		if !strings.HasPrefix(strings.TrimSpace(job.InputURL), "internal_worker_video:") {
+			return ffmpeg.ErrUnsafeInputTarget
+		}
+		if !strings.HasPrefix(strings.TrimSpace(job.AudioInputURL), "internal_discord_audio:") {
+			return ffmpeg.ErrUnsafeInputTarget
+		}
+		got := filepath.Clean(ffmpeg.ResolveInputTarget(job.AudioInputURL))
+		want := filepath.Clean(layout.TmpDiscordOpusSDP())
+		if got != want {
+			return ffmpeg.ErrUnsafeInputTarget
+		}
+		return nil
+	}
 	if job.InputMode == "discord_opus_rtp" {
 		if !strings.HasPrefix(strings.TrimSpace(job.InputURL), "internal_discord_audio:") {
 			return ffmpeg.ErrUnsafeInputTarget
@@ -390,6 +405,9 @@ func (m *Manager) validateInputForLayout(job lifecycle.StreamJob, layout archive
 		return nil
 	}
 	if strings.HasPrefix(strings.TrimSpace(job.InputURL), "internal_discord_audio:") {
+		return ffmpeg.ErrUnsafeInputTarget
+	}
+	if strings.HasPrefix(strings.TrimSpace(job.InputURL), "internal_worker_video:") || strings.TrimSpace(job.AudioInputURL) != "" {
 		return ffmpeg.ErrUnsafeInputTarget
 	}
 	return nil
@@ -645,6 +663,9 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 	}
 	scrubTrackedProcessJob(tracked)
 	m.mu.Unlock()
+	if m.ProcessExitHook != nil {
+		m.ProcessExitHook(streamID)
+	}
 	m.report(signal)
 	m.reportMetric(streamID, "encoder.process_alive", 0)
 	if shouldPackage {
@@ -749,6 +770,46 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 			Timestamp:  time.Now().UTC(),
 			Attributes: packageFailureAttributes(err),
 		})
+		if m.ArtifactReporter != nil {
+			layout, layoutErr := archive.NewLayout(m.ArchiveRoot, job.StreamID)
+			if layoutErr == nil {
+				artifacts := control.ArchiveArtifacts(layout)
+				finalMP4Exists := false
+				for _, artifact := range artifacts {
+					if artifact.Name == "final.mp4" {
+						finalMP4Exists = true
+						break
+					}
+				}
+				if finalMP4Exists {
+					reportCtx, cancelReport := context.WithTimeout(context.Background(), m.artifactReportTimeout())
+					reportErr := m.ArtifactReporter.ReportArtifacts(reportCtx, job.StreamID, artifacts)
+					cancelReport()
+					if reportErr != nil {
+						m.report(observability.Signal{
+							Type:      "warning",
+							Name:      "archive.artifact_report.failed",
+							StreamID:  job.StreamID,
+							Status:    "warning",
+							Timestamp: time.Now().UTC(),
+							Attributes: map[string]any{
+								"artifact_count": len(artifacts),
+								"error_class":    "control_panel_artifact_report_failed",
+							},
+						})
+					} else {
+						m.report(observability.Signal{
+							Type:       "event",
+							Name:       "archive.artifact_report.completed",
+							StreamID:   job.StreamID,
+							Status:     "completed",
+							Timestamp:  time.Now().UTC(),
+							Attributes: map[string]any{"artifact_count": len(artifacts)},
+						})
+					}
+				}
+			}
+		}
 		m.mu.Lock()
 		tracked, ok = m.processes[job.StreamID]
 		if ok {
@@ -830,6 +891,7 @@ func scrubTrackedProcessJob(tracked *trackedProcess) {
 	}
 	job := tracked.job
 	job.InputURL = ""
+	job.AudioInputURL = ""
 	job.RTMPURL = ""
 	job.StreamKey = ""
 	job.ArchiveConfig.FolderID = ""
