@@ -17,19 +17,31 @@ import (
 )
 
 type Event struct {
-	ID        string         `json:"id"`
-	StreamID  string         `json:"stream_id"`
-	ServiceID string         `json:"service_id,omitempty"`
-	Type      string         `json:"type"`
-	Payload   map[string]any `json:"payload"`
-	Timestamp time.Time      `json:"timestamp"`
+	ID         string         `json:"id"`
+	StreamID   string         `json:"stream_id"`
+	ServiceID  string         `json:"service_id,omitempty"`
+	Generation uint64         `json:"job_generation,omitempty"`
+	Attempt    uint32         `json:"attempt,omitempty"`
+	Type       string         `json:"type"`
+	Payload    map[string]any `json:"payload"`
+	Timestamp  time.Time      `json:"timestamp"`
 }
 
 type TranscriptEntry struct {
-	EventID       string    `json:"event_id"`
-	Timestamp     time.Time `json:"timestamp"`
-	Text          string    `json:"text"`
-	SpeakerUserID string    `json:"speaker_user_id,omitempty"`
+	EventID            string    `json:"event_id"`
+	UtteranceID        string    `json:"utterance_id,omitempty"`
+	Revision           int       `json:"revision,omitempty"`
+	Timestamp          time.Time `json:"timestamp"`
+	StartedAt          time.Time `json:"started_at,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at,omitempty"`
+	EndedAt            time.Time `json:"ended_at,omitempty"`
+	Text               string    `json:"text"`
+	SpeakerUserID      string    `json:"speaker_user_id,omitempty"`
+	SpeakerDisplayName string    `json:"speaker_display_name,omitempty"`
+	Confidence         float64   `json:"confidence,omitempty"`
+	FinalizationReason string    `json:"finalization_reason,omitempty"`
+	Source             string    `json:"source,omitempty"`
+	Final              bool      `json:"is_final"`
 }
 
 type Result struct {
@@ -44,19 +56,20 @@ type Result struct {
 }
 
 type Manager struct {
-	ArchiveRoot string
-	mu          sync.Mutex
-	recent      map[string][]Event
-	seen        map[string]time.Time
-	maxRecent   int
-	maxSeen     int
+	ArchiveRoot      string
+	mu               sync.Mutex
+	recent           map[string][]Event
+	seen             map[string]time.Time
+	maxRecent        int
+	maxSeen          int
+	latestGeneration map[string]uint64
 }
 
 func NewManager(archiveRoot string) *Manager {
 	if archiveRoot == "" {
 		archiveRoot = "/var/lib/autostream/archives"
 	}
-	return &Manager{ArchiveRoot: archiveRoot, recent: map[string][]Event{}, seen: map[string]time.Time{}, maxRecent: 200, maxSeen: 2000}
+	return &Manager{ArchiveRoot: archiveRoot, recent: map[string][]Event{}, seen: map[string]time.Time{}, latestGeneration: map[string]uint64{}, maxRecent: 200, maxSeen: 2000}
 }
 
 func (m *Manager) Add(event Event) (Result, error) {
@@ -89,6 +102,14 @@ func (m *Manager) Add(event Event) (Result, error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if event.Generation > 0 {
+		if latest := m.latestGeneration[event.StreamID]; latest > 0 && event.Generation < latest {
+			return Result{}, errors.New("stale worker event generation")
+		}
+		if event.Generation > m.latestGeneration[event.StreamID] {
+			m.latestGeneration[event.StreamID] = event.Generation
+		}
+	}
 
 	if key := eventDedupeKey(event); key != "" {
 		if _, ok := m.seen[key]; ok {
@@ -103,13 +124,14 @@ func (m *Manager) Add(event Event) (Result, error) {
 		"event":     "worker.event.received",
 		"stream_id": event.StreamID,
 		"event_id":  event.ID,
+		"attempt":   event.Attempt,
 		"type":      event.Type,
 		"payload":   event.Payload,
 	}); err != nil {
 		return Result{}, err
 	}
 	result := Result{Accepted: true, StreamID: event.StreamID, EventID: event.ID, EventType: event.Type, LogsArtifact: "logs.jsonl"}
-	if event.Type == "caption.telop" || event.Type == "caption.final" {
+	if event.Type == "caption.final" {
 		if err := m.appendCaption(layout, event); err != nil {
 			return Result{}, err
 		}
@@ -144,15 +166,83 @@ func (m *Manager) appendCaption(layout archive.Layout, event Event) error {
 	}
 	start := event.Timestamp.UTC()
 	end := start.Add(4 * time.Second)
-	cue := fmt.Sprintf("\n%s --> %s\n%s\n", formatVTTTime(start), formatVTTTime(end), sanitizeCaptionText(text))
+	if raw, ok := event.Payload["started_at"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); err == nil {
+			start = parsed.UTC()
+		}
+	}
+	if raw, ok := event.Payload["ended_at"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); err == nil {
+			end = parsed.UTC()
+		}
+	}
+	if !end.After(start) {
+		end = start.Add(4 * time.Second)
+	}
+	if end.Sub(start) > 10*time.Minute {
+		end = start.Add(10 * time.Minute)
+	}
+	speakerName := firstPayloadString(event.Payload, "speaker_display_name", "display_name")
+	cueText := text
+	if speakerName != "" {
+		cueText = speakerName + ": " + text
+	}
+	cue := fmt.Sprintf("\n%s --> %s\n%s\n", formatVTTTime(start), formatVTTTime(end), sanitizeCaptionText(cueText))
 	if err := appendFile(layout.TmpCaptions(), []byte(cue)); err != nil {
 		return err
 	}
-	entry := TranscriptEntry{EventID: event.ID, Timestamp: start, Text: text}
-	if speaker, ok := event.Payload["speaker_user_id"].(string); ok {
-		entry.SpeakerUserID = speaker
+	entry := TranscriptEntry{
+		EventID:            event.ID,
+		UtteranceID:        firstPayloadString(event.Payload, "utterance_id"),
+		Revision:           payloadInt(event.Payload, "revision"),
+		Timestamp:          event.Timestamp.UTC(),
+		StartedAt:          start,
+		UpdatedAt:          payloadTime(event.Payload, "updated_at", event.Timestamp),
+		EndedAt:            end,
+		Text:               text,
+		SpeakerUserID:      firstPayloadString(event.Payload, "speaker_user_id"),
+		SpeakerDisplayName: speakerName,
+		Confidence:         payloadFloat(event.Payload, "confidence"),
+		FinalizationReason: firstPayloadString(event.Payload, "finalization_reason"),
+		Source:             firstPayloadString(event.Payload, "source"),
+		Final:              true,
 	}
 	return appendTranscript(layout.TmpTranscript(), entry)
+}
+
+func firstPayloadString(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func payloadInt(payload map[string]any, key string) int {
+	switch value := payload[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	}
+	return 0
+}
+
+func payloadFloat(payload map[string]any, key string) float64 {
+	value, _ := payload[key].(float64)
+	return value
+}
+
+func payloadTime(payload map[string]any, key string, fallback time.Time) time.Time {
+	if raw, ok := payload[key].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw)); err == nil {
+			return parsed.UTC()
+		}
+	}
+	return fallback.UTC()
 }
 
 func (m *Manager) remember(event Event) {
@@ -163,6 +253,11 @@ func (m *Manager) remember(event Event) {
 }
 
 func eventDedupeKey(event Event) string {
+	if event.Type == "caption.final" {
+		if utteranceID := firstPayloadString(event.Payload, "utterance_id"); utteranceID != "" {
+			return event.StreamID + "\x00caption.final\x00" + utteranceID
+		}
+	}
 	id := strings.TrimSpace(event.ID)
 	if id == "" {
 		return ""
