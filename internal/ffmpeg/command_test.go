@@ -97,6 +97,9 @@ func TestBuildDiscordAudioLiveArchiveArgsWithProgress(t *testing.T) {
 	if !strings.Contains(joined, "eof_action=repeat:repeatlast=1:shortest=0") || strings.Contains(joined, "shortest=1") {
 		t.Fatalf("Discord audio waveform must keep the background alive during silence: %#v", args)
 	}
+	if strings.Contains(joined, "-filter:a") || !strings.Contains(joined, "[aout]astats=metadata=1:reset=1,ametadata=print:file=/tmp/audio-stats.txt[aout_stats]") || !strings.Contains(joined, "-map [aout_stats]") {
+		t.Fatalf("Discord audio stats must stay inside the complex filtergraph: %#v", args)
+	}
 	if strings.Contains(joined, " sh ") {
 		t.Fatalf("unexpected shell-style args: %#v", args)
 	}
@@ -137,13 +140,18 @@ func TestBuildWorkerVideoDiscordAudioArgsKeepsCredentialOutOfFFmpegAndAppliesWat
 		"[0:v]scale=1920:1080",
 		"[3:v]format=rgba,scale=1920:1080[wm]",
 		"[base][wm]overlay=0:0",
-		"-map [v] -map [aout]",
+		"-map [v] -map [aout_stats]",
 		"-minrate:v 8000k -maxrate:v 8000k -bufsize:v 16000k",
 		"-f tee",
+		"[aout]astats=metadata=1:reset=1,ametadata=print:file=C:/tmp/audio-stats.txt[aout_stats]",
+		"-map [aout_stats]",
 	} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("missing %q in args: %s", required, joined)
 		}
+	}
+	if strings.Contains(joined, "-filter:a") {
+		t.Fatalf("Worker video audio stats must not use a simple filter with complex output: %s", joined)
 	}
 	if strings.Index(joined, "[0:v]scale=1920:1080") > strings.Index(joined, "[base][wm]overlay=0:0") {
 		t.Fatalf("watermark must be applied after the Worker scene normalization: %s", joined)

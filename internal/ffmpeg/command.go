@@ -134,9 +134,13 @@ func buildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(audioSDPP
 			filter = discordAudioWatermarkFilterWithSilence(p)
 		}
 	}
+	audioMap := "[aout]"
+	if strings.TrimSpace(audioStatsPath) != "" {
+		filter, audioMap = appendComplexAudioStats(filter, audioStatsPath)
+	}
 	args = append(args,
 		"-filter_complex", filter,
-		"-map", "[v]", "-map", "[aout]",
+		"-map", "[v]", "-map", audioMap,
 		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
 		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
 		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
@@ -145,9 +149,6 @@ func buildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(audioSDPP
 	)
 	if progressPath != "" {
 		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
-	}
-	if audioStatsPath != "" {
-		args = append(args, "-filter:a", audioStatsFilter(audioStatsPath))
 	}
 	return append(args, "-f", "tee", buildLiveTeeOutput(outputTarget, output, previewPlaylistPath))
 }
@@ -187,9 +188,13 @@ func buildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSetting
 			filter = workerSceneFilterWithSilenceAndWatermark(p)
 		}
 	}
+	audioMap := "[aout]"
+	if strings.TrimSpace(audioStatsPath) != "" {
+		filter, audioMap = appendComplexAudioStats(filter, audioStatsPath)
+	}
 	args = append(args,
 		"-filter_complex", filter,
-		"-map", "[v]", "-map", "[aout]",
+		"-map", "[v]", "-map", audioMap,
 		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
 		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
 		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
@@ -198,9 +203,6 @@ func buildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSetting
 	)
 	if progressPath != "" {
 		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
-	}
-	if audioStatsPath != "" {
-		args = append(args, "-filter:a", audioStatsFilter(audioStatsPath))
 	}
 	return append(args, "-f", "tee", buildLiveTeeOutput(outputTarget, output, previewPlaylistPath))
 }
@@ -385,4 +387,8 @@ func itoa(v int) string {
 
 func audioStatsFilter(path string) string {
 	return "astats=metadata=1:reset=1,ametadata=print:file=" + filepath.ToSlash(filepath.Clean(path))
+}
+
+func appendComplexAudioStats(filter, path string) (string, string) {
+	return filter + ";[aout]" + audioStatsFilter(path) + "[aout_stats]", "[aout_stats]"
 }
