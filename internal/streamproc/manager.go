@@ -57,11 +57,60 @@ type RunningProcess interface {
 
 type ExecStarter struct{}
 
+const maxFFmpegStderrBytes = 8 << 10
+
+// boundedStderr keeps only the tail of FFmpeg stderr.  FFmpeg reports the
+// useful failure near the end of its diagnostic output, while an unbounded
+// pipe would allow a failed process to grow the Encoder's memory usage.
+type boundedStderr struct {
+	mu        sync.Mutex
+	data      []byte
+	truncated bool
+}
+
+func (b *boundedStderr) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(p) >= maxFFmpegStderrBytes {
+		b.data = append(b.data[:0], p[len(p)-maxFFmpegStderrBytes:]...)
+		b.truncated = true
+		return len(p), nil
+	}
+	b.data = append(b.data, p...)
+	if len(b.data) > maxFFmpegStderrBytes {
+		drop := len(b.data) - maxFFmpegStderrBytes
+		b.data = append([]byte(nil), b.data[drop:]...)
+		b.truncated = true
+	}
+	return len(p), nil
+}
+
+func (b *boundedStderr) String() string {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	text := strings.TrimSpace(string(b.data))
+	if text == "" {
+		return ""
+	}
+	if b.truncated {
+		return "[truncated] " + text
+	}
+	return text
+}
+
 func (ExecStarter) Start(ctx context.Context, bin string, args []string) (RunningProcess, error) {
 	if strings.TrimSpace(bin) == "" {
 		return nil, errors.New("ffmpeg binary is required")
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
+	stderr := &boundedStderr{}
+	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -69,12 +118,13 @@ func (ExecStarter) Start(ctx context.Context, bin string, args []string) (Runnin
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	return &execProcess{cmd: cmd, stdin: stdin}, nil
+	return &execProcess{cmd: cmd, stdin: stdin, stderr: stderr}, nil
 }
 
 type execProcess struct {
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
+	stderr  *boundedStderr
 	stdinMu sync.Mutex
 }
 
@@ -91,6 +141,13 @@ func (p *execProcess) PID() int {
 
 func (p *execProcess) Wait() error {
 	return p.cmd.Wait()
+}
+
+func (p *execProcess) Stderr() string {
+	if p == nil {
+		return ""
+	}
+	return p.stderr.String()
 }
 
 func (p *execProcess) Command(target, command, argument string) error {
@@ -727,18 +784,29 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 	}
 	tracked.snapshot.StoppedAtJST = time.Now().In(jst()).Format(time.RFC3339)
 	if err != nil && tracked.snapshot.Status != "stopping" {
-		redactedError := redaction.Message(err.Error(), tracked.job.StreamKey, tracked.job.InputURL, tracked.job.RTMPURL, tracked.job.RTMPURL+"/"+tracked.job.StreamKey)
+		stderr := processStderr(process)
+		redactedError, errorClass := redactedProcessExit(err, stderr, tracked.job)
 		tracked.snapshot.Status = "failed"
 		tracked.snapshot.Error = redactedError
+		attributes := map[string]any{
+			"error":       redactedError,
+			"error_class": errorClass,
+		}
+		if exitCode, ok := processExitCode(err); ok {
+			attributes["exit_code"] = exitCode
+		}
+		if stderr != "" {
+			if safeStderr := redactedProcessStderr(stderr, tracked.job); safeStderr != "" {
+				attributes["stderr_tail"] = safeStderr
+			}
+		}
 		signal = observability.Signal{
-			Type:      "error",
-			Name:      "encoder.process.exited",
-			StreamID:  streamID,
-			Status:    "failed",
-			Timestamp: time.Now().UTC(),
-			Attributes: map[string]any{
-				"error": redactedError,
-			},
+			Type:       "error",
+			Name:       "encoder.process.exited",
+			StreamID:   streamID,
+			Status:     "failed",
+			Timestamp:  time.Now().UTC(),
+			Attributes: attributes,
 		}
 	} else {
 		shouldPackage = m.Packager != nil
@@ -770,6 +838,84 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 	m.reportMetric(streamID, "encoder.process_alive", 0)
 	if shouldPackage {
 		m.packageArchive(packageJob)
+	}
+}
+
+type stderrProvider interface {
+	Stderr() string
+}
+
+func processStderr(process RunningProcess) string {
+	provider, ok := process.(stderrProvider)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(provider.Stderr())
+}
+
+func processExitCode(err error) (int, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return 0, false
+	}
+	code := exitErr.ExitCode()
+	return code, code >= 0
+}
+
+func redactedProcessStderr(stderr string, job lifecycle.StreamJob) string {
+	return strings.TrimSpace(redaction.Diagnostic(stderr,
+		job.StreamKey,
+		job.InputURL,
+		job.AudioInputURL,
+		job.WatermarkInputURL,
+		job.RTMPURL,
+		job.RTMPURL+"/"+job.StreamKey,
+	))
+}
+
+func redactedProcessExit(err error, stderr string, job lifecycle.StreamJob) (string, string) {
+	base := redaction.Diagnostic(err.Error(),
+		job.StreamKey,
+		job.InputURL,
+		job.AudioInputURL,
+		job.WatermarkInputURL,
+		job.RTMPURL,
+		job.RTMPURL+"/"+job.StreamKey,
+	)
+	safeStderr := redactedProcessStderr(stderr, job)
+	if safeStderr != "" {
+		base = strings.TrimSpace(base + ": " + safeStderr)
+	}
+	return base, classifyProcessExit(safeStderr)
+}
+
+func classifyProcessExit(stderr string) string {
+	lower := strings.ToLower(stderr)
+	switch {
+	case lower == "":
+		return "process_exit"
+	case strings.Contains(lower, "connection refused"),
+		strings.Contains(lower, "connection reset"),
+		strings.Contains(lower, "timed out"),
+		strings.Contains(lower, "network is unreachable"):
+		return "transport"
+	case strings.Contains(lower, "error opening output"),
+		strings.Contains(lower, "failed to open output"),
+		strings.Contains(lower, "permission denied"):
+		return "output_init"
+	case strings.Contains(lower, "error initializing filter"),
+		strings.Contains(lower, "failed to configure filter"):
+		return "filter_init"
+	case strings.Contains(lower, "invalid data found"),
+		strings.Contains(lower, "error while decoding"),
+		strings.Contains(lower, "could not find codec"):
+		return "input_decode"
+	case strings.Contains(lower, "rtmp"),
+		strings.Contains(lower, "rtmps"),
+		strings.Contains(lower, "handshake"):
+		return "relay"
+	default:
+		return "ffmpeg_exit"
 	}
 }
 

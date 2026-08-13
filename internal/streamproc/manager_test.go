@@ -24,6 +24,24 @@ type recordingWriteCloser struct{ bytes.Buffer }
 
 func (*recordingWriteCloser) Close() error { return nil }
 
+func TestBoundedStderrKeepsOnlyDiagnosticTail(t *testing.T) {
+	capture := &boundedStderr{}
+	input := strings.Repeat("x", maxFFmpegStderrBytes) + "Connection refused"
+	if written, err := capture.Write([]byte(input)); err != nil || written != len(input) {
+		t.Fatalf("Write() = (%d, %v), want (%d, nil)", written, err, len(input))
+	}
+	got := capture.String()
+	if !strings.HasPrefix(got, "[truncated] ") {
+		t.Fatalf("diagnostic was not marked truncated: %q", got)
+	}
+	if !strings.Contains(got, "Connection refused") {
+		t.Fatalf("diagnostic tail lost the useful failure: %q", got)
+	}
+	if len(got) > maxFFmpegStderrBytes+len("[truncated] ") {
+		t.Fatalf("diagnostic exceeded bounded size: %d", len(got))
+	}
+}
+
 func TestExecProcessCommandUsesImmediateFFmpegFilterCommandSyntax(t *testing.T) {
 	stdin := &recordingWriteCloser{}
 	process := &execProcess{stdin: stdin}
@@ -66,6 +84,7 @@ type fakeProcess struct {
 	terminated bool
 	killed     bool
 	commands   []string
+	stderr     string
 }
 
 func (p *fakeProcess) Command(target, command, argument string) error {
@@ -79,6 +98,10 @@ func (p *fakeProcess) PID() int {
 
 func (p *fakeProcess) Wait() error {
 	return <-p.done
+}
+
+func (p *fakeProcess) Stderr() string {
+	return p.stderr
 }
 
 func (p *fakeProcess) Terminate() error {
@@ -1315,6 +1338,57 @@ func TestManagerRedactsProcessExitError(t *testing.T) {
 			}
 			if !strings.Contains(attrError, "rtsp://input.example.com/<REDACTED>") {
 				t.Fatalf("expected host-only input URL in observability error: %s", attrError)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("process failure was not observed: %#v", status)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestManagerReportsSafeProcessExitDiagnostics(t *testing.T) {
+	reporter := &fakeReporter{}
+	starter := &fakeStarter{}
+	manager := &Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: starter, Reporter: reporter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	job := lifecycle.StreamJob{
+		StreamID:  "stream-01",
+		Name:      "Morning Stream",
+		InputURL:  "rtsp://camera:camera-password@input.example.com/live/path-token",
+		RTMPURL:   "rtmps://youtube.example.com/live2",
+		StreamKey: "secret-stream-key",
+	}
+	if _, err := manager.Start(job); err != nil {
+		t.Fatal(err)
+	}
+	starter.process.stderr = "[tcp] Connection refused while opening rtmps://youtube.example.com/live2/secret-stream-key"
+	starter.process.done <- errors.New("exit status 234")
+	deadline := time.After(2 * time.Second)
+	for {
+		status, err := manager.Status(job.StreamID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.Status == "failed" {
+			if strings.Contains(status.Error, "secret-stream-key") || strings.Contains(status.Error, "camera-password") {
+				t.Fatalf("process diagnostic leaked a secret: %s", status.Error)
+			}
+			signal, ok := reporter.find("encoder.process.exited")
+			if !ok {
+				t.Fatalf("missing process exited signal: %#v", reporter.names())
+			}
+			if got, want := signal.Attributes["error_class"], "transport"; got != want {
+				t.Fatalf("error class = %#v, want %q", got, want)
+			}
+			stderr, _ := signal.Attributes["stderr_tail"].(string)
+			if strings.Contains(stderr, "secret-stream-key") || strings.Contains(stderr, "camera-password") {
+				t.Fatalf("stderr diagnostic leaked a secret: %s", stderr)
+			}
+			if !strings.Contains(stderr, "Connection refused") {
+				t.Fatalf("stderr diagnostic missing safe failure text: %s", stderr)
 			}
 			return
 		}

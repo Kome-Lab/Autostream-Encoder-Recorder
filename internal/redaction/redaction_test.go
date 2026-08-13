@@ -34,6 +34,19 @@ func TestMessageRedactsSensitiveValuesAndMasksURLs(t *testing.T) {
 	}
 }
 
+func TestDiagnosticMasksUnknownURLsAndCredentialShapedValues(t *testing.T) {
+	message := "Authorization: Bearer bearer-secret rtmps://youtube.example.com/live2/stream-key ast_ingest_v1.payload.signature"
+	redacted := Diagnostic(message)
+	for _, secret := range []string{"bearer-secret", "stream-key", "ast_ingest_v1.payload.signature"} {
+		if strings.Contains(redacted, secret) {
+			t.Fatalf("diagnostic leaked %q: %s", secret, redacted)
+		}
+	}
+	if !strings.Contains(redacted, "rtmps://youtube.example.com/<REDACTED>") {
+		t.Fatalf("expected masked URL in diagnostic: %s", redacted)
+	}
+}
+
 func TestMaskSensitiveURLKeepsOnlySchemeAndHost(t *testing.T) {
 	tests := []struct {
 		name string
