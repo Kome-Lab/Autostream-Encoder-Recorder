@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"math"
 	"net/url"
 	"os"
@@ -442,6 +443,7 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	watermarkActive = false
 	reservationActive = false
 
+	log.Printf("encoder diagnostic: event=encoder.process.started stream_id=%s status=running", job.StreamID)
 	m.report(observability.Signal{
 		Type:      "event",
 		Name:      "encoder.process.started",
@@ -783,30 +785,34 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 		return
 	}
 	tracked.snapshot.StoppedAtJST = time.Now().In(jst()).Format(time.RFC3339)
-	if err != nil && tracked.snapshot.Status != "stopping" {
+	stopRequested := tracked.snapshot.Status == "stopping"
+	var terminationAttributes map[string]any
+	if err != nil {
 		stderr := processStderr(process)
 		redactedError, errorClass := redactedProcessExit(err, stderr, tracked.job)
-		tracked.snapshot.Status = "failed"
-		tracked.snapshot.Error = redactedError
-		attributes := map[string]any{
+		terminationAttributes = map[string]any{
 			"error":       redactedError,
 			"error_class": errorClass,
 		}
 		if exitCode, ok := processExitCode(err); ok {
-			attributes["exit_code"] = exitCode
+			terminationAttributes["exit_code"] = exitCode
 		}
 		if stderr != "" {
 			if safeStderr := redactedProcessStderr(stderr, tracked.job); safeStderr != "" {
-				attributes["stderr_tail"] = safeStderr
+				terminationAttributes["stderr_tail"] = safeStderr
 			}
 		}
+	}
+	if err != nil && !stopRequested {
+		tracked.snapshot.Status = "failed"
+		tracked.snapshot.Error = terminationAttributes["error"].(string)
 		signal = observability.Signal{
 			Type:       "error",
 			Name:       "encoder.process.exited",
 			StreamID:   streamID,
 			Status:     "failed",
 			Timestamp:  time.Now().UTC(),
-			Attributes: attributes,
+			Attributes: terminationAttributes,
 		}
 	} else {
 		shouldPackage = m.Packager != nil
@@ -817,11 +823,12 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 		}
 		packageJob = lifecycle.PackageJob{StreamID: tracked.job.StreamID, Name: tracked.job.Name, StartedAt: tracked.job.StartedAt, ArchiveConfig: tracked.job.ArchiveConfig}
 		signal = observability.Signal{
-			Type:      "event",
-			Name:      "encoder.process.stopped",
-			StreamID:  streamID,
-			Status:    "stopped",
-			Timestamp: time.Now().UTC(),
+			Type:       "event",
+			Name:       "encoder.process.stopped",
+			StreamID:   streamID,
+			Status:     "stopped",
+			Timestamp:  time.Now().UTC(),
+			Attributes: terminationAttributes,
 		}
 	}
 	scrubTrackedProcessJob(tracked)
@@ -834,6 +841,7 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 	if m.ProcessExitHook != nil {
 		m.ProcessExitHook(streamID)
 	}
+	logProcessDiagnostic(signal)
 	m.report(signal)
 	m.reportMetric(streamID, "encoder.process_alive", 0)
 	if shouldPackage {
@@ -1193,7 +1201,24 @@ func (m *Manager) report(signal observability.Signal) {
 	if m.Reporter == nil {
 		return
 	}
-	_ = m.Reporter.Report(context.Background(), signal)
+	if err := m.Reporter.Report(context.Background(), signal); err != nil && isProcessDiagnosticSignal(signal.Name) {
+		log.Printf("encoder diagnostic report failed: event=%s stream_id=%s error_class=observability_request_failed", signal.Name, signal.StreamID)
+	}
+}
+
+func isProcessDiagnosticSignal(name string) bool {
+	return strings.HasPrefix(name, "encoder.process.")
+}
+
+func logProcessDiagnostic(signal observability.Signal) {
+	errorClass, _ := signal.Attributes["error_class"].(string)
+	exitCode, hasExitCode := signal.Attributes["exit_code"]
+	stderrTail, _ := signal.Attributes["stderr_tail"].(string)
+	if stderrTail != "" {
+		log.Printf("encoder diagnostic: event=%s stream_id=%s status=%s error_class=%s exit_code_present=%t exit_code=%v stderr_tail=%q", signal.Name, signal.StreamID, signal.Status, errorClass, hasExitCode, exitCode, stderrTail)
+		return
+	}
+	log.Printf("encoder diagnostic: event=%s stream_id=%s status=%s error_class=%s exit_code_present=%t exit_code=%v stderr_tail_present=false", signal.Name, signal.StreamID, signal.Status, errorClass, hasExitCode, exitCode)
 }
 
 func (m *Manager) reportMetric(streamID, name string, value float64) {

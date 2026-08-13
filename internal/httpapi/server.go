@@ -264,6 +264,9 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 			}
 		}
 	}
+	if processManager != nil && videoManager != nil && videoManager.Reporter == nil {
+		videoManager.Reporter = processManager.Reporter
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

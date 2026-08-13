@@ -3,12 +3,14 @@ package videoingest
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"image/jpeg"
 	"io"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -16,16 +18,26 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	srt "github.com/datarhei/gosrt"
+	"github.com/example/autostream-encoder-recorder/internal/observability"
 )
 
 const (
-	inputPrefix            = "internal_worker_video:"
-	pbKeylen               = 32
-	encoderFrameInterval   = time.Second / 60
-	maxSceneFrameDimension = 3840
+	inputPrefix             = "internal_worker_video:"
+	pbKeylen                = 32
+	encoderFrameInterval    = time.Second / 60
+	maxSceneFrameDimension  = 3840
+	diagnosticReportTimeout = 2 * time.Second
+)
+
+const (
+	videoIngestSRTAccepted   = "encoder.video_ingest.srt_accepted"
+	videoIngestLocalAccepted = "encoder.video_ingest.local_accepted"
+	videoIngestFirstFrame    = "encoder.video_ingest.first_frame"
+	videoIngestClosed        = "encoder.video_ingest.closed"
 )
 
 var (
@@ -53,9 +65,14 @@ type Bridge struct {
 type Manager struct {
 	Config      Config
 	ConfigError error
+	Reporter    Reporter
 
 	mu      sync.Mutex
 	bridges map[string]*bridgeRecord
+}
+
+type Reporter interface {
+	Report(context.Context, observability.Signal) error
 }
 
 type bridgeRecord struct {
@@ -63,12 +80,28 @@ type bridgeRecord struct {
 	passphrase string
 	srt        srt.Listener
 	local      net.Listener
+	startedAt  time.Time
 
-	mu        sync.Mutex
-	srtConn   srt.Conn
-	localConn net.Conn
-	closed    bool
-	closeOnce sync.Once
+	mu              sync.Mutex
+	srtConn         srt.Conn
+	localConn       net.Conn
+	closed          bool
+	closeOnce       sync.Once
+	finishOnce      sync.Once
+	stopped         atomic.Bool
+	srtRejections   atomic.Uint64
+	framesReceived  atomic.Uint64
+	framesForwarded atomic.Uint64
+}
+
+type acceptResult struct {
+	conn       net.Conn
+	errorClass string
+}
+
+type srtAcceptResult struct {
+	conn       srt.Conn
+	errorClass string
 }
 
 func NewManagerFromEnv() *Manager {
@@ -140,7 +173,7 @@ func (m *Manager) StartBridge(streamID, jobCredential string) (Bridge, error) {
 		return Bridge{}, errors.New("worker video loopback bridge did not allocate a TCP port")
 	}
 
-	record := &bridgeRecord{streamID: streamID, passphrase: passphrase, srt: listener, local: local}
+	record := &bridgeRecord{streamID: streamID, passphrase: passphrase, srt: listener, local: local, startedAt: time.Now().UTC()}
 	m.bridges[streamID] = record
 	go m.run(record)
 
@@ -163,41 +196,66 @@ func (m *Manager) StopBridge(streamID string) {
 	}
 	m.mu.Unlock()
 	if record != nil {
+		record.stopped.Store(true)
 		record.close()
 	}
 }
 
 func (m *Manager) run(record *bridgeRecord) {
-	srtReady := make(chan srt.Conn, 1)
-	localReady := make(chan net.Conn, 1)
+	srtReady := make(chan srtAcceptResult, 1)
+	localReady := make(chan acceptResult, 1)
 	go func() { srtReady <- acceptPublisher(record) }()
 	go func() {
 		conn, err := record.local.Accept()
 		if err != nil {
-			localReady <- nil
+			localReady <- acceptResult{errorClass: "local_accept"}
 			return
 		}
-		localReady <- conn
+		localReady <- acceptResult{conn: conn}
 	}()
 
-	srtConn := <-srtReady
-	localConn := <-localReady
-	if srtConn == nil || localConn == nil || !record.attach(srtConn, localConn) {
-		if srtConn != nil {
-			_ = srtConn.Close()
+	srtResult := <-srtReady
+	if srtResult.conn != nil {
+		m.reportDiagnostic(record.streamID, videoIngestSRTAccepted, "accepted", nil)
+	}
+	localResult := <-localReady
+	if localResult.conn != nil {
+		m.reportDiagnostic(record.streamID, videoIngestLocalAccepted, "accepted", map[string]any{"transport": "tcp_loopback"})
+	}
+	if srtResult.conn == nil || localResult.conn == nil {
+		if srtResult.conn != nil {
+			_ = srtResult.conn.Close()
 		}
-		if localConn != nil {
-			_ = localConn.Close()
+		if localResult.conn != nil {
+			_ = localResult.conn.Close()
 		}
-		m.finish(record)
+		if srtResult.conn == nil {
+			m.finish(record, "srt_accept_failed", srtResult.errorClass)
+		} else {
+			m.finish(record, "local_accept_failed", localResult.errorClass)
+		}
+		return
+	}
+	if !record.attach(srtResult.conn, localResult.conn) {
+		_ = srtResult.conn.Close()
+		_ = localResult.conn.Close()
+		m.finish(record, "bridge_attach_failed", "bridge_attach")
 		return
 	}
 
 	frames := make(chan []byte, 1)
-	readDone := make(chan struct{})
+	readResult := make(chan string, 1)
 	go func() {
-		defer close(readDone)
-		readSceneFrames(srtConn, frames)
+		readResult <- readSceneFrames(srtResult.conn, frames, func(width, height, size int) {
+			count := record.framesReceived.Add(1)
+			if count == 1 {
+				m.reportDiagnostic(record.streamID, videoIngestFirstFrame, "received", map[string]any{
+					"frame_width":  width,
+					"frame_height": height,
+					"frame_bytes":  size,
+				})
+			}
+		})
 	}()
 	ticker := time.NewTicker(encoderFrameInterval)
 	defer ticker.Stop()
@@ -208,13 +266,14 @@ func (m *Manager) run(record *bridgeRecord) {
 			latest = frame
 		case <-ticker.C:
 			if len(latest) > 0 {
-				if _, err := localConn.Write(latest); err != nil {
-					m.finish(record)
+				if _, err := localResult.conn.Write(latest); err != nil {
+					m.finish(record, "local_write_failed", "local_write")
 					return
 				}
+				record.framesForwarded.Add(1)
 			}
-		case <-readDone:
-			m.finish(record)
+		case errorClass := <-readResult:
+			m.finish(record, "srt_input_closed", errorClass)
 			return
 		}
 	}
@@ -223,22 +282,25 @@ func (m *Manager) run(record *bridgeRecord) {
 // readSceneFrames converts the authenticated Worker byte stream into bounded,
 // validated JPEG images. Only the latest complete frame is retained; scene
 // updates cannot build an unbounded queue behind the final Encoder.
-func readSceneFrames(reader io.Reader, output chan []byte) {
+func readSceneFrames(reader io.Reader, output chan []byte, onFrame func(width, height, size int)) string {
 	buffered := bufio.NewReaderSize(reader, 256<<10)
 	for {
 		frame, err := jpeg.Decode(buffered)
 		if err != nil {
-			return
+			return classifyFrameReadError(err)
 		}
 		bounds := frame.Bounds()
 		if bounds.Dx() <= 0 || bounds.Dy() <= 0 || bounds.Dx() > maxSceneFrameDimension || bounds.Dy() > maxSceneFrameDimension {
-			return
+			return "srt_frame_invalid"
 		}
 		var encoded bytes.Buffer
 		if err := jpeg.Encode(&encoded, frame, &jpeg.Options{Quality: 90}); err != nil {
-			return
+			return "srt_frame_encode"
 		}
 		data := append([]byte(nil), encoded.Bytes()...)
+		if onFrame != nil {
+			onFrame(bounds.Dx(), bounds.Dy(), len(data))
+		}
 		select {
 		case output <- data:
 		default:
@@ -254,39 +316,121 @@ func readSceneFrames(reader io.Reader, output chan []byte) {
 	}
 }
 
-func acceptPublisher(record *bridgeRecord) srt.Conn {
+func classifyFrameReadError(err error) string {
+	switch {
+	case errors.Is(err, io.EOF):
+		return "srt_read_eof"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "srt_frame_truncated"
+	default:
+		return "srt_frame_decode"
+	}
+}
+
+func acceptPublisher(record *bridgeRecord) srtAcceptResult {
 	for {
 		request, err := record.srt.Accept2()
 		if err != nil {
-			return nil
+			return srtAcceptResult{errorClass: "srt_accept"}
 		}
 		if request.Version() != 5 || request.StreamId() != record.streamID {
+			record.srtRejections.Add(1)
 			request.Reject(srt.REJX_UNAUTHORIZED)
 			continue
 		}
 		if !request.IsEncrypted() {
+			record.srtRejections.Add(1)
 			request.Reject(srt.REJ_UNSECURE)
 			continue
 		}
 		if err := request.SetPassphrase(record.passphrase); err != nil {
+			record.srtRejections.Add(1)
 			request.Reject(srt.REJ_BADSECRET)
 			continue
 		}
 		conn, err := request.Accept()
 		if err != nil {
+			record.srtRejections.Add(1)
 			continue
 		}
-		return conn
+		return srtAcceptResult{conn: conn}
 	}
 }
 
-func (m *Manager) finish(record *bridgeRecord) {
-	record.close()
-	m.mu.Lock()
-	if current := m.bridges[record.streamID]; current == record {
-		delete(m.bridges, record.streamID)
+func (m *Manager) finish(record *bridgeRecord, reason, errorClass string) {
+	record.finishOnce.Do(func() {
+		if record.stopped.Load() {
+			reason = "bridge_stopped"
+			errorClass = "bridge_stopped"
+		}
+		record.close()
+		m.mu.Lock()
+		if current := m.bridges[record.streamID]; current == record {
+			delete(m.bridges, record.streamID)
+		}
+		m.mu.Unlock()
+		status := "failed"
+		if record.stopped.Load() {
+			status = "stopped"
+		} else if errorClass == "srt_read_eof" {
+			status = "closed"
+		}
+		attributes := map[string]any{
+			"reason":           reason,
+			"error_class":      errorClass,
+			"frames_received":  record.framesReceived.Load(),
+			"frames_forwarded": record.framesForwarded.Load(),
+			"srt_rejections":   record.srtRejections.Load(),
+			"duration_ms":      maxDurationMilliseconds(time.Since(record.startedAt)),
+		}
+		m.reportDiagnostic(record.streamID, videoIngestClosed, status, attributes)
+	})
+}
+
+func (m *Manager) reportDiagnostic(streamID, name, status string, attributes map[string]any) {
+	logDiagnostic(name, streamID, status, attributes)
+	if m.Reporter == nil {
+		return
 	}
-	m.mu.Unlock()
+	if attributes != nil {
+		attributes = cloneAttributes(attributes)
+	}
+	signal := observability.Signal{
+		Type:       "event",
+		Name:       name,
+		StreamID:   streamID,
+		Status:     status,
+		Attributes: attributes,
+		Timestamp:  time.Now().UTC(),
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), diagnosticReportTimeout)
+		defer cancel()
+		if err := m.Reporter.Report(ctx, signal); err != nil {
+			log.Printf("encoder diagnostic report failed: event=%s stream_id=%s error_class=observability_request_failed", name, streamID)
+		}
+	}()
+}
+
+func cloneAttributes(attributes map[string]any) map[string]any {
+	cloned := make(map[string]any, len(attributes))
+	for key, value := range attributes {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func logDiagnostic(name, streamID, status string, attributes map[string]any) {
+	reason, _ := attributes["reason"].(string)
+	errorClass, _ := attributes["error_class"].(string)
+	log.Printf("encoder diagnostic: event=%s stream_id=%s status=%s reason=%s error_class=%s frames_received=%v frames_forwarded=%v srt_rejections=%v duration_ms=%v", name, streamID, status, reason, errorClass, attributes["frames_received"], attributes["frames_forwarded"], attributes["srt_rejections"], attributes["duration_ms"])
+}
+
+func maxDurationMilliseconds(value time.Duration) int64 {
+	if value <= 0 {
+		return 0
+	}
+	return value.Milliseconds()
 }
 
 func (r *bridgeRecord) attach(srtConn srt.Conn, localConn net.Conn) bool {
