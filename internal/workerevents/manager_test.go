@@ -16,8 +16,8 @@ func TestAddCaptionWritesLogsCaptionsAndTranscript(t *testing.T) {
 	event := Event{
 		ID:        "event-01",
 		StreamID:  "stream-01",
-		Type:      "caption.telop",
-		Payload:   map[string]any{"text": "こんにちは", "speaker_user_id": "user-01"},
+		Type:      "caption.final",
+		Payload:   map[string]any{"text": "こんにちは", "speaker_user_id": "user-01", "speaker_display_name": "Alice", "utterance_id": "utt-01", "is_final": true},
 		Timestamp: time.Date(2026, 5, 28, 0, 0, 0, 0, time.UTC),
 	}
 	result, err := manager.Add(event)
@@ -42,7 +42,7 @@ func TestAddCaptionWritesLogsCaptionsAndTranscript(t *testing.T) {
 	if err := json.Unmarshal(body, &transcript); err != nil {
 		t.Fatal(err)
 	}
-	if len(transcript) != 1 || transcript[0].Text != "こんにちは" || transcript[0].SpeakerUserID != "user-01" {
+	if len(transcript) != 1 || transcript[0].Text != "こんにちは" || transcript[0].SpeakerUserID != "user-01" || transcript[0].SpeakerDisplayName != "Alice" || transcript[0].UtteranceID != "utt-01" || !transcript[0].Final {
 		t.Fatalf("unexpected transcript: %#v", transcript)
 	}
 	logs, err := os.ReadFile(filepath.Join(root, "tmp", "stream-01", "logs.jsonl"))
@@ -51,6 +51,21 @@ func TestAddCaptionWritesLogsCaptionsAndTranscript(t *testing.T) {
 	}
 	if !strings.Contains(string(logs), "worker.event.received") {
 		t.Fatalf("unexpected logs: %s", string(logs))
+	}
+}
+
+func TestAddCaptionTelopDoesNotWriteArchiveArtifacts(t *testing.T) {
+	root := t.TempDir()
+	manager := NewManager(root)
+	result, err := manager.Add(Event{ID: "telop-01", StreamID: "stream-01", Type: "caption.telop", Payload: map[string]any{"text": "interim", "utterance_id": "utt-01"}, Timestamp: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CaptionsArtifact != "" || result.TranscriptArtifact != "" {
+		t.Fatalf("interim caption unexpectedly created archive artifacts: %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, "tmp", "stream-01", "captions.vtt")); !os.IsNotExist(err) {
+		t.Fatalf("interim caption created captions.vtt: %v", err)
 	}
 }
 
@@ -84,7 +99,7 @@ func TestAddRedactsSecretLikePayloadInLogsRecentAndCaptions(t *testing.T) {
 	event := Event{
 		ID:       "event-secret",
 		StreamID: "stream-01",
-		Type:     "caption.telop",
+		Type:     "caption.final",
 		Payload: map[string]any{
 			"text":             "bearer super-secret-token",
 			"webhook_url":      "https://discord.com/api/webhooks/id/raw-secret-token",
@@ -190,6 +205,16 @@ func TestAddDeduplicatesWorkerEventID(t *testing.T) {
 	}
 	if len(events) != 1 {
 		t.Fatalf("duplicate worker event was remembered more than once: %#v", events)
+	}
+}
+
+func TestAddRejectsOlderWorkerEventGeneration(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	if _, err := manager.Add(Event{ID: "new", StreamID: "stream-01", Generation: 2, Type: "overlay.participants", Payload: map[string]any{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Add(Event{ID: "old", StreamID: "stream-01", Generation: 1, Type: "overlay.active_speaker", Payload: map[string]any{}}); err == nil {
+		t.Fatal("older worker event generation was accepted")
 	}
 }
 

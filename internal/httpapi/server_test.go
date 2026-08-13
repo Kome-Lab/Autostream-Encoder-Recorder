@@ -3012,7 +3012,7 @@ func TestWorkerEventsEndpointWritesArchiveSidecars(t *testing.T) {
 		t.Fatalf("start status = %d body = %s", startRes.Code, startRes.Body.String())
 	}
 
-	body := `{"id":"event-01","stream_id":"stream-01","type":"caption.telop","payload":{"text":"hello","speaker_user_id":"user-01"},"timestamp":"2026-05-28T00:00:00Z"}`
+	body := `{"id":"event-01","stream_id":"stream-01","type":"caption.final","payload":{"text":"hello","speaker_user_id":"user-01"},"timestamp":"2026-05-28T00:00:00Z"}`
 	req := httptest.NewRequest(http.MethodPost, "/worker-events", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer worker-token")
 	res := httptest.NewRecorder()

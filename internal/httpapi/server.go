@@ -1576,7 +1576,7 @@ func reportWorkerEventReceived(ctx context.Context, event workerevents.Event) {
 	if !reporter.Enabled() {
 		return
 	}
-	_ = reporter.Event(ctx, event.StreamID, "worker.event.received", "accepted", map[string]any{"event_type": event.Type})
+	_ = reporter.Event(ctx, event.StreamID, "worker.event.received", "accepted", map[string]any{"event_type": event.Type, "attempt": event.Attempt})
 }
 
 func reportDiscordAudioReceived(ctx context.Context, streamID string, count int) {
