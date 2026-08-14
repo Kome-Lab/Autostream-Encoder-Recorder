@@ -201,6 +201,22 @@ func (m *Manager) StopBridge(streamID string) {
 	}
 }
 
+// MarkStopRequested records the lifecycle intent before the process manager
+// asks FFmpeg to exit. The bridge remains open until the process manager has
+// completed its graceful stop, so an input close during that window is
+// reported as a normal stop instead of a truncated SRT failure.
+func (m *Manager) MarkStopRequested(streamID string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	record := m.bridges[strings.TrimSpace(streamID)]
+	m.mu.Unlock()
+	if record != nil {
+		record.stopped.Store(true)
+	}
+}
+
 func (m *Manager) run(record *bridgeRecord) {
 	srtReady := make(chan srtAcceptResult, 1)
 	localReady := make(chan acceptResult, 1)
@@ -407,9 +423,29 @@ func (m *Manager) reportDiagnostic(streamID, name, status string, attributes map
 		ctx, cancel := context.WithTimeout(context.Background(), diagnosticReportTimeout)
 		defer cancel()
 		if err := m.Reporter.Report(ctx, signal); err != nil {
-			log.Printf("encoder diagnostic report failed: event=%s stream_id=%s error_class=observability_request_failed", name, streamID)
+			log.Printf("encoder diagnostic report failed: event=%s stream_id=%s error_class=observability_request_failed report_error_class=%s", name, streamID, diagnosticReportErrorClass(err))
 		}
 	}()
+}
+
+func diagnosticReportErrorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	message := err.Error()
+	if strings.HasPrefix(message, "observability signal failed with status ") {
+		return "http_status"
+	}
+	if strings.Contains(message, "OBSERVABILITY_") {
+		return "configuration"
+	}
+	return "transport"
 }
 
 func cloneAttributes(attributes map[string]any) map[string]any {

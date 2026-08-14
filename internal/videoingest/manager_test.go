@@ -302,3 +302,53 @@ func TestBridgeReportsSafeLifecycleDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkStopRequestedClassifiesInputClosureAsStopped(t *testing.T) {
+	reporter := &recordingReporter{}
+	manager := &Manager{
+		Config:   Config{BindAddr: "127.0.0.1:0", AdvertiseHost: "127.0.0.1"},
+		Reporter: reporter,
+	}
+	if _, err := manager.StartBridge("stream-01", "signed-worker-token"); err != nil {
+		t.Fatalf("StartBridge: %v", err)
+	}
+	t.Cleanup(func() { manager.StopBridge("stream-01") })
+
+	manager.MarkStopRequested("stream-01")
+	manager.mu.Lock()
+	record := manager.bridges["stream-01"]
+	manager.mu.Unlock()
+	if record == nil {
+		t.Fatal("bridge record was not retained until process stop completed")
+	}
+	manager.finish(record, "srt_input_closed", "srt_frame_truncated")
+
+	closed := waitForSignal(t, reporter, videoIngestClosed)
+	if closed.Status != "stopped" || closed.Attributes["reason"] != "bridge_stopped" || closed.Attributes["error_class"] != "bridge_stopped" {
+		t.Fatalf("unexpected close diagnostic: %#v", closed)
+	}
+}
+
+func TestDiagnosticReportErrorClassIsSafeAndUseful(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "timeout", err: context.DeadlineExceeded, want: "timeout"},
+		{name: "canceled", err: context.Canceled, want: "canceled"},
+		{name: "http", err: errors.New("observability signal failed with status 503"), want: "http_status"},
+		{name: "configuration", err: errors.New("OBSERVABILITY_URL must use https"), want: "configuration"},
+		{name: "transport", err: errors.New("connection reset by peer; token=must-not-be-logged"), want: "transport"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := diagnosticReportErrorClass(test.err); got != test.want {
+				t.Fatalf("diagnosticReportErrorClass() = %q, want %q", got, test.want)
+			}
+		})
+	}
+	if got := diagnosticReportErrorClass(nil); got != "" {
+		t.Fatalf("nil error class = %q, want empty", got)
+	}
+}

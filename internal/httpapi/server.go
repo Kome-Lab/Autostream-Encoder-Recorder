@@ -1025,19 +1025,25 @@ func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Ma
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "process_manager_not_configured"})
 			return
 		}
-		snapshot, err := processManager.Stop(r.PathValue("id"))
+		streamID := strings.TrimSpace(r.PathValue("id"))
+		if videoManager != nil {
+			if current, statusErr := processManager.Status(streamID); statusErr == nil && (current.Status == "running" || current.Status == "stopping") {
+				videoManager.MarkStopRequested(streamID)
+			}
+		}
+		snapshot, err := processManager.Stop(streamID)
 		if errors.Is(err, streamproc.ErrAlreadyStopped) {
 			if audioManager != nil {
-				audioManager.StopBridge(r.PathValue("id"))
+				audioManager.StopBridge(streamID)
 			}
 			if videoManager != nil {
-				videoManager.StopBridge(r.PathValue("id"))
+				videoManager.StopBridge(streamID)
 			}
 			writeJSON(w, http.StatusAccepted, map[string]string{"status": "already_stopped"})
 			return
 		}
 		if errors.Is(err, streamproc.ErrNotRunning) {
-			if currentStreamID := processManager.CurrentStreamID(); currentStreamID != "" && currentStreamID != r.PathValue("id") {
+			if currentStreamID := processManager.CurrentStreamID(); currentStreamID != "" && currentStreamID != streamID {
 				writeJSON(w, http.StatusConflict, map[string]string{"code": "stream_already_running"})
 				return
 			}
@@ -1053,10 +1059,10 @@ func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Ma
 			return
 		}
 		if audioManager != nil {
-			audioManager.StopBridge(r.PathValue("id"))
+			audioManager.StopBridge(streamID)
 		}
 		if videoManager != nil {
-			videoManager.StopBridge(r.PathValue("id"))
+			videoManager.StopBridge(streamID)
 		}
 		writeJSON(w, http.StatusAccepted, publicProcessSnapshot(snapshot))
 	}
