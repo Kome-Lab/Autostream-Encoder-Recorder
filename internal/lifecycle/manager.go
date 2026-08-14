@@ -92,6 +92,8 @@ type Result struct {
 	Layout          archive.Layout `json:"layout"`
 	Metadata        Metadata       `json:"metadata"`
 	RemuxDurationMS float64        `json:"remux_duration_ms,omitempty"`
+	ArchiveSource   string         `json:"archive_source,omitempty"`
+	Partial         bool           `json:"partial,omitempty"`
 }
 
 func ArchiveArtifacts(streamID string) map[string]string {
@@ -254,10 +256,13 @@ func (m Manager) DryRunToOutputTarget(ctx context.Context, job StreamJob, output
 		startedAt = time.Now().UTC()
 	}
 	jst := time.FixedZone("JST", 9*60*60)
+	extra := metadataExtra(true, remuxDurationMS, job.ArchiveConfig)
+	extra["archive_source"] = "final_mkv"
+	extra["archive_partial"] = false
 	metadata := Metadata{
 		StreamID: job.StreamID, Name: job.Name, StartedAtJST: startedAt.In(jst).Format(time.RFC3339),
 		Archive: ArchiveArtifacts(job.StreamID),
-		Extra:   metadataExtra(true, remuxDurationMS, job.ArchiveConfig),
+		Extra:   extra,
 	}
 	if dryRunner, ok := runner.(*ffmpeg.DryRunRunner); ok {
 		metadata.Commands = RedactCommandsForLayout(layout, dryRunner.Commands, job.StreamKey, job.InputURL, job.RTMPURL)
@@ -274,7 +279,7 @@ func (m Manager) DryRunToOutputTarget(ctx context.Context, job StreamJob, output
 	if err := writeJSON(layout.TmpMetadata(), metadata); err != nil {
 		return Result{}, err
 	}
-	return Result{Layout: layout, Metadata: metadata, RemuxDurationMS: remuxDurationMS}, nil
+	return Result{Layout: layout, Metadata: metadata, RemuxDurationMS: remuxDurationMS, ArchiveSource: "final_mkv"}, nil
 }
 
 func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
@@ -320,6 +325,8 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 	}
 	remuxArgs := ffmpeg.BuildRemuxArgs(layout.FinalMKV(), remuxOutput)
 	remuxStarted := time.Now()
+	archiveSource := "final_mkv"
+	archivePartial := false
 	if err := runner.Run(ctx, ffmpegBin, remuxArgs); err != nil {
 		// The live tee can leave a truncated Matroska header when an optional
 		// provider/relay slave fails. If the independent preview completed,
@@ -332,6 +339,8 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 		if fallbackErr := runner.Run(ctx, ffmpegBin, fallbackArgs); fallbackErr != nil {
 			return Result{}, PackageError{Phase: "remux", Err: err}
 		}
+		archiveSource = "hls_preview_fallback"
+		archivePartial = true
 	}
 	remuxDurationMS := time.Since(remuxStarted).Seconds() * 1000
 	if _, err := safeRegularFileInfo(remuxOutput); err != nil {
@@ -362,10 +371,13 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 		startedAt = time.Now().UTC()
 	}
 	jst := time.FixedZone("JST", 9*60*60)
+	extra := metadataExtra(job.DryRun, remuxDurationMS, job.ArchiveConfig)
+	extra["archive_source"] = archiveSource
+	extra["archive_partial"] = archivePartial
 	metadata := Metadata{
 		StreamID: job.StreamID, Name: job.Name, StartedAtJST: startedAt.In(jst).Format(time.RFC3339),
 		Archive: ArchiveArtifacts(job.StreamID),
-		Extra:   metadataExtra(job.DryRun, remuxDurationMS, job.ArchiveConfig),
+		Extra:   extra,
 	}
 	if dryRunner, ok := runner.(*ffmpeg.DryRunRunner); ok {
 		metadata.Commands = RedactCommandsForLayout(layout, dryRunner.Commands)
@@ -389,7 +401,13 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 	if err := cleanupExpiredLocalArchives(m.ArchiveRoot, job.StreamID, job.ArchiveConfig.RetentionDays, time.Now().UTC()); err != nil {
 		return Result{}, PackageError{Phase: "retention", Err: err}
 	}
-	return Result{Layout: layout, Metadata: metadata, RemuxDurationMS: remuxDurationMS}, nil
+	return Result{
+		Layout:          layout,
+		Metadata:        metadata,
+		RemuxDurationMS: remuxDurationMS,
+		ArchiveSource:   archiveSource,
+		Partial:         archivePartial,
+	}, nil
 }
 
 func (m Manager) uploaderForJob(job PackageJob) archive.ArchiveUploader {

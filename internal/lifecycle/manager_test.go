@@ -321,6 +321,12 @@ func TestPackageFallsBackToPreviewWhenFinalMKVRemuxFails(t *testing.T) {
 	if info.Size() == 0 {
 		t.Fatal("final.mp4 is empty after HLS fallback")
 	}
+	if result.ArchiveSource != "hls_preview_fallback" || !result.Partial {
+		t.Fatalf("HLS fallback provenance was not exposed: %#v", result)
+	}
+	if result.Metadata.Extra["archive_source"] != "hls_preview_fallback" || result.Metadata.Extra["archive_partial"] != true {
+		t.Fatalf("HLS fallback metadata was not exposed: %#v", result.Metadata.Extra)
+	}
 	if result.RemuxDurationMS <= 0 {
 		t.Fatalf("expected positive remux duration: %#v", result)
 	}

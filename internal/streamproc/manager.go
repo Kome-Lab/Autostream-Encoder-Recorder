@@ -815,6 +815,21 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 			terminationAttributes["stderr_tail_present"] = true
 		}
 	}
+	if stopRequested {
+		if safeStderr := redactedProcessStderr(stderr, tracked.job); safeStderr != "" {
+			if errorClass := classifyStoppedProcessFailure(safeStderr); errorClass != "" {
+				// A graceful q/stop can still leave an archive tee slave or an
+				// output writer failed. Keep the package/fallback path alive, but
+				// expose the failure instead of reporting a clean stop.
+				terminationAttributes["error_class"] = errorClass
+				terminationAttributes["process_error"] = true
+				terminationAttributes["archive_partial"] = true
+				if _, ok := terminationAttributes["error"]; !ok {
+					terminationAttributes["error"] = "process stopped with output failure"
+				}
+			}
+		}
+	}
 	addProcessOutputDiagnostics(terminationAttributes, m.archiveRoot(), streamID)
 	if err != nil && !stopRequested {
 		tracked.snapshot.Status = "failed"
@@ -937,6 +952,27 @@ func classifyProcessExit(stderr string) string {
 		return "relay"
 	default:
 		return "ffmpeg_exit"
+	}
+}
+
+// classifyStoppedProcessFailure recognizes failures that can be emitted by
+// FFmpeg while the controller is already asking the process to stop. A
+// non-zero Wait error is not required here: tee/output failures may leave the
+// process with a normal-looking stop result while the archive slave is
+// already unusable.
+func classifyStoppedProcessFailure(stderr string) string {
+	lower := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(lower, "slave muxer") && strings.Contains(lower, "failed"):
+		return "archive_output"
+	case strings.Contains(lower, "error writing header"),
+		strings.Contains(lower, "error writing trailer"),
+		strings.Contains(lower, "error while filtering"),
+		strings.Contains(lower, "error during encoding"),
+		strings.Contains(lower, "conversion failed"):
+		return "archive_output"
+	default:
+		return ""
 	}
 }
 
@@ -1089,6 +1125,8 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 	}
 	m.reportArchiveFileMetrics(job.StreamID)
 	m.reportMetric(job.StreamID, "archive.package_status", 1)
+	m.reportMetric(job.StreamID, "archive.package_partial", boolMetric(result.Partial))
+	m.reportMetric(job.StreamID, "archive.final_mkv_usable", boolMetric(result.ArchiveSource == "final_mkv"))
 	m.reportMetric(job.StreamID, "archive.final_mp4_exists", 1)
 	m.reportMetric(job.StreamID, "recorder.remux_duration_ms", result.RemuxDurationMS)
 	m.reportMetric(job.StreamID, "gdrive.upload_status", 1)
@@ -1098,19 +1136,36 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 	m.reportMetric(job.StreamID, "gdrive.upload_folder_fingerprint_present", boolMetric(result.Metadata.Upload.HasFolderFingerprint()))
 	m.reportMetric(job.StreamID, "gdrive.upload_final_mp4_fingerprint_present", boolMetric(result.Metadata.Upload.HasFileFingerprint("final.mp4")))
 	m.reportMetric(job.StreamID, "gdrive.upload_metadata_fingerprint_present", boolMetric(result.Metadata.Upload.HasFileFingerprint("metadata.json")))
+	packageAttributes := map[string]any{
+		"upload_dry_run":    result.Metadata.Upload.DryRun,
+		"upload_attempts":   result.Metadata.Upload.Attempts,
+		"file_count":        len(result.Metadata.Upload.FileIDs),
+		"remux_duration_ms": result.RemuxDurationMS,
+		"archive_source":    result.ArchiveSource,
+		"archive_partial":   result.Partial,
+	}
 	m.report(observability.Signal{
-		Type:      "event",
-		Name:      "archive.package.completed",
-		StreamID:  job.StreamID,
-		Status:    "completed",
-		Timestamp: time.Now().UTC(),
-		Attributes: map[string]any{
-			"upload_dry_run":    result.Metadata.Upload.DryRun,
-			"upload_attempts":   result.Metadata.Upload.Attempts,
-			"file_count":        len(result.Metadata.Upload.FileIDs),
-			"remux_duration_ms": result.RemuxDurationMS,
-		},
+		Type:       "event",
+		Name:       "archive.package.completed",
+		StreamID:   job.StreamID,
+		Status:     "completed",
+		Timestamp:  time.Now().UTC(),
+		Attributes: packageAttributes,
 	})
+	if result.Partial {
+		m.report(observability.Signal{
+			Type:      "warning",
+			Name:      "archive.package.partial",
+			StreamID:  job.StreamID,
+			Status:    "warning",
+			Timestamp: time.Now().UTC(),
+			Attributes: map[string]any{
+				"archive_source":  result.ArchiveSource,
+				"archive_partial": true,
+				"error_class":     "archive_source_fallback",
+			},
+		})
+	}
 	if m.ArtifactReporter != nil {
 		artifacts := control.ArchiveArtifacts(result.Layout)
 		if len(artifacts) > 0 {
@@ -1147,6 +1202,8 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 		tracked.snapshot.Status = "completed"
 		tracked.snapshot.Archive["final_artifact_set"] = "final/" + job.StreamID
 		tracked.snapshot.Archive["final_mp4"] = "final.mp4"
+		tracked.snapshot.Archive["archive_source"] = result.ArchiveSource
+		tracked.snapshot.Archive["archive_partial"] = strconv.FormatBool(result.Partial)
 		scrubTrackedProcessJob(tracked)
 	}
 	m.mu.Unlock()
@@ -1192,6 +1249,7 @@ func (m *Manager) reportArchiveFileMetrics(streamID string) {
 	} else {
 		m.reportMetric(streamID, "archive.final_mkv_exists", 0)
 	}
+	m.reportMetric(streamID, "archive.final_mkv_bytes", float64(fileSize(layout.FinalMKV())))
 	if fileSize(layout.FinalMP4()) > 0 {
 		m.reportMetric(streamID, "archive.final_mp4_exists", 1)
 	} else {

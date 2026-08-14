@@ -1477,6 +1477,50 @@ func TestManagerReportsSafeStoppedProcessDiagnostics(t *testing.T) {
 	}
 }
 
+func TestManagerDoesNotMaskArchiveOutputFailureDuringRequestedStop(t *testing.T) {
+	reporter := &fakeReporter{}
+	root := t.TempDir()
+	starter := &fakeStarter{}
+	manager := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, Reporter: reporter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	job := lifecycle.StreamJob{
+		StreamID:  "stream-archive-output-failure",
+		Name:      "Archive Output Failure",
+		InputURL:  "srt://input.example.com:9000",
+		RTMPURL:   "rtmps://youtube.example.com/live2",
+		StreamKey: "secret-stream-key",
+	}
+	if _, err := manager.Start(job); err != nil {
+		t.Fatal(err)
+	}
+	starter.process.stderr = "tee: Slave muxer #1 failed: Error writing trailer"
+	if _, err := manager.Stop(job.StreamID); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		signal, ok := reporter.find("encoder.process.stopped")
+		if ok {
+			if got, want := signal.Attributes["error_class"], "archive_output"; got != want {
+				t.Fatalf("error_class = %#v, want %q", got, want)
+			}
+			if got, want := signal.Attributes["process_error"], true; got != want {
+				t.Fatalf("process_error = %#v, want %v", got, want)
+			}
+			if got, want := signal.Attributes["archive_partial"], true; got != want {
+				t.Fatalf("archive_partial = %#v, want %v", got, want)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("requested-stop output failure was not reported: %#v", reporter.names())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestManagerReportsRecorderMetricsWhileRunning(t *testing.T) {
 	reporter := &fakeReporter{}
 	root := t.TempDir()

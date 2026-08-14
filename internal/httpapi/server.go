@@ -1650,6 +1650,8 @@ func reportPackageCompleted(ctx context.Context, job lifecycle.PackageJob, resul
 		return
 	}
 	reportMetric(ctx, reporter, job.StreamID, "archive.package_status", 1)
+	reportMetric(ctx, reporter, job.StreamID, "archive.package_partial", boolMetric(result.Partial))
+	reportMetric(ctx, reporter, job.StreamID, "archive.final_mkv_usable", boolMetric(result.ArchiveSource == "final_mkv"))
 	reportMetric(ctx, reporter, job.StreamID, "archive.final_mp4_exists", 1)
 	reportMetric(ctx, reporter, job.StreamID, "recorder.remux_duration_ms", result.RemuxDurationMS)
 	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_status", 1)
@@ -1659,13 +1661,23 @@ func reportPackageCompleted(ctx context.Context, job lifecycle.PackageJob, resul
 	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_folder_fingerprint_present", boolMetric(result.Metadata.Upload.HasFolderFingerprint()))
 	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_final_mp4_fingerprint_present", boolMetric(result.Metadata.Upload.HasFileFingerprint("final.mp4")))
 	reportMetric(ctx, reporter, job.StreamID, "gdrive.upload_metadata_fingerprint_present", boolMetric(result.Metadata.Upload.HasFileFingerprint("metadata.json")))
-	_ = reporter.Event(ctx, job.StreamID, "archive.package.completed", "completed", map[string]any{
+	attributes := map[string]any{
 		"dry_run":           job.DryRun,
 		"upload_dry_run":    result.Metadata.Upload.DryRun,
 		"upload_attempts":   result.Metadata.Upload.Attempts,
 		"file_count":        len(result.Metadata.Upload.FileIDs),
 		"remux_duration_ms": result.RemuxDurationMS,
-	})
+		"archive_source":    result.ArchiveSource,
+		"archive_partial":   result.Partial,
+	}
+	_ = reporter.Event(ctx, job.StreamID, "archive.package.completed", "completed", attributes)
+	if result.Partial {
+		_ = reporter.Event(ctx, job.StreamID, "archive.package.partial", "warning", map[string]any{
+			"archive_source":  result.ArchiveSource,
+			"archive_partial": true,
+			"error_class":     "archive_source_fallback",
+		})
+	}
 }
 
 func reportControlPanelArtifacts(ctx context.Context, streamID string, result lifecycle.Result) {
