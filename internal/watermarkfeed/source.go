@@ -23,7 +23,7 @@ const (
 	frameInterval  = 500 * time.Millisecond
 )
 
-// Source presents a continuously available PNG image2pipe input on loopback.
+// Source presents a continuously available piped-PNG input on loopback.
 // Replacing the current frame changes the Encoder watermark without changing
 // the FFmpeg process or any of its output clocks.
 type Source struct {

@@ -176,7 +176,10 @@ func buildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSetting
 	}
 	args := []string{
 		"-hide_banner", "-y",
-		"-thread_queue_size", "512", "-f", "image2pipe", "-framerate", "60", "-c:v", "mjpeg", "-i", videoInput,
+		// The Go ingest bridge writes a continuous concatenated JPEG stream. Use
+		// FFmpeg's raw MJPEG demuxer rather than image2pipe's generic image
+		// sequence probe so a live TCP stream remains consumable after frame one.
+		"-thread_queue_size", "512", "-f", "mjpeg", "-framerate", "60", "-i", videoInput,
 		"-thread_queue_size", "512", "-protocol_whitelist", "file,udp,rtp", "-i", filepath.Clean(audioInput),
 		"-re", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=" + itoa(p.SampleRate),
 	}
@@ -262,7 +265,7 @@ func workerSceneRuntimeFilterWithSilenceAndWatermark(p EncoderProfile, audioGain
 func watermarkInputArgs(input string) []string {
 	trimmed := strings.TrimSpace(input)
 	if strings.HasPrefix(strings.ToLower(trimmed), "tcp://") {
-		return []string{"-thread_queue_size", "8", "-f", "image2pipe", "-framerate", "2", "-c:v", "png", "-i", trimmed}
+		return []string{"-thread_queue_size", "8", "-f", "png_pipe", "-framerate", "2", "-i", trimmed}
 	}
 	return []string{"-loop", "1", "-i", filepath.Clean(trimmed)}
 }

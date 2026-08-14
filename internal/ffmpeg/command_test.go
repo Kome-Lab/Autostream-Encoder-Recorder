@@ -135,7 +135,7 @@ func TestBuildWorkerVideoDiscordAudioArgsKeepsCredentialOutOfFFmpegAndAppliesWat
 		}
 	}
 	for _, required := range []string{
-		"-f image2pipe -framerate 60 -c:v mjpeg -i tcp://127.0.0.1:41001",
+		"-f mjpeg -framerate 60 -i tcp://127.0.0.1:41001",
 		"-protocol_whitelist file,udp,rtp -i " + filepath.Clean("C:/tmp/discord-opus.sdp"),
 		"[0:v]scale=1920:1080",
 		"[3:v]format=rgba,scale=1920:1080[wm]",
@@ -173,7 +173,7 @@ func TestBuildWorkerVideoRuntimeSettingsKeepStableNamedGainAndDynamicWatermarkIn
 	)
 	joined := strings.Join(args, " ")
 	for _, required := range []string{
-		"-f image2pipe -framerate 2 -c:v png -i tcp://127.0.0.1:42001",
+		"-f png_pipe -framerate 2 -i tcp://127.0.0.1:42001",
 		"volume@gain=4.5dB[aout]",
 		"[base][wm]overlay=0:0",
 		"-re -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000",

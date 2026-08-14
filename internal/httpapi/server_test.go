@@ -2373,7 +2373,7 @@ func TestStartEndpointOptInWorkerVideoReturnsOneTimeSRTCredentialWithoutLeakingI
 			t.Fatalf("FFmpeg args leaked worker video credential %q: %s", leaked, joinedArgs)
 		}
 	}
-	for _, want := range []string{"-f image2pipe", "-c:v mjpeg", "tcp://127.0.0.1:", "discord-opus.sdp", "-map [v] -map [aout_stats]"} {
+	for _, want := range []string{"-f mjpeg", "tcp://127.0.0.1:", "discord-opus.sdp", "-map [v] -map [aout_stats]"} {
 		if !strings.Contains(joinedArgs, want) {
 			t.Fatalf("FFmpeg args missing %q: %s", want, joinedArgs)
 		}

@@ -205,7 +205,7 @@ func TestManagerStartUsesLiveWatermarkFeedAndAddsOverlayFilter(t *testing.T) {
 	if strings.Contains(joined, "data:image/") {
 		t.Fatalf("raw watermark data URL leaked into FFmpeg args: %#v", starter.args)
 	}
-	if !strings.Contains(joined, "-f image2pipe -framerate 2 -c:v png -i tcp://127.0.0.1:") {
+	if !strings.Contains(joined, "-f png_pipe -framerate 2 -i tcp://127.0.0.1:") {
 		t.Fatalf("live watermark input missing from FFmpeg args: %#v", starter.args)
 	}
 }
