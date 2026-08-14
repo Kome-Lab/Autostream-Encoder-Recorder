@@ -1243,6 +1243,9 @@ func (m *Manager) reportFFmpegProgress(streamID, progressPath string) {
 	if progress.BitrateKbps > 0 {
 		m.reportMetric(streamID, "encoder.output_bitrate_kbps", progress.BitrateKbps)
 	}
+	if progress.SpeedRatio > 0 {
+		m.reportMetric(streamID, "encoder.output_speed_ratio", progress.SpeedRatio)
+	}
 	m.reportMetric(streamID, "encoder.dropped_frames_total", progress.DroppedFrames)
 }
 

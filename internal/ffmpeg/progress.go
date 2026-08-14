@@ -9,6 +9,7 @@ type Progress struct {
 	FPS           float64
 	BitrateKbps   float64
 	DroppedFrames float64
+	SpeedRatio    float64
 }
 
 type AudioStats struct {
@@ -32,6 +33,8 @@ func ParseProgress(body string) Progress {
 			progress.BitrateKbps = parseBitrateKbps(value)
 		case "drop_frames":
 			progress.DroppedFrames = parseFloat(value)
+		case "speed":
+			progress.SpeedRatio = parseFloat(strings.TrimSuffix(strings.TrimSpace(value), "x"))
 		}
 	}
 	return progress

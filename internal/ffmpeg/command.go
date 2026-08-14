@@ -17,6 +17,11 @@ type EncoderProfile struct {
 	KeyframeSec  int
 }
 
+// Live encoding must keep wall-clock pace.  The previous veryfast preset was
+// measured below realtime on the 1080p60 scene + watermark path, which made
+// the provider's ingest buffer drain and caused viewer buffering warnings.
+const liveVideoPreset = "superfast"
+
 func DefaultProfile() EncoderProfile {
 	return EncoderProfile{Width: 1920, Height: 1080, FPS: 60, VideoBitrate: "8000k", AudioBitrate: "160k", SampleRate: 48000, KeyframeSec: 2}
 }
@@ -64,13 +69,8 @@ func buildLiveArchiveArgsToOutputTargetWithRuntimeSettings(inputURL, outputTarge
 	} else {
 		args = append(args, "-map", "0:v:0?", "-map", "0:a:0?")
 	}
-	args = append(args,
-		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
-		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
-		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
-		"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr",
-		"-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate),
-	)
+	args = append(args, liveVideoCodecArgs(p)...)
+	args = append(args, "-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate))
 	if progressPath != "" {
 		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
 	}
@@ -138,15 +138,9 @@ func buildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(audioSDPP
 	if strings.TrimSpace(audioStatsPath) != "" {
 		filter, audioMap = appendComplexAudioStats(filter, audioStatsPath)
 	}
-	args = append(args,
-		"-filter_complex", filter,
-		"-map", "[v]", "-map", audioMap,
-		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
-		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
-		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
-		"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr",
-		"-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate),
-	)
+	args = append(args, "-filter_complex", filter, "-map", "[v]", "-map", audioMap)
+	args = append(args, liveVideoCodecArgs(p)...)
+	args = append(args, "-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate))
 	if progressPath != "" {
 		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
 	}
@@ -195,15 +189,9 @@ func buildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSetting
 	if strings.TrimSpace(audioStatsPath) != "" {
 		filter, audioMap = appendComplexAudioStats(filter, audioStatsPath)
 	}
-	args = append(args,
-		"-filter_complex", filter,
-		"-map", "[v]", "-map", audioMap,
-		"-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
-		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
-		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
-		"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr",
-		"-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate),
-	)
+	args = append(args, "-filter_complex", filter, "-map", "[v]", "-map", audioMap)
+	args = append(args, liveVideoCodecArgs(p)...)
+	args = append(args, "-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate))
 	if progressPath != "" {
 		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
 	}
@@ -389,7 +377,16 @@ func itoa(v int) string {
 }
 
 func audioStatsFilter(path string) string {
-	return "astats=metadata=1:reset=1,ametadata=print:file=" + filepath.ToSlash(filepath.Clean(path)) + ":direct=1:enable='not(mod(n,50))'"
+	return "astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level+Peak_level,ametadata=print:file=" + filepath.ToSlash(filepath.Clean(path)) + ":direct=1:enable='not(mod(n,50))'"
+}
+
+func liveVideoCodecArgs(p EncoderProfile) []string {
+	return []string{
+		"-c:v", "libx264", "-preset", liveVideoPreset, "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
+		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
+		"-r", itoa(p.FPS), "-g", itoa(p.FPS * p.KeyframeSec), "-keyint_min", itoa(p.FPS * p.KeyframeSec), "-sc_threshold", "0",
+		"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr",
+	}
 }
 
 func appendComplexAudioStats(filter, path string) (string, string) {

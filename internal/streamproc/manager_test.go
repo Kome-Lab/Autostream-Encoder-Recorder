@@ -1416,7 +1416,7 @@ func TestManagerReportsRecorderMetricsWhileRunning(t *testing.T) {
 	if err := os.WriteFile(layout.FinalMKV(), []byte("recorded bytes"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(layout.TmpFFmpegProgress(), []byte("fps=58.5\nbitrate=7450.1kbits/s\ndrop_frames=3\nprogress=continue\n"), 0o640); err != nil {
+	if err := os.WriteFile(layout.TmpFFmpegProgress(), []byte("fps=58.5\nbitrate=7450.1kbits/s\ndrop_frames=3\nspeed=0.938x\nprogress=continue\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(layout.TmpFFmpegAudioStats(), []byte("lavfi.astats.Overall.RMS_level=-55.0\nlavfi.astats.Overall.Peak_level=-0.5\n"), 0o640); err != nil {
@@ -1429,6 +1429,7 @@ func TestManagerReportsRecorderMetricsWhileRunning(t *testing.T) {
 			reporter.has("recorder.write_bitrate_kbps") &&
 			reporter.has("encoder.output_fps") &&
 			reporter.has("encoder.output_bitrate_kbps") &&
+			reporter.has("encoder.output_speed_ratio") &&
 			reporter.has("encoder.dropped_frames_total") &&
 			reporter.has("encoder.audio_level_db") &&
 			reporter.has("encoder.audio_silence_sec") &&
