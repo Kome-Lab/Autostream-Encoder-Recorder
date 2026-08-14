@@ -603,8 +603,8 @@ func assertArgValue(t *testing.T, args []string, flag, want string) {
 }
 
 func TestParseProgress(t *testing.T) {
-	progress := ParseProgress("frame=100\nfps=59.94\nbitrate=8123.4kbits/s\ndrop_frames=2\nspeed=0.938x\nprogress=continue\n")
-	if progress.FPS != 59.94 || progress.BitrateKbps != 8123.4 || progress.DroppedFrames != 2 || progress.SpeedRatio != 0.938 {
+	progress := ParseProgress("frame=100\nfps=59.94\nbitrate=8123.4kbits/s\ndrop_frames=2\nout_time_us=1234567\nspeed=0.938x\nprogress=continue\n")
+	if progress.Frame != 100 || progress.FPS != 59.94 || progress.BitrateKbps != 8123.4 || progress.DroppedFrames != 2 || progress.OutTimeUS != 1234567 || progress.SpeedRatio != 0.938 || progress.Progress != "continue" {
 		t.Fatalf("unexpected progress: %#v", progress)
 	}
 }

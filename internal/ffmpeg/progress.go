@@ -6,10 +6,13 @@ import (
 )
 
 type Progress struct {
+	Frame         int64
 	FPS           float64
 	BitrateKbps   float64
 	DroppedFrames float64
+	OutTimeUS     int64
 	SpeedRatio    float64
+	Progress      string
 }
 
 type AudioStats struct {
@@ -27,14 +30,20 @@ func ParseProgress(body string) Progress {
 			continue
 		}
 		switch key {
+		case "frame":
+			progress.Frame = parseInt64(value)
 		case "fps":
 			progress.FPS = parseFloat(value)
 		case "bitrate":
 			progress.BitrateKbps = parseBitrateKbps(value)
 		case "drop_frames":
 			progress.DroppedFrames = parseFloat(value)
+		case "out_time_us":
+			progress.OutTimeUS = parseInt64(value)
 		case "speed":
 			progress.SpeedRatio = parseFloat(strings.TrimSuffix(strings.TrimSpace(value), "x"))
+		case "progress":
+			progress.Progress = strings.TrimSpace(value)
 		}
 	}
 	return progress
@@ -61,6 +70,14 @@ func ParseAudioStats(body string) AudioStats {
 
 func parseFloat(value string) float64 {
 	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func parseInt64(value string) int64 {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 	if err != nil {
 		return 0
 	}

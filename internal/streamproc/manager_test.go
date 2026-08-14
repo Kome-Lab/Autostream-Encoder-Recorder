@@ -1401,6 +1401,82 @@ func TestManagerReportsSafeProcessExitDiagnostics(t *testing.T) {
 	}
 }
 
+func TestManagerReportsSafeStoppedProcessDiagnostics(t *testing.T) {
+	reporter := &fakeReporter{}
+	root := t.TempDir()
+	starter := &fakeStarter{}
+	manager := &Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, Reporter: reporter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	job := lifecycle.StreamJob{
+		StreamID:  "stream-01",
+		Name:      "Morning Stream",
+		InputURL:  "srt://input.example.com:9000",
+		RTMPURL:   "rtmps://youtube.example.com/live2",
+		StreamKey: "secret-stream-key",
+	}
+	if _, err := manager.Start(job); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := archive.NewLayout(root, job.StreamID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.FinalMKV(), bytes.Repeat([]byte("x"), 293), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.TmpFFmpegProgress(), []byte("frame=1\nfps=0.06\nout_time_us=7872000\nspeed=0.452x\nprogress=end\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	starter.process.stderr = "safe stop diagnostic for rtmps://youtube.example.com/live2/secret-stream-key"
+	if _, err := manager.Stop(job.StreamID); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		signal, ok := reporter.find("encoder.process.stopped")
+		if ok {
+			if got, want := signal.Attributes["stop_requested"], true; got != want {
+				t.Fatalf("stop_requested = %#v, want %v", got, want)
+			}
+			if got, want := signal.Attributes["error_class"], "stop_requested"; got != want {
+				t.Fatalf("error_class = %#v, want %q", got, want)
+			}
+			if got, want := signal.Attributes["stderr_tail_present"], true; got != want {
+				t.Fatalf("stderr_tail_present = %#v, want %v", got, want)
+			}
+			stderr, _ := signal.Attributes["stderr_tail"].(string)
+			if strings.Contains(stderr, "secret-stream-key") || strings.Contains(stderr, "rtmps://youtube.example.com/live2") {
+				t.Fatalf("stopped stderr diagnostic leaked a secret: %s", stderr)
+			}
+			if !strings.Contains(stderr, "safe stop diagnostic") {
+				t.Fatalf("stopped stderr diagnostic missing safe text: %s", stderr)
+			}
+			if got, want := signal.Attributes["ffmpeg_progress"], "end"; got != want {
+				t.Fatalf("ffmpeg_progress = %#v, want %q", got, want)
+			}
+			if got, want := signal.Attributes["ffmpeg_frame"], int64(1); got != want {
+				t.Fatalf("ffmpeg_frame = %#v, want %d", got, want)
+			}
+			if got, want := signal.Attributes["ffmpeg_out_time_us"], int64(7872000); got != want {
+				t.Fatalf("ffmpeg_out_time_us = %#v, want %d", got, want)
+			}
+			if got, want := signal.Attributes["ffmpeg_speed_ratio"], 0.452; got != want {
+				t.Fatalf("ffmpeg_speed_ratio = %#v, want %v", got, want)
+			}
+			if got, want := signal.Attributes["final_mkv_bytes"], int64(293); got != want {
+				t.Fatalf("final_mkv_bytes = %#v, want %d", got, want)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("stopped process diagnostics were not observed: %#v", reporter.names())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestManagerReportsRecorderMetricsWhileRunning(t *testing.T) {
 	reporter := &fakeReporter{}
 	root := t.TempDir()
