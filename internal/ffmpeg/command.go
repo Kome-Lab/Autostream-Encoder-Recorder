@@ -124,7 +124,7 @@ func buildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(audioSDPP
 		// Discord/DAVE omits encrypted silence packets. Keep a continuous
 		// audio clock so a mute never turns the live output into an ended
 		// audio stream; real Opus is mixed over this silence when present.
-		"-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=" + itoa(p.SampleRate),
+		"-re", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=" + itoa(p.SampleRate),
 	}
 	if strings.TrimSpace(watermarkInput) != "" {
 		args = append(args, watermarkInputArgs(watermarkInput)...)
@@ -178,7 +178,7 @@ func buildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSetting
 		"-hide_banner", "-y",
 		"-thread_queue_size", "512", "-f", "image2pipe", "-framerate", "60", "-c:v", "mjpeg", "-i", videoInput,
 		"-thread_queue_size", "512", "-protocol_whitelist", "file,udp,rtp", "-i", filepath.Clean(audioInput),
-		"-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=" + itoa(p.SampleRate),
+		"-re", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=" + itoa(p.SampleRate),
 	}
 	if strings.TrimSpace(watermarkInput) != "" {
 		args = append(args, watermarkInputArgs(watermarkInput)...)
@@ -386,7 +386,7 @@ func itoa(v int) string {
 }
 
 func audioStatsFilter(path string) string {
-	return "astats=metadata=1:reset=1,ametadata=print:file=" + filepath.ToSlash(filepath.Clean(path))
+	return "astats=metadata=1:reset=1,ametadata=print:file=" + filepath.ToSlash(filepath.Clean(path)) + ":direct=1:enable='not(mod(n,50))'"
 }
 
 func appendComplexAudioStats(filter, path string) (string, string) {

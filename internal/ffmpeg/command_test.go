@@ -33,7 +33,7 @@ func TestBuildLiveArchiveArgsWithProgress(t *testing.T) {
 	if !containsArg(args, "-progress") || !strings.Contains(joined, "progress.txt") {
 		t.Fatalf("progress output missing: %#v", args)
 	}
-	if !containsArg(args, "-filter:a") || !strings.Contains(joined, "astats=metadata=1") || !strings.Contains(joined, "audio-stats.txt") {
+	if !containsArg(args, "-filter:a") || !strings.Contains(joined, "astats=metadata=1") || !strings.Contains(joined, "audio-stats.txt") || !strings.Contains(joined, "direct=1:enable='not(mod(n,50))'") {
 		t.Fatalf("audio stats filter missing: %#v", args)
 	}
 	if strings.Contains(joined, " sh ") {
@@ -89,7 +89,7 @@ func TestBuildDiscordAudioLiveArchiveArgsToOutputTargetKeepsStreamKeyOutOfArgs(t
 func TestBuildDiscordAudioLiveArchiveArgsWithProgress(t *testing.T) {
 	args := BuildDiscordAudioLiveArchiveArgsWithTelemetry("/tmp/discord-opus.sdp", "rtmps://youtube.example.com/live2", "secret", "/tmp/final.mkv", "/tmp/progress.txt", "/tmp/audio-stats.txt", DefaultProfile())
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"lavfi", "color=c=0x0b1020:s=1920x1080:r=60", "showwaves", "protocol_whitelist", "discord-opus.sdp", "anullsrc=channel_layout=stereo:sample_rate=48000", "amix=inputs=2:duration=longest", "[v]", "[aout]", "yuv420p", "astats=metadata=1"} {
+	for _, want := range []string{"lavfi", "color=c=0x0b1020:s=1920x1080:r=60", "showwaves", "protocol_whitelist", "discord-opus.sdp", "-re -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000", "amix=inputs=2:duration=longest", "[v]", "[aout]", "yuv420p", "astats=metadata=1", "direct=1:enable='not(mod(n,50))'"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in args: %#v", want, args)
 		}
@@ -97,7 +97,7 @@ func TestBuildDiscordAudioLiveArchiveArgsWithProgress(t *testing.T) {
 	if !strings.Contains(joined, "eof_action=repeat:repeatlast=1:shortest=0") || strings.Contains(joined, "shortest=1") {
 		t.Fatalf("Discord audio waveform must keep the background alive during silence: %#v", args)
 	}
-	if strings.Contains(joined, "-filter:a") || !strings.Contains(joined, "[aout]astats=metadata=1:reset=1,ametadata=print:file=/tmp/audio-stats.txt[aout_stats]") || !strings.Contains(joined, "-map [aout_stats]") {
+	if strings.Contains(joined, "-filter:a") || !strings.Contains(joined, "[aout]astats=metadata=1:reset=1,ametadata=print:file=/tmp/audio-stats.txt:direct=1:enable='not(mod(n,50))'[aout_stats]") || !strings.Contains(joined, "-map [aout_stats]") {
 		t.Fatalf("Discord audio stats must stay inside the complex filtergraph: %#v", args)
 	}
 	if strings.Contains(joined, " sh ") {
@@ -143,7 +143,7 @@ func TestBuildWorkerVideoDiscordAudioArgsKeepsCredentialOutOfFFmpegAndAppliesWat
 		"-map [v] -map [aout_stats]",
 		"-minrate:v 8000k -maxrate:v 8000k -bufsize:v 16000k",
 		"-f tee",
-		"[aout]astats=metadata=1:reset=1,ametadata=print:file=C:/tmp/audio-stats.txt[aout_stats]",
+		"[aout]astats=metadata=1:reset=1,ametadata=print:file=C:/tmp/audio-stats.txt:direct=1:enable='not(mod(n,50))'[aout_stats]",
 		"-map [aout_stats]",
 	} {
 		if !strings.Contains(joined, required) {
@@ -176,6 +176,8 @@ func TestBuildWorkerVideoRuntimeSettingsKeepStableNamedGainAndDynamicWatermarkIn
 		"-f image2pipe -framerate 2 -c:v png -i tcp://127.0.0.1:42001",
 		"volume@gain=4.5dB[aout]",
 		"[base][wm]overlay=0:0",
+		"-re -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000",
+		"direct=1:enable='not(mod(n,50))'",
 	} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("missing %q in args: %s", required, joined)
