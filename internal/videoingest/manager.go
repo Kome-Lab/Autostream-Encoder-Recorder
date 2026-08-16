@@ -459,7 +459,7 @@ func cloneAttributes(attributes map[string]any) map[string]any {
 func logDiagnostic(name, streamID, status string, attributes map[string]any) {
 	reason, _ := attributes["reason"].(string)
 	errorClass, _ := attributes["error_class"].(string)
-	log.Printf("encoder diagnostic: event=%s stream_id=%s status=%s reason=%s error_class=%s frames_received=%v frames_forwarded=%v srt_rejections=%v duration_ms=%v", name, streamID, status, reason, errorClass, attributes["frames_received"], attributes["frames_forwarded"], attributes["srt_rejections"], attributes["duration_ms"])
+	log.Printf("encoder diagnostic: event=%s stream_id=%s status=%s reason=%s error_class=%s frame_width=%v frame_height=%v frame_bytes=%v frames_received=%v frames_forwarded=%v srt_rejections=%v duration_ms=%v", name, streamID, status, reason, errorClass, attributes["frame_width"], attributes["frame_height"], attributes["frame_bytes"], attributes["frames_received"], attributes["frames_forwarded"], attributes["srt_rejections"], attributes["duration_ms"])
 }
 
 func maxDurationMilliseconds(value time.Duration) int64 {

@@ -27,24 +27,26 @@ type Manager struct {
 }
 
 type StreamJob struct {
-	StreamID             string         `json:"stream_id"`
-	Name                 string         `json:"name"`
-	InputURL             string         `json:"input_url"`
-	InputMode            string         `json:"input_mode,omitempty"`
-	AudioInputURL        string         `json:"-"`
-	RTMPURL              string         `json:"rtmp_url"`
-	StreamKey            string         `json:"stream_key,omitempty"`
-	StreamKeySecretName  string         `json:"stream_key_secret_name,omitempty"`
-	YouTubeOutputMode    string         `json:"-"`
-	OutputRelayBindingID string         `json:"-"`
-	YouTubeOutputReady   bool           `json:"-"`
-	OverlayProfileID     string         `json:"overlay_profile_id,omitempty"`
-	OverlayConfig        map[string]any `json:"-"`
-	EncoderAudioGainDB   float64        `json:"encoder_audio_gain_db,omitempty"`
-	WatermarkInputURL    string         `json:"-"`
-	StartedAt            time.Time      `json:"started_at"`
-	DryRun               bool           `json:"dry_run"`
-	ArchiveConfig        ArchiveConfig  `json:"archive_config,omitempty"`
+	StreamID             string                `json:"stream_id"`
+	Name                 string                `json:"name"`
+	InputURL             string                `json:"input_url"`
+	InputMode            string                `json:"input_mode,omitempty"`
+	AudioInputURL        string                `json:"-"`
+	RTMPURL              string                `json:"rtmp_url"`
+	StreamKey            string                `json:"stream_key,omitempty"`
+	StreamKeySecretName  string                `json:"stream_key_secret_name,omitempty"`
+	YouTubeOutputMode    string                `json:"-"`
+	OutputRelayBindingID string                `json:"-"`
+	YouTubeOutputReady   bool                  `json:"-"`
+	EncoderProfileID     string                `json:"encoder_profile_id,omitempty"`
+	EncoderProfile       ffmpeg.EncoderProfile `json:"-"`
+	OverlayProfileID     string                `json:"overlay_profile_id,omitempty"`
+	OverlayConfig        map[string]any        `json:"-"`
+	EncoderAudioGainDB   float64               `json:"encoder_audio_gain_db,omitempty"`
+	WatermarkInputURL    string                `json:"-"`
+	StartedAt            time.Time             `json:"started_at"`
+	DryRun               bool                  `json:"dry_run"`
+	ArchiveConfig        ArchiveConfig         `json:"archive_config,omitempty"`
 }
 
 type PackageJob struct {
@@ -212,7 +214,10 @@ func (m Manager) DryRunToOutputTarget(ctx context.Context, job StreamJob, output
 	if runner == nil {
 		runner = &ffmpeg.DryRunRunner{}
 	}
-	profile := m.Profile
+	profile := job.EncoderProfile
+	if profile.Width == 0 {
+		profile = m.Profile
+	}
 	if profile.Width == 0 {
 		profile = ffmpeg.DefaultProfile()
 	}

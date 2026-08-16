@@ -210,6 +210,52 @@ func TestManagerStartUsesLiveWatermarkFeedAndAddsOverlayFilter(t *testing.T) {
 	}
 }
 
+func TestManagerStartUsesPerJobEncoderProfile(t *testing.T) {
+	root := t.TempDir()
+	starter := &fakeStarter{}
+	manager := &Manager{
+		ArchiveRoot:          root,
+		FFmpegBin:            "ffmpeg",
+		Starter:              starter,
+		InputResolver:        testInputResolver,
+		AllowHostnameInputs:  true,
+		OutputRelayURL:       "rtmp://127.0.0.1/autostream/{stream_id}",
+		OutputRelayMode:      outputrelay.ModeLiveAPIStatic,
+		OutputRelayBindingID: staticRelayBindingID,
+		Profile:              ffmpeg.DefaultProfile(),
+	}
+	_, err := manager.Start(lifecycle.StreamJob{
+		StreamID: "stream-profile-720p", Name: "720p Stream", InputURL: "rtsp://input.example.com/live",
+		YouTubeOutputMode: "live_api_relay_static", OutputRelayBindingID: staticRelayBindingID, YouTubeOutputReady: true,
+		EncoderProfileID: "encoder-720p",
+		EncoderProfile: ffmpeg.EncoderProfile{
+			Width: 1280, Height: 720, FPS: 30, VideoBitrate: "4500k", AudioBitrate: "128k", SampleRate: 48000, KeyframeSec: 2,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(starter.args, " ")
+	for _, want := range []string{"scale=1280:720", "-b:v 4500k", "-r 30", "-g 60"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("per-job encoder profile option %q missing from FFmpeg args: %s", want, joined)
+		}
+	}
+	layout, err := archive.NewLayout(root, "stream-profile-720p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := os.ReadFile(layout.TmpMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"encoder_profile_id": "encoder-720p"`, `"output_width": 1280`, `"output_height": 720`, `"output_fps": 30`} {
+		if !strings.Contains(string(metadata), want) {
+			t.Fatalf("selected encoder profile diagnostic %q missing from metadata: %s", want, metadata)
+		}
+	}
+}
+
 func TestManagerUpdatesAudioGainAndWatermarkWithoutRestart(t *testing.T) {
 	starter := &fakeStarter{}
 	manager := &Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeLiveAPIStatic, OutputRelayBindingID: staticRelayBindingID}

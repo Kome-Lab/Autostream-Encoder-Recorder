@@ -394,10 +394,14 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 			return Snapshot{}, err
 		}
 	}
-	profile := m.Profile
+	profile := job.EncoderProfile
+	if profile.Width == 0 {
+		profile = m.Profile
+	}
 	if profile.Width == 0 {
 		profile = ffmpeg.DefaultProfile()
 	}
+	job.EncoderProfile = profile
 	watermarkSource, err := watermarkfeed.New(job.OverlayConfig)
 	if err != nil {
 		return Snapshot{}, err
@@ -443,7 +447,7 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	watermarkActive = false
 	reservationActive = false
 
-	log.Printf("encoder diagnostic: event=encoder.process.started stream_id=%s status=running", job.StreamID)
+	log.Printf("encoder diagnostic: event=encoder.process.started stream_id=%s status=running encoder_profile_id=%s output_width=%d output_height=%d output_fps=%d", job.StreamID, strings.TrimSpace(job.EncoderProfileID), profile.Width, profile.Height, profile.FPS)
 	m.report(observability.Signal{
 		Type:      "event",
 		Name:      "encoder.process.started",
@@ -451,8 +455,12 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 		Status:    "running",
 		Timestamp: time.Now().UTC(),
 		Attributes: map[string]any{
-			"recording_mkv":    "final.mkv",
-			"preview_playlist": "preview/index.m3u8",
+			"recording_mkv":      "final.mkv",
+			"preview_playlist":   "preview/index.m3u8",
+			"encoder_profile_id": strings.TrimSpace(job.EncoderProfileID),
+			"output_width":       profile.Width,
+			"output_height":      profile.Height,
+			"output_fps":         profile.FPS,
 		},
 	})
 	go m.wait(job.StreamID, process, done)
@@ -1419,6 +1427,14 @@ func writeStartMetadata(layout archive.Layout, job lifecycle.StreamJob, snapshot
 	extra := map[string]any{"live_process": true}
 	if job.InputMode != "" {
 		extra["input_mode"] = job.InputMode
+	}
+	if strings.TrimSpace(job.EncoderProfileID) != "" {
+		extra["encoder_profile_id"] = strings.TrimSpace(job.EncoderProfileID)
+	}
+	if job.EncoderProfile.Width > 0 {
+		extra["output_width"] = job.EncoderProfile.Width
+		extra["output_height"] = job.EncoderProfile.Height
+		extra["output_fps"] = job.EncoderProfile.FPS
 	}
 	metadata := map[string]any{
 		"stream_id":      job.StreamID,

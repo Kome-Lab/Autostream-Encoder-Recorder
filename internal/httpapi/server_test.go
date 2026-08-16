@@ -1486,6 +1486,42 @@ func TestStartEndpointAcceptsRuntimeStreamKeyWithoutStaticRelay(t *testing.T) {
 	}
 }
 
+func TestStartEndpointUsesSelectedEncoderRuntimeProfile(t *testing.T) {
+	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
+	root := t.TempDir()
+	starter := &httpFakeStarter{}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	handler := NewServerWithManagersAndRuntimeConfig(
+		"encoder_recorder",
+		processManager,
+		workerevents.NewManager(root),
+		TokenVerifier{PlainToken: "service-token"},
+		nil,
+		func(context.Context) (control.RuntimeConfig, error) {
+			return control.RuntimeConfig{Profiles: map[string][]control.RuntimeProfile{
+				"encoder": {{ID: "encoder-720p", Kind: "encoder", Config: map[string]any{
+					"width": float64(1280), "height": float64(720), "fps": float64(30), "video_bitrate_kbps": float64(4500),
+				}}},
+			}}, nil
+		},
+	)
+
+	body := `{"stream_id":"stream-profile","name":"Profile Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key":"runtime-secret-stream-key","encoder_profile_id":"encoder-720p"}`
+	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer service-token")
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("start status = %d body = %s", res.Code, res.Body.String())
+	}
+	joined := strings.Join(starter.args, " ")
+	for _, want := range []string{"scale=1280:720", "-b:v 4500k", "-r 30"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("selected encoder profile option %q missing from FFmpeg args: %s", want, joined)
+		}
+	}
+}
+
 func TestStartEndpointRejectsMissingRequiredRelayWithoutRuntimeProvider(t *testing.T) {
 	t.Setenv("AUTOSTREAM_ENV", "development")
 	t.Setenv("AUTOSTREAM_REQUIRE_OUTPUT_RELAY", "true")
@@ -1661,6 +1697,54 @@ func TestApplyOverlayRuntimeConfigSelectsImageProfileWithoutExposingSecrets(t *t
 	}
 	if _, ok := job.OverlayConfig["api_key_secret_name"]; ok {
 		t.Fatalf("secret-like overlay config was copied into the job: %#v", job.OverlayConfig)
+	}
+}
+
+func TestApplyEncoderRuntimeConfigSelectsRequestedProfile(t *testing.T) {
+	job := lifecycle.StreamJob{StreamID: "stream-01", EncoderProfileID: "encoder-720p"}
+	provider := func(context.Context) (control.RuntimeConfig, error) {
+		return control.RuntimeConfig{Profiles: map[string][]control.RuntimeProfile{
+			"encoder": {
+				{ID: "encoder-1080p", Kind: "encoder", Config: map[string]any{"width": float64(1920), "height": float64(1080), "fps": float64(60)}},
+				{ID: "encoder-720p", Kind: "encoder", Config: map[string]any{"width": float64(1280), "height": float64(720), "fps": float64(30), "video_bitrate_kbps": float64(4500)}},
+			},
+		}}, nil
+	}
+
+	if err := applyEncoderRuntimeConfig(context.Background(), &job, provider); err != nil {
+		t.Fatal(err)
+	}
+	if job.EncoderProfile.Width != 1280 || job.EncoderProfile.Height != 720 || job.EncoderProfile.FPS != 30 || job.EncoderProfile.VideoBitrate != "4500k" {
+		t.Fatalf("requested encoder profile was not selected: %#v", job.EncoderProfile)
+	}
+}
+
+func TestApplyEncoderRuntimeConfigRejectsMissingRequestedProfile(t *testing.T) {
+	job := lifecycle.StreamJob{StreamID: "stream-01", EncoderProfileID: "encoder-missing"}
+	provider := func(context.Context) (control.RuntimeConfig, error) {
+		return control.RuntimeConfig{Profiles: map[string][]control.RuntimeProfile{"encoder": {{ID: "encoder-other"}}}}, nil
+	}
+
+	err := applyEncoderRuntimeConfig(context.Background(), &job, provider)
+	if !errors.Is(err, errEncoderRuntimeProfileNotFound) {
+		t.Fatalf("missing profile error = %v", err)
+	}
+}
+
+func TestApplyEncoderRuntimeConfigRejectsProfileBoundToAnotherService(t *testing.T) {
+	job := lifecycle.StreamJob{StreamID: "stream-01", EncoderProfileID: "encoder-selected"}
+	provider := func(context.Context) (control.RuntimeConfig, error) {
+		return control.RuntimeConfig{
+			Service: control.RegisteredService{ServiceID: "encoder-primary"},
+			Profiles: map[string][]control.RuntimeProfile{"encoder": {{
+				ID: "encoder-selected", Config: map[string]any{"service_id": "encoder-other", "width": float64(1280), "height": float64(720)},
+			}}},
+		}, nil
+	}
+
+	err := applyEncoderRuntimeConfig(context.Background(), &job, provider)
+	if !errors.Is(err, errEncoderRuntimeProfileNotFound) {
+		t.Fatalf("cross-service profile error = %v", err)
 	}
 }
 

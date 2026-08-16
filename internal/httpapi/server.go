@@ -219,6 +219,11 @@ func NewServerWithManagers(serviceType string, processManager *streamproc.Manage
 type RuntimeSecretResolver func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error)
 type RuntimeConfigProvider func(ctx context.Context) (control.RuntimeConfig, error)
 
+var (
+	errEncoderRuntimeProfileNotFound = errors.New("encoder runtime profile not found")
+	errEncoderRuntimeConfigMissing   = errors.New("encoder runtime config provider is unavailable")
+)
+
 func NewServerWithManagersAndSecretResolver(serviceType string, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier, resolver RuntimeSecretResolver) http.Handler {
 	return NewServerWithManagersAndRuntimeConfig(serviceType, processManager, eventManager, verifier, resolver, nil)
 }
@@ -566,6 +571,14 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
 			return
 		}
+		if err := applyEncoderRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+			if errors.Is(err, errEncoderRuntimeProfileNotFound) {
+				writeJSON(w, http.StatusConflict, map[string]string{"code": "encoder_runtime_profile_not_found"})
+			} else {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
+			}
+			return
+		}
 		if err := applyYouTubeRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
 			return
@@ -656,6 +669,14 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 		job := startRequest.StreamJob
 		if !startRequest.WorkerVideoIngest && strings.TrimSpace(startRequest.WorkerVideoIngestToken) != "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "worker_video_ingest_not_enabled"})
+			return
+		}
+		if err := applyEncoderRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+			if errors.Is(err, errEncoderRuntimeProfileNotFound) {
+				writeJSON(w, http.StatusConflict, map[string]string{"code": "encoder_runtime_profile_not_found"})
+			} else {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
+			}
 			return
 		}
 		if err := applyYouTubeRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
@@ -831,6 +852,42 @@ func applyYouTubeRuntimeConfig(ctx context.Context, job *lifecycle.StreamJob, pr
 		job.StreamKeySecretName = youtube.StreamKeySecretName()
 	}
 	return nil
+}
+
+func applyEncoderRuntimeConfig(ctx context.Context, job *lifecycle.StreamJob, provider RuntimeConfigProvider) error {
+	if job == nil || strings.TrimSpace(job.EncoderProfileID) == "" {
+		return nil
+	}
+	if provider == nil {
+		return errEncoderRuntimeConfigMissing
+	}
+	cfg, err := provider(ctx)
+	if err != nil {
+		return err
+	}
+	profileID := strings.TrimSpace(job.EncoderProfileID)
+	for _, profile := range cfg.Profiles["encoder"] {
+		if strings.TrimSpace(profile.ID) != profileID || !runtimeEncoderProfileBelongsToService(profile, cfg.Service.ServiceID) {
+			continue
+		}
+		job.EncoderProfileID = profileID
+		job.EncoderProfile = ffmpeg.ProfileFromConfig(profile.Config)
+		return nil
+	}
+	return errEncoderRuntimeProfileNotFound
+}
+
+func runtimeEncoderProfileBelongsToService(profile control.RuntimeProfile, serviceID string) bool {
+	rawServiceID, configured := profile.Config["service_id"]
+	if !configured {
+		return true
+	}
+	profileServiceID, ok := rawServiceID.(string)
+	if !ok {
+		return false
+	}
+	profileServiceID = strings.TrimSpace(profileServiceID)
+	return profileServiceID == "" || profileServiceID == strings.TrimSpace(serviceID)
 }
 
 func applyArchiveRuntimeConfig(ctx context.Context, job *lifecycle.StreamJob, provider RuntimeConfigProvider) error {

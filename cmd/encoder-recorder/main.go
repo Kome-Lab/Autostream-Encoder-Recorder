@@ -336,40 +336,5 @@ func envBool(key string, fallback bool) bool {
 }
 
 func encoderProfileFromConfig(config map[string]any) ffmpeg.EncoderProfile {
-	profile := ffmpeg.DefaultProfile()
-	if width := intConfig(config, "width"); width > 0 {
-		profile.Width = width
-	}
-	if height := intConfig(config, "height"); height > 0 {
-		profile.Height = height
-	}
-	if fps := intConfig(config, "fps"); fps > 0 {
-		profile.FPS = fps
-	}
-	if kbps := intConfig(config, "video_bitrate_kbps"); kbps > 0 {
-		profile.VideoBitrate = fmt.Sprintf("%dk", kbps)
-	}
-	if kbps := intConfig(config, "audio_bitrate_kbps"); kbps > 0 {
-		profile.AudioBitrate = fmt.Sprintf("%dk", kbps)
-	}
-	if sampleRate := intConfig(config, "audio_sample_rate_hz"); sampleRate > 0 {
-		profile.SampleRate = sampleRate
-	}
-	if keyframe := intConfig(config, "keyframe_interval_sec"); keyframe > 0 {
-		profile.KeyframeSec = keyframe
-	}
-	return profile
-}
-
-func intConfig(config map[string]any, key string) int {
-	switch value := config[key].(type) {
-	case int:
-		return value
-	case int64:
-		return int(value)
-	case float64:
-		return int(value)
-	default:
-		return 0
-	}
+	return ffmpeg.ProfileFromConfig(config)
 }
