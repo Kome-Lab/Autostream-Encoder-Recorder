@@ -17,6 +17,21 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/archive"
 )
 
+const (
+	audioRTPFrameInterval = 20 * time.Millisecond
+	audioRTPClockStep     = uint32(960)
+	audioRTPPayloadType   = byte(111)
+	audioRTPSSRC          = uint32(0x41535452)
+	audioRTPQueueSize     = 500
+)
+
+// Discord may omit Opus packets while a channel is silent (and DAVE failures
+// can delay the first packet indefinitely). FFmpeg's RTP input blocks amix
+// until that input has a clock, which also stalls otherwise healthy video and
+// HLS outputs. This standard 20 ms Opus silence frame keeps a single local RTP
+// timeline alive; real Discord Opus payloads replace silence on that timeline.
+var opusSilenceFrame = []byte{0xf8, 0xff, 0xfe}
+
 type Packet struct {
 	SSRC       uint32    `json:"ssrc"`
 	UserID     string    `json:"user_id,omitempty"`
@@ -46,7 +61,7 @@ type Manager struct {
 	MaxPackets  int
 	MaxOpusSize int
 	mu          sync.Mutex
-	bridges     map[string]Bridge
+	bridges     map[string]*bridgeRecord
 	stats       map[string]Stats
 	seen        map[string]time.Time
 	maxSeen     int
@@ -57,6 +72,15 @@ type Bridge struct {
 	Port     int    `json:"port"`
 	SDPPath  string `json:"-"`
 	InputURL string `json:"-"`
+}
+
+type bridgeRecord struct {
+	conn     *net.UDPConn
+	target   *net.UDPAddr
+	packets  chan []byte
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 type Stats struct {
@@ -84,20 +108,42 @@ func (m *Manager) StartBridge(streamID string) (Bridge, error) {
 	if err != nil {
 		return Bridge{}, err
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.bridges == nil {
+		m.bridges = map[string]*bridgeRecord{}
+	}
+	if m.bridges[streamID] != nil {
+		return Bridge{}, errors.New("audio bridge is already running")
+	}
 	if err := archive.EnsureDirNoSymlinks(layout.RootDir, layout.TmpDir()); err != nil {
+		return Bridge{}, err
+	}
+	conn, err := openRTPSender()
+	if err != nil {
 		return Bridge{}, err
 	}
 	port, err := freeUDPPort()
 	if err != nil {
+		_ = conn.Close()
 		return Bridge{}, err
 	}
 	bridge := Bridge{StreamID: streamID, Port: port, SDPPath: layout.TmpDiscordOpusSDP(), InputURL: "internal_discord_audio:" + filepath.ToSlash(layout.TmpDiscordOpusSDP())}
 	if err := writeFileNoSymlink(bridge.SDPPath, []byte(sdpForPort(port))); err != nil {
+		_ = conn.Close()
 		return Bridge{}, err
 	}
-	m.mu.Lock()
-	if m.bridges == nil {
-		m.bridges = map[string]Bridge{}
+	target, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		_ = conn.Close()
+		return Bridge{}, err
+	}
+	record := &bridgeRecord{
+		conn:    conn,
+		target:  target,
+		packets: make(chan []byte, audioRTPQueueSize),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	if m.stats == nil {
 		m.stats = map[string]Stats{}
@@ -105,23 +151,27 @@ func (m *Manager) StartBridge(streamID string) (Bridge, error) {
 	if m.seen == nil {
 		m.seen = map[string]time.Time{}
 	}
-	m.bridges[streamID] = bridge
+	m.bridges[streamID] = record
 	stats := m.stats[streamID]
 	stats.StreamID = streamID
 	stats.BridgeActive = true
 	stats.StartedAt = time.Now().UTC()
 	m.stats[streamID] = stats
-	m.mu.Unlock()
+	go record.run()
 	return bridge, nil
 }
 
 func (m *Manager) StopBridge(streamID string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	record := m.bridges[streamID]
 	delete(m.bridges, streamID)
 	if stats, ok := m.stats[streamID]; ok {
 		stats.BridgeActive = false
 		m.stats[streamID] = stats
+	}
+	m.mu.Unlock()
+	if record != nil {
+		record.close()
 	}
 }
 
@@ -241,10 +291,9 @@ func (m *Manager) Add(req IngestRequest) (Result, error) {
 	}
 	if hasBridge {
 		for _, decoded := range acceptedPackets {
-			if err := forwardRTP(bridge.Port, decoded.packet, decoded.opus); err != nil {
-				return Result{}, err
+			if bridge.enqueue(decoded.opus) {
+				rtpForwarded++
 			}
-			rtpForwarded++
 		}
 	}
 	if m.stats == nil {
@@ -333,25 +382,79 @@ func sdpForPort(port int) string {
 		"a=recvonly\n", port)
 }
 
-func forwardRTP(port int, packet Packet, opus []byte) error {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		return err
+func openRTPSender() (*net.UDPConn, error) {
+	// Bind the sender first so freeUDPPort cannot return the same ephemeral port
+	// for FFmpeg's receiver. A connected UDP socket opened after freeUDPPort can
+	// otherwise reuse that just-released port and make FFmpeg's bind fail.
+	return net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+}
+
+func (r *bridgeRecord) run() {
+	defer close(r.done)
+	defer r.conn.Close()
+	ticker := time.NewTicker(audioRTPFrameInterval)
+	defer ticker.Stop()
+	var sequence uint16
+	var timestamp uint32
+	for {
+		select {
+		case <-r.stop:
+			return
+		case <-ticker.C:
+			payload := opusSilenceFrame
+			select {
+			case packet := <-r.packets:
+				payload = packet
+			default:
+			}
+			_, _ = r.conn.WriteToUDP(buildRTPPacket(sequence, timestamp, payload), r.target)
+			sequence++
+			timestamp += audioRTPClockStep
+		}
 	}
-	conn, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		return err
+}
+
+func (r *bridgeRecord) enqueue(opus []byte) bool {
+	payload := append([]byte(nil), opus...)
+	select {
+	case <-r.stop:
+		return false
+	default:
 	}
-	defer conn.Close()
+	select {
+	case r.packets <- payload:
+		return true
+	default:
+	}
+	// Keep live audio latency bounded. If HTTP delivery briefly outruns the
+	// 20 ms RTP clock, discard the oldest queued payload and converge on current
+	// audio instead of accumulating an unbounded delay.
+	select {
+	case <-r.packets:
+	default:
+	}
+	select {
+	case r.packets <- payload:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *bridgeRecord) close() {
+	r.stopOnce.Do(func() { close(r.stop) })
+	<-r.done
+}
+
+func buildRTPPacket(sequence uint16, timestamp uint32, opus []byte) []byte {
 	rtp := make([]byte, 12+len(opus))
 	rtp[0] = 0x80
-	rtp[1] = 111
-	binary.BigEndian.PutUint16(rtp[2:4], packet.Sequence)
-	binary.BigEndian.PutUint32(rtp[4:8], packet.Timestamp)
-	binary.BigEndian.PutUint32(rtp[8:12], packet.SSRC)
+	rtp[1] = audioRTPPayloadType
+	binary.BigEndian.PutUint16(rtp[2:4], sequence)
+	binary.BigEndian.PutUint32(rtp[4:8], timestamp)
+	binary.BigEndian.PutUint32(rtp[8:12], audioRTPSSRC)
 	copy(rtp[12:], opus)
-	_, err = conn.Write(rtp)
-	return err
+	return rtp
 }
 
 func appendJSONL(path string, value any) error {

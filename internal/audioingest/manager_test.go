@@ -1,8 +1,13 @@
 package audioingest
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
+	"encoding/binary"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -79,6 +84,137 @@ func TestManagerStartsBridgeAndForwardsRTP(t *testing.T) {
 	if stats := manager.Status("stream-01", time.Now().UTC()); stats.BridgeActive {
 		t.Fatalf("bridge should be stopped: %#v", stats)
 	}
+}
+
+func TestManagerRejectsDuplicateBridgeWithoutChangingSDP(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	bridge, err := manager.StartBridge("stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.StopBridge("stream-01")
+
+	before, err := os.ReadFile(bridge.SDPPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.StartBridge("stream-01"); err == nil {
+		t.Fatal("duplicate bridge start unexpectedly succeeded")
+	}
+	after, err := os.ReadFile(bridge.SDPPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("duplicate bridge start changed the active SDP")
+	}
+}
+
+func TestBridgeEmitsContinuousSilenceAndNormalizesRealOpusTimeline(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	bridge, err := manager.StartBridge("stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.StopBridge("stream-01")
+
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: bridge.Port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := listener.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	first := readRTPPacket(t, listener)
+	if !bytes.Equal(first[12:], opusSilenceFrame) {
+		t.Fatalf("first RTP payload = %x, want Opus silence %x", first[12:], opusSilenceFrame)
+	}
+
+	realOpus := []byte{0x11, 0x22, 0x33, 0x44}
+	result, err := manager.Add(IngestRequest{
+		StreamID: "stream-01",
+		Source:   "discord-bot-01",
+		Packets: []Packet{{
+			SSRC:       9876,
+			Sequence:   42,
+			Timestamp:  123456,
+			ReceivedAt: time.Now().UTC(),
+			OpusBase64: base64.StdEncoding.EncodeToString(realOpus),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RTPForwarded != 1 {
+		t.Fatalf("real Opus was not queued for RTP forwarding: %#v", result)
+	}
+
+	previous := first
+	for {
+		packet := readRTPPacket(t, listener)
+		if packet[1]&0x7f != audioRTPPayloadType {
+			t.Fatalf("RTP payload type = %d, want %d", packet[1]&0x7f, audioRTPPayloadType)
+		}
+		if got := binary.BigEndian.Uint32(packet[8:12]); got != audioRTPSSRC {
+			t.Fatalf("RTP SSRC = %x, want normalized %x", got, audioRTPSSRC)
+		}
+		if got, want := binary.BigEndian.Uint16(packet[2:4]), binary.BigEndian.Uint16(previous[2:4])+1; got != want {
+			t.Fatalf("RTP sequence = %d, want %d", got, want)
+		}
+		if got, want := binary.BigEndian.Uint32(packet[4:8]), binary.BigEndian.Uint32(previous[4:8])+audioRTPClockStep; got != want {
+			t.Fatalf("RTP timestamp = %d, want %d", got, want)
+		}
+		if bytes.Equal(packet[12:], realOpus) {
+			break
+		}
+		previous = packet
+	}
+}
+
+func TestBridgeSilenceKeepsFFmpegAudioClockAdvancing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping FFmpeg integration test in short mode")
+	}
+	ffmpegBin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skipf("ffmpeg is not installed: %v", err)
+	}
+
+	manager := NewManager(t.TempDir())
+	bridge, err := manager.StartBridge("stream-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.StopBridge("stream-01")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, ffmpegBin,
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-protocol_whitelist", "file,udp,rtp", "-i", bridge.SDPPath,
+		"-map", "0:a:0", "-t", "0.2", "-f", "null", "-",
+	).CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("ffmpeg did not advance on bridge silence: %v", ctx.Err())
+	}
+	if err != nil {
+		t.Fatalf("ffmpeg could not decode bridge silence: %v\n%s", err, output)
+	}
+}
+
+func readRTPPacket(t *testing.T, listener *net.UDPConn) []byte {
+	t.Helper()
+	buffer := make([]byte, 4096)
+	count, _, err := listener.ReadFromUDP(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count < 12 {
+		t.Fatalf("short RTP packet: %d bytes", count)
+	}
+	return append([]byte(nil), buffer[:count]...)
 }
 
 func TestManagerRejectsInvalidOpusBase64(t *testing.T) {
