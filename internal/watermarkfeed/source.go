@@ -34,8 +34,9 @@ type Source struct {
 	current net.Conn
 	closed  bool
 
-	done chan struct{}
-	wg   sync.WaitGroup
+	done    chan struct{}
+	updated chan struct{}
+	wg      sync.WaitGroup
 }
 
 func New(config map[string]any) (*Source, error) {
@@ -47,7 +48,7 @@ func New(config map[string]any) (*Source, error) {
 	if err != nil {
 		return nil, err
 	}
-	source := &Source{listener: listener, frame: frame, done: make(chan struct{})}
+	source := &Source{listener: listener, frame: frame, done: make(chan struct{}), updated: make(chan struct{}, 1)}
 	source.wg.Add(1)
 	go source.serve()
 	return source, nil
@@ -70,6 +71,10 @@ func (s *Source) Update(frame []byte) error {
 		return errors.New("watermark source is closed")
 	}
 	s.frame = append(s.frame[:0], frame...)
+	select {
+	case s.updated <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
@@ -146,6 +151,7 @@ func (s *Source) writeFrames(conn net.Conn) {
 		select {
 		case <-s.done:
 			return
+		case <-s.updated:
 		case <-ticker.C:
 		}
 	}

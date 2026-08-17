@@ -141,6 +141,8 @@ func TestBuildWorkerVideoDiscordAudioArgsKeepsCredentialOutOfFFmpegAndAppliesWat
 		"[3:v]format=rgba,scale=1920:1080[wm]",
 		"[base][wm]overlay=0:0",
 		"-map [v] -map [aout_stats]",
+		"-s:v 1920x1080",
+		"-aspect 16:9",
 		"-minrate:v 8000k -maxrate:v 8000k -bufsize:v 16000k",
 		"-f tee",
 		"[aout]astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level+Peak_level,ametadata=print:file=C:/tmp/audio-stats.txt:direct=1:enable='not(mod(n,50))'[aout_stats]",

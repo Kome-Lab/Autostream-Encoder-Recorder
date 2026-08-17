@@ -164,10 +164,13 @@ func (p *execProcess) Command(target, command, argument string) error {
 	if p.stdin == nil {
 		return errors.New("ffmpeg runtime command input is unavailable")
 	}
-	// FFmpeg's interactive c command expects: target, time, command, argument.
+	// FFmpeg consumes the leading "c" as a single interactive key, then reads
+	// the command from the remainder of that same input line. A newline directly
+	// after "c" is therefore parsed as an empty command.
+	// The command itself expects: target, time, command, argument.
 	// A time of -1 applies the command immediately to the first matching
 	// named filter instance.
-	_, err = io.WriteString(p.stdin, "c\n"+target+" -1 "+command+" "+argument+"\n")
+	_, err = io.WriteString(p.stdin, "c"+target+" -1 "+command+" "+argument+"\n")
 	return err
 }
 
@@ -505,16 +508,33 @@ func (m *Manager) UpdateRuntimeSettings(streamID string, settings RuntimeSetting
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	current, ok := m.processes[streamID]
 	if !ok || current != tracked || current.snapshot.Status != "running" {
+		m.mu.Unlock()
 		return Snapshot{}, ErrNotRunning
 	}
 	current.job.EncoderAudioGainDB = settings.EncoderAudioGainDB
 	current.job.OverlayProfileID = strings.TrimSpace(settings.OverlayProfileID)
 	current.snapshot.EncoderAudioGainDB = settings.EncoderAudioGainDB
 	current.snapshot.OverlayProfileID = strings.TrimSpace(settings.OverlayProfileID)
-	return current.snapshot, nil
+	snapshot := current.snapshot
+	m.mu.Unlock()
+
+	log.Printf("encoder diagnostic: event=encoder.runtime_settings.dispatched stream_id=%s status=dispatched audio_gain_db=%.1f overlay_profile_id=%s audio_command_written=true watermark_frame_updated=true", streamID, settings.EncoderAudioGainDB, strings.TrimSpace(settings.OverlayProfileID))
+	m.report(observability.Signal{
+		Type:      "event",
+		Name:      "encoder.runtime_settings.dispatched",
+		StreamID:  streamID,
+		Status:    "dispatched",
+		Timestamp: time.Now().UTC(),
+		Attributes: map[string]any{
+			"audio_gain_db":           settings.EncoderAudioGainDB,
+			"overlay_profile_id":      strings.TrimSpace(settings.OverlayProfileID),
+			"audio_command_written":   true,
+			"watermark_frame_updated": true,
+		},
+	})
+	return snapshot, nil
 }
 
 // OutputRelayPolicy returns the non-secret routing configuration.  An unset

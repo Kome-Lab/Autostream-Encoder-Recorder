@@ -382,11 +382,36 @@ func audioStatsFilter(path string) string {
 
 func liveVideoCodecArgs(p EncoderProfile) []string {
 	return []string{
+		// Keep the coded geometry explicit at the output boundary. The complex
+		// filter graph already normalizes frames, but tee/FLV consumers must not
+		// be allowed to infer a square coded size from an upstream stream.
+		"-s:v", itoa(p.Width) + "x" + itoa(p.Height), "-aspect", displayAspect(p.Width, p.Height),
 		"-c:v", "libx264", "-preset", liveVideoPreset, "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
 		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
 		"-r", itoa(p.FPS), "-g", itoa(p.FPS * p.KeyframeSec), "-keyint_min", itoa(p.FPS * p.KeyframeSec), "-sc_threshold", "0",
 		"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr",
 	}
+}
+
+func displayAspect(width, height int) string {
+	divisor := greatestCommonDivisor(width, height)
+	if divisor <= 0 {
+		return itoa(width) + ":" + itoa(height)
+	}
+	return itoa(width/divisor) + ":" + itoa(height/divisor)
+}
+
+func greatestCommonDivisor(left, right int) int {
+	if left < 0 {
+		left = -left
+	}
+	if right < 0 {
+		right = -right
+	}
+	for right != 0 {
+		left, right = right, left%right
+	}
+	return left
 }
 
 func appendComplexAudioStats(filter, path string) (string, string) {
