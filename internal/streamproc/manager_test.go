@@ -173,6 +173,11 @@ func TestManagerStartWritesMetadataAndMasksStreamKey(t *testing.T) {
 	if !strings.Contains(string(body), "preview/index.m3u8") || !strings.Contains(string(body), "preview/segment-%06d.ts") {
 		t.Fatalf("expected logical preview paths in metadata: %s", string(body))
 	}
+	for _, want := range []string{`"youtube_output_mode": "live_api_relay_static"`, `"output_route": "local_relay"`} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("safe output route diagnostic %q missing from metadata: %s", want, string(body))
+		}
+	}
 	if strings.Contains(string(body), root) || strings.Contains(string(body), `\tmp\`) || strings.Contains(string(body), `/tmp/`) {
 		t.Fatalf("local archive path leaked in start metadata: %s", string(body))
 	}
@@ -500,7 +505,7 @@ func TestWriteStartMetadataRedactsDirectRTMPSOutputTarget(t *testing.T) {
 		InputURL:  "rtsp://camera:camera-password@input.example.com/live/path-token",
 		RTMPURL:   "rtmps://youtube.example.com/live2",
 		StreamKey: "direct-secret-stream-key",
-	}, Snapshot{StartedAtJST: "2026-06-08T12:00:00+09:00", Archive: map[string]string{"recording_mkv": "final.mkv"}}, args, "ffmpeg")
+	}, Snapshot{StartedAtJST: "2026-06-08T12:00:00+09:00", Archive: map[string]string{"recording_mkv": "final.mkv"}}, args, "ffmpeg", "direct")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +607,7 @@ func TestWriteStartMetadataRejectsSymlink(t *testing.T) {
 		StreamID: "stream-01",
 		Name:     "Morning Stream",
 		RTMPURL:  "rtmps://youtube.example.com/live2",
-	}, Snapshot{StartedAtJST: "2026-06-08T12:00:00+09:00", Archive: map[string]string{"recording_mkv": "final.mkv"}}, []string{"-f", "lavfi"}, "ffmpeg")
+	}, Snapshot{StartedAtJST: "2026-06-08T12:00:00+09:00", Archive: map[string]string{"recording_mkv": "final.mkv"}}, []string{"-f", "lavfi"}, "ffmpeg", "direct")
 	if err == nil {
 		t.Fatal("expected symlink metadata write to fail")
 	}

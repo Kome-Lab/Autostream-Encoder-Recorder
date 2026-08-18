@@ -311,7 +311,9 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	outputRoute := "direct"
 	if usesLocalRelay {
+		outputRoute = "local_relay"
 		// A local Relay's downstream target is configured out of band.  Do not
 		// retain an upstream RTMPS target, key, or reference in process state,
 		// metadata, or later error paths once the Relay route was authorized.
@@ -437,7 +439,7 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 		EncoderAudioGainDB: job.EncoderAudioGainDB,
 		OverlayProfileID:   job.OverlayProfileID,
 	}
-	if err := writeStartMetadata(layout, job, snapshot, args, m.ffmpegBin()); err != nil {
+	if err := writeStartMetadata(layout, job, snapshot, args, m.ffmpegBin(), outputRoute); err != nil {
 		_ = process.Kill()
 		_ = watermarkSource.Close()
 		return Snapshot{}, err
@@ -450,7 +452,7 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	watermarkActive = false
 	reservationActive = false
 
-	log.Printf("encoder diagnostic: event=encoder.process.started stream_id=%s status=running encoder_profile_id=%s output_width=%d output_height=%d output_fps=%d", job.StreamID, strings.TrimSpace(job.EncoderProfileID), profile.Width, profile.Height, profile.FPS)
+	log.Printf("encoder diagnostic: event=encoder.process.started stream_id=%s status=running encoder_profile_id=%s output_width=%d output_height=%d output_fps=%d youtube_output_mode=%s output_route=%s", job.StreamID, strings.TrimSpace(job.EncoderProfileID), profile.Width, profile.Height, profile.FPS, strings.TrimSpace(job.YouTubeOutputMode), outputRoute)
 	m.report(observability.Signal{
 		Type:      "event",
 		Name:      "encoder.process.started",
@@ -458,12 +460,14 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 		Status:    "running",
 		Timestamp: time.Now().UTC(),
 		Attributes: map[string]any{
-			"recording_mkv":      "final.mkv",
-			"preview_playlist":   "preview/index.m3u8",
-			"encoder_profile_id": strings.TrimSpace(job.EncoderProfileID),
-			"output_width":       profile.Width,
-			"output_height":      profile.Height,
-			"output_fps":         profile.FPS,
+			"recording_mkv":       "final.mkv",
+			"preview_playlist":    "preview/index.m3u8",
+			"encoder_profile_id":  strings.TrimSpace(job.EncoderProfileID),
+			"output_width":        profile.Width,
+			"output_height":       profile.Height,
+			"output_fps":          profile.FPS,
+			"youtube_output_mode": strings.TrimSpace(job.YouTubeOutputMode),
+			"output_route":        outputRoute,
 		},
 	})
 	go m.wait(job.StreamID, process, done)
@@ -1443,7 +1447,7 @@ func maxFloat(a, b float64) float64 {
 	return b
 }
 
-func writeStartMetadata(layout archive.Layout, job lifecycle.StreamJob, snapshot Snapshot, args []string, bin string) error {
+func writeStartMetadata(layout archive.Layout, job lifecycle.StreamJob, snapshot Snapshot, args []string, bin, outputRoute string) error {
 	extra := map[string]any{"live_process": true}
 	if job.InputMode != "" {
 		extra["input_mode"] = job.InputMode
@@ -1455,6 +1459,12 @@ func writeStartMetadata(layout archive.Layout, job lifecycle.StreamJob, snapshot
 		extra["output_width"] = job.EncoderProfile.Width
 		extra["output_height"] = job.EncoderProfile.Height
 		extra["output_fps"] = job.EncoderProfile.FPS
+	}
+	if youtubeOutputMode := strings.TrimSpace(job.YouTubeOutputMode); youtubeOutputMode != "" {
+		extra["youtube_output_mode"] = youtubeOutputMode
+	}
+	if outputRoute = strings.TrimSpace(outputRoute); outputRoute == "direct" || outputRoute == "local_relay" {
+		extra["output_route"] = outputRoute
 	}
 	metadata := map[string]any{
 		"stream_id":      job.StreamID,
