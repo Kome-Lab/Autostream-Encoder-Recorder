@@ -314,6 +314,9 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	mux.HandleFunc("GET /streams/{id}/artifacts/{name}", downloadArchiveArtifact(eventManager.ArchiveRoot, verifier))
 	mux.HandleFunc("DELETE /streams/{id}/artifacts/{name}", deleteArchiveArtifact(eventManager.ArchiveRoot, verifier))
 	mux.HandleFunc("PUT /streams/{id}/artifacts/{name}", renameArchiveArtifact(eventManager.ArchiveRoot, verifier))
+	mux.HandleFunc("GET /streams/{id}/archive-runs/{run_id}/artifacts/{name}", downloadArchiveArtifact(eventManager.ArchiveRoot, verifier))
+	mux.HandleFunc("DELETE /streams/{id}/archive-runs/{run_id}/artifacts/{name}", deleteArchiveArtifact(eventManager.ArchiveRoot, verifier))
+	mux.HandleFunc("PUT /streams/{id}/archive-runs/{run_id}/artifacts/{name}", renameArchiveArtifact(eventManager.ArchiveRoot, verifier))
 	mux.HandleFunc("POST /worker-events", workerEvents(eventManager, processManager, verifier))
 	mux.HandleFunc("GET /streams/{id}/worker-events", recentWorkerEvents(eventManager, verifier))
 	mux.HandleFunc("POST /streams/{id}/audio/opus", discordOpusAudio(audioManager, processManager, verifier))
@@ -1262,7 +1265,7 @@ func packageStream(verifier TokenVerifier, resolver RuntimeSecretResolver, runti
 			return
 		}
 		reportPackageCompleted(r.Context(), job, result, time.Since(started))
-		reportControlPanelArtifacts(r.Context(), job.StreamID, result)
+		reportControlPanelArtifacts(r.Context(), job, result)
 		writeJSON(w, http.StatusAccepted, result.Metadata)
 	}
 }
@@ -1272,7 +1275,7 @@ func downloadArchiveArtifact(archiveRoot string, verifier TokenVerifier) http.Ha
 		if !requireServiceToken(w, r, verifier) {
 			return
 		}
-		path, info, err := safeArchiveArtifactPath(archiveRoot, r.PathValue("id"), r.PathValue("name"))
+		path, info, err := safeArchiveArtifactPath(archiveRoot, r.PathValue("id"), r.PathValue("run_id"), r.PathValue("name"))
 		if errors.Is(err, os.ErrNotExist) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"code": "artifact_not_found"})
 			return
@@ -1310,7 +1313,7 @@ func deleteArchiveArtifact(archiveRoot string, verifier TokenVerifier) http.Hand
 		if !requireServiceToken(w, r, verifier) {
 			return
 		}
-		path, _, err := safeArchiveArtifactPath(archiveRoot, r.PathValue("id"), r.PathValue("name"))
+		path, _, err := safeArchiveArtifactPath(archiveRoot, r.PathValue("id"), r.PathValue("run_id"), r.PathValue("name"))
 		if errors.Is(err, os.ErrNotExist) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"code": "artifact_not_found"})
 			return
@@ -1342,7 +1345,7 @@ func renameArchiveArtifact(archiveRoot string, verifier TokenVerifier) http.Hand
 			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
 			return
 		}
-		source, _, err := safeArchiveArtifactPath(archiveRoot, r.PathValue("id"), r.PathValue("name"))
+		source, _, err := safeArchiveArtifactPath(archiveRoot, r.PathValue("id"), r.PathValue("run_id"), r.PathValue("name"))
 		if errors.Is(err, os.ErrNotExist) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"code": "artifact_not_found"})
 			return
@@ -1351,7 +1354,7 @@ func renameArchiveArtifact(archiveRoot string, verifier TokenVerifier) http.Hand
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_archive_artifact"})
 			return
 		}
-		target, _, err := safeArchiveArtifactPathForName(archiveRoot, r.PathValue("id"), body.Name, false)
+		target, _, err := safeArchiveArtifactPathForName(archiveRoot, r.PathValue("id"), r.PathValue("run_id"), body.Name, false)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_archive_artifact"})
 			return
@@ -1371,12 +1374,18 @@ func renameArchiveArtifact(archiveRoot string, verifier TokenVerifier) http.Hand
 	}
 }
 
-func safeArchiveArtifactPath(archiveRoot, streamID, name string) (string, os.FileInfo, error) {
-	return safeArchiveArtifactPathForName(archiveRoot, streamID, name, true)
+func safeArchiveArtifactPath(archiveRoot, streamID, archiveRunID, name string) (string, os.FileInfo, error) {
+	return safeArchiveArtifactPathForName(archiveRoot, streamID, archiveRunID, name, true)
 }
 
-func safeArchiveArtifactPathForName(archiveRoot, streamID, name string, requireExisting bool) (string, os.FileInfo, error) {
-	layout, err := archive.NewLayout(archiveRoot, streamID)
+func safeArchiveArtifactPathForName(archiveRoot, streamID, archiveRunID, name string, requireExisting bool) (string, os.FileInfo, error) {
+	var layout archive.Layout
+	var err error
+	if strings.TrimSpace(archiveRunID) == "" {
+		layout, err = archive.NewLayout(archiveRoot, streamID)
+	} else {
+		layout, err = archive.NewRunLayout(archiveRoot, streamID, archiveRunID)
+	}
 	if err != nil {
 		return "", nil, err
 	}
@@ -1737,7 +1746,7 @@ func reportPackageCompleted(ctx context.Context, job lifecycle.PackageJob, resul
 	}
 }
 
-func reportControlPanelArtifacts(ctx context.Context, streamID string, result lifecycle.Result) {
+func reportControlPanelArtifacts(ctx context.Context, job lifecycle.PackageJob, result lifecycle.Result) {
 	config := control.ConfigFromEnv()
 	if config.ControlPanelURL == "" || config.Token == "" {
 		return
@@ -1747,7 +1756,11 @@ func reportControlPanelArtifacts(ctx context.Context, streamID string, result li
 		return
 	}
 	client := control.Client{Config: config}
-	if err := client.ReportArtifacts(ctx, streamID, artifacts); err != nil {
+	archiveRuns := []control.ArchiveRun(nil)
+	if strings.TrimSpace(job.ArchiveRunID) != "" {
+		archiveRuns = append(archiveRuns, control.ArchiveRun{ID: job.ArchiveRunID, StartedAt: job.StartedAt})
+	}
+	if err := client.ReportArtifacts(ctx, job.StreamID, artifacts, archiveRuns...); err != nil {
 		log.Printf("control panel artifact report failed: %v", err)
 	}
 }

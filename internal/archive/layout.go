@@ -8,8 +8,9 @@ import (
 )
 
 type Layout struct {
-	RootDir  string
-	StreamID string
+	RootDir      string
+	StreamID     string
+	ArchiveRunID string
 }
 
 func NewLayout(rootDir, streamID string) (Layout, error) {
@@ -22,11 +23,26 @@ func NewLayout(rootDir, streamID string) (Layout, error) {
 	return Layout{RootDir: filepath.Clean(rootDir), StreamID: streamID}, nil
 }
 
+func NewRunLayout(rootDir, streamID, archiveRunID string) (Layout, error) {
+	layout, err := NewLayout(rootDir, streamID)
+	if err != nil {
+		return Layout{}, err
+	}
+	if !isSafeArchiveRunID(archiveRunID) {
+		return Layout{}, errors.New("unsafe archive run id")
+	}
+	layout.ArchiveRunID = archiveRunID
+	return layout, nil
+}
+
 func (l Layout) TmpDir() string {
 	return filepath.Join(l.RootDir, "tmp", l.StreamID)
 }
 
 func (l Layout) FinalDir() string {
+	if l.ArchiveRunID != "" {
+		return filepath.Join(l.RootDir, "final", l.StreamID, l.ArchiveRunID)
+	}
 	return filepath.Join(l.RootDir, "final", l.StreamID)
 }
 
@@ -109,4 +125,22 @@ func isSafeID(id string) bool {
 		return false
 	}
 	return true
+}
+
+func isSafeArchiveRunID(id string) bool {
+	if len(id) > 128 || strings.Contains(id, "..") || len(id) == 0 || !isASCIIAlphaNumeric(id[0]) {
+		return false
+	}
+	for index := 0; index < len(id); index++ {
+		value := id[index]
+		if isASCIIAlphaNumeric(value) || value == '-' || value == '_' || value == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isASCIIAlphaNumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
 }

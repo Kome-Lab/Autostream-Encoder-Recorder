@@ -28,6 +28,7 @@ type Manager struct {
 
 type StreamJob struct {
 	StreamID             string                `json:"stream_id"`
+	ArchiveRunID         string                `json:"archive_run_id,omitempty"`
 	Name                 string                `json:"name"`
 	InputURL             string                `json:"input_url"`
 	InputMode            string                `json:"input_mode,omitempty"`
@@ -51,6 +52,7 @@ type StreamJob struct {
 
 type PackageJob struct {
 	StreamID      string        `json:"stream_id"`
+	ArchiveRunID  string        `json:"archive_run_id,omitempty"`
 	Name          string        `json:"name"`
 	StartedAt     time.Time     `json:"started_at"`
 	DryRun        bool          `json:"dry_run"`
@@ -99,9 +101,17 @@ type Result struct {
 }
 
 func ArchiveArtifacts(streamID string) map[string]string {
+	return ArchiveArtifactsForRun(streamID, "")
+}
+
+func ArchiveArtifactsForRun(streamID, archiveRunID string) map[string]string {
+	finalArtifactSet := "final/" + streamID
+	if archiveRunID != "" {
+		finalArtifactSet += "/" + archiveRunID
+	}
 	return map[string]string{
 		"tmp_artifact_set":   "tmp/" + streamID,
-		"final_artifact_set": "final/" + streamID,
+		"final_artifact_set": finalArtifactSet,
 		"recording_mkv":      "final.mkv",
 		"preview_playlist":   "preview/index.m3u8",
 		"final_mp4":          "final.mp4",
@@ -188,7 +198,10 @@ func (m Manager) DryRunToOutputTarget(ctx context.Context, job StreamJob, output
 	if job.StreamID == "" || job.Name == "" {
 		return Result{}, errors.New("stream id and name are required")
 	}
-	layout, err := archive.NewLayout(m.ArchiveRoot, job.StreamID)
+	if job.ArchiveRunID != "" && job.StartedAt.IsZero() {
+		return Result{}, errors.New("archive run started_at is required when archive_run_id is set")
+	}
+	layout, err := archiveLayout(m.ArchiveRoot, job.StreamID, job.ArchiveRunID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -245,6 +258,7 @@ func (m Manager) DryRunToOutputTarget(ctx context.Context, job StreamJob, output
 	}
 	uploader := m.uploaderForJob(PackageJob{
 		StreamID:      job.StreamID,
+		ArchiveRunID:  job.ArchiveRunID,
 		Name:          job.Name,
 		StartedAt:     job.StartedAt,
 		DryRun:        job.DryRun,
@@ -264,9 +278,12 @@ func (m Manager) DryRunToOutputTarget(ctx context.Context, job StreamJob, output
 	extra := metadataExtra(true, remuxDurationMS, job.ArchiveConfig)
 	extra["archive_source"] = "final_mkv"
 	extra["archive_partial"] = false
+	if job.ArchiveRunID != "" {
+		extra["archive_run_id"] = job.ArchiveRunID
+	}
 	metadata := Metadata{
 		StreamID: job.StreamID, Name: job.Name, StartedAtJST: startedAt.In(jst).Format(time.RFC3339),
-		Archive: ArchiveArtifacts(job.StreamID),
+		Archive: ArchiveArtifactsForRun(job.StreamID, job.ArchiveRunID),
 		Extra:   extra,
 	}
 	if dryRunner, ok := runner.(*ffmpeg.DryRunRunner); ok {
@@ -291,7 +308,10 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 	if job.StreamID == "" || job.Name == "" {
 		return Result{}, errors.New("stream id and name are required")
 	}
-	layout, err := archive.NewLayout(m.ArchiveRoot, job.StreamID)
+	if job.ArchiveRunID != "" && job.StartedAt.IsZero() {
+		return Result{}, errors.New("archive run started_at is required when archive_run_id is set")
+	}
+	layout, err := archiveLayout(m.ArchiveRoot, job.StreamID, job.ArchiveRunID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -379,9 +399,12 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 	extra := metadataExtra(job.DryRun, remuxDurationMS, job.ArchiveConfig)
 	extra["archive_source"] = archiveSource
 	extra["archive_partial"] = archivePartial
+	if job.ArchiveRunID != "" {
+		extra["archive_run_id"] = job.ArchiveRunID
+	}
 	metadata := Metadata{
 		StreamID: job.StreamID, Name: job.Name, StartedAtJST: startedAt.In(jst).Format(time.RFC3339),
-		Archive: ArchiveArtifacts(job.StreamID),
+		Archive: ArchiveArtifactsForRun(job.StreamID, job.ArchiveRunID),
 		Extra:   extra,
 	}
 	if dryRunner, ok := runner.(*ffmpeg.DryRunRunner); ok {
@@ -403,7 +426,7 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 		return Result{}, PackageError{Phase: "upload", Err: err}
 	}
 	metadata.Upload = upload
-	if err := cleanupExpiredLocalArchives(m.ArchiveRoot, job.StreamID, job.ArchiveConfig.RetentionDays, time.Now().UTC()); err != nil {
+	if err := cleanupExpiredLocalArchives(m.ArchiveRoot, job.StreamID, job.ArchiveRunID, job.ArchiveConfig.RetentionDays, time.Now().UTC()); err != nil {
 		return Result{}, PackageError{Phase: "retention", Err: err}
 	}
 	return Result{
@@ -413,6 +436,13 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 		ArchiveSource:   archiveSource,
 		Partial:         archivePartial,
 	}, nil
+}
+
+func archiveLayout(rootDir, streamID, archiveRunID string) (archive.Layout, error) {
+	if archiveRunID == "" {
+		return archive.NewLayout(rootDir, streamID)
+	}
+	return archive.NewRunLayout(rootDir, streamID, archiveRunID)
 }
 
 func (m Manager) uploaderForJob(job PackageJob) archive.ArchiveUploader {
@@ -612,7 +642,7 @@ func collectArchiveFiles(layout archive.Layout, cfg ArchiveConfig) ([]archive.Fi
 	return files, nil
 }
 
-func cleanupExpiredLocalArchives(rootDir, currentStreamID string, retentionDays int, now time.Time) error {
+func cleanupExpiredLocalArchives(rootDir, currentStreamID, currentArchiveRunID string, retentionDays int, now time.Time) error {
 	if retentionDays <= 0 {
 		return nil
 	}
@@ -644,9 +674,6 @@ func cleanupExpiredLocalArchives(rootDir, currentStreamID string, retentionDays 
 	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
 	for _, entry := range entries {
 		streamID := entry.Name()
-		if streamID == currentStreamID {
-			continue
-		}
 		if entry.Type()&os.ModeSymlink != 0 {
 			return errors.New("archive stream directory must not be a symlink")
 		}
@@ -660,6 +687,44 @@ func cleanupExpiredLocalArchives(rootDir, currentStreamID string, retentionDays 
 		finalDir := layout.FinalDir()
 		if err := archive.EnsureDirNoSymlinks(rootAbs, finalDir); err != nil {
 			return err
+		}
+		runEntries, err := os.ReadDir(finalDir)
+		if err != nil {
+			return err
+		}
+		hasRunDirectories := false
+		for _, runEntry := range runEntries {
+			if !runEntry.IsDir() {
+				continue
+			}
+			hasRunDirectories = true
+			if runEntry.Type()&os.ModeSymlink != 0 {
+				return errors.New("archive run directory must not be a symlink")
+			}
+			runID := runEntry.Name()
+			runLayout, err := archive.NewRunLayout(rootAbs, streamID, runID)
+			if err != nil {
+				continue
+			}
+			if streamID == currentStreamID && (currentArchiveRunID == "" || runID == currentArchiveRunID) {
+				continue
+			}
+			runDir := runLayout.FinalDir()
+			if err := archive.EnsureDirNoSymlinks(rootAbs, runDir); err != nil {
+				return err
+			}
+			modifiedAt, err := archiveFinalDirLastModified(runDir)
+			if err != nil {
+				return err
+			}
+			if modifiedAt.Before(cutoff) {
+				if err := os.RemoveAll(runDir); err != nil {
+					return err
+				}
+			}
+		}
+		if hasRunDirectories || streamID == currentStreamID {
+			continue
 		}
 		modifiedAt, err := archiveFinalDirLastModified(finalDir)
 		if err != nil {
@@ -761,6 +826,10 @@ func RedactCommandsForLayout(layout archive.Layout, commands []ffmpeg.Command, s
 }
 
 func redactArchivePaths(layout archive.Layout, args []string) []string {
+	finalArtifactSet := "final/" + layout.StreamID
+	if layout.ArchiveRunID != "" {
+		finalArtifactSet += "/" + layout.ArchiveRunID
+	}
 	replacements := []struct {
 		from string
 		to   string
@@ -782,7 +851,7 @@ func redactArchivePaths(layout archive.Layout, args []string) []string {
 		{layout.TmpLogs(), "logs.jsonl"},
 		{layout.FinalMKV(), "final.mkv"},
 		{layout.FinalMP4(), "final.mp4"},
-		{layout.FinalDir(), "final/" + layout.StreamID},
+		{layout.FinalDir(), finalArtifactSet},
 		{layout.TmpDir(), "tmp/" + layout.StreamID},
 		{layout.RootDir, "<ARCHIVE_ROOT>"},
 	}

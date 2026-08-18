@@ -90,6 +90,9 @@ func TestServiceCapabilitiesAdvertiseNonSecretOutputRelayMode(t *testing.T) {
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "")
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", testStaticRelayBindingID)
 	capabilities := serviceCapabilities()
+	if capabilities["archive_runs"] != true {
+		t.Fatalf("archive run capability=%#v, want true", capabilities)
+	}
 	if got := capabilities["output_relay_mode"]; got != "legacy_stream_key" {
 		t.Fatalf("legacy output relay capability=%#v", capabilities)
 	}
@@ -216,6 +219,32 @@ func TestReportArtifactsPostsLogicalPathsOnly(t *testing.T) {
 	body, _ := json.Marshal(got)
 	if strings.Contains(string(body), `C:\`) || strings.Contains(string(body), "/var/lib/") {
 		t.Fatalf("local path leaked in artifact report: %s", body)
+	}
+}
+
+func TestReportArtifactsIncludesArchiveRunMetadata(t *testing.T) {
+	var got ArtifactReport
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	startedAt := time.Date(2026, 8, 18, 5, 6, 29, 123456789, time.UTC)
+	client := Client{Config: Config{
+		ControlPanelURL:  server.URL,
+		Token:            "secret-token",
+		ServiceID:        "enc-01",
+		ServiceName:      "Encoder 01",
+		ServicePublicURL: "https://encoder.example.com",
+	}}
+	artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/run-01/final.mp4", SizeBytes: 123}}
+	if err := client.ReportArtifacts(t.Context(), "stream-01", artifacts, ArchiveRun{ID: "run-01", StartedAt: startedAt}); err != nil {
+		t.Fatal(err)
+	}
+	if got.ArchiveRunID != "run-01" || got.ArchiveStartedAt == nil || !got.ArchiveStartedAt.Equal(startedAt) {
+		t.Fatalf("archive run report = %#v", got)
 	}
 }
 

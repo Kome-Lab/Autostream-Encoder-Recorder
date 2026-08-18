@@ -225,6 +225,36 @@ func TestArchiveArtifactEndpointsRequireTokenAndSafeFinalFile(t *testing.T) {
 	}
 }
 
+func TestArchiveArtifactEndpointUsesRunScopedDirectory(t *testing.T) {
+	root := t.TempDir()
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.EnsureDirNoSymlinks(layout.RootDir, layout.FinalDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.FinalMP4(), []byte("run-archive"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
+	req := httptest.NewRequest(http.MethodGet, "/streams/stream-01/archive-runs/run-01/artifacts/final.mp4", nil)
+	req.Header.Set("Authorization", "Bearer service-token")
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK || res.Body.String() != "run-archive" {
+		t.Fatalf("run-scoped download status = %d body = %q", res.Code, res.Body.String())
+	}
+
+	unsafeReq := httptest.NewRequest(http.MethodGet, "/streams/stream-01/archive-runs/bad..run/artifacts/final.mp4", nil)
+	unsafeReq.Header.Set("Authorization", "Bearer service-token")
+	unsafeRes := httptest.NewRecorder()
+	handler.ServeHTTP(unsafeRes, unsafeReq)
+	if unsafeRes.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe run status = %d body = %s", unsafeRes.Code, unsafeRes.Body.String())
+	}
+}
+
 func TestPreviewEndpointRequiresTokenAndServesHLSWithSafeHeaders(t *testing.T) {
 	root := t.TempDir()
 	layout, err := archive.NewLayout(root, "stream-01")

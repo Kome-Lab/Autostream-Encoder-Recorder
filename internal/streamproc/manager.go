@@ -227,7 +227,7 @@ type Reporter interface {
 }
 
 type ArtifactReporter interface {
-	ReportArtifacts(ctx context.Context, streamID string, artifacts []control.Artifact) error
+	ReportArtifacts(ctx context.Context, streamID string, artifacts []control.Artifact, archiveRuns ...control.ArchiveRun) error
 }
 
 type ArchivePackager interface {
@@ -306,6 +306,9 @@ func NewManagerFromEnv() *Manager {
 func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	if job.StreamID == "" || job.Name == "" {
 		return Snapshot{}, errors.New("stream id and name are required")
+	}
+	if strings.TrimSpace(job.ArchiveRunID) != "" && job.StartedAt.IsZero() {
+		return Snapshot{}, errors.New("archive run started_at is required when archive_run_id is set")
 	}
 	usesLocalRelay, err := m.AuthorizeOutputRelay(job)
 	if err != nil {
@@ -434,7 +437,7 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 		Name:               job.Name,
 		Status:             "running",
 		PID:                process.PID(),
-		Archive:            lifecycle.ArchiveArtifacts(job.StreamID),
+		Archive:            lifecycle.ArchiveArtifactsForRun(job.StreamID, job.ArchiveRunID),
 		StartedAtJST:       startedAt.In(jst()).Format(time.RFC3339),
 		EncoderAudioGainDB: job.EncoderAudioGainDB,
 		OverlayProfileID:   job.OverlayProfileID,
@@ -881,7 +884,7 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 		} else {
 			tracked.snapshot.Status = "stopped"
 		}
-		packageJob = lifecycle.PackageJob{StreamID: tracked.job.StreamID, Name: tracked.job.Name, StartedAt: tracked.job.StartedAt, ArchiveConfig: tracked.job.ArchiveConfig}
+		packageJob = lifecycle.PackageJob{StreamID: tracked.job.StreamID, ArchiveRunID: tracked.job.ArchiveRunID, Name: tracked.job.Name, StartedAt: tracked.job.StartedAt, ArchiveConfig: tracked.job.ArchiveConfig}
 		signal = observability.Signal{
 			Type:       "event",
 			Name:       "encoder.process.stopped",
@@ -1088,7 +1091,7 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 	cancelPackage()
 	elapsed := time.Since(started)
 	if err != nil {
-		m.reportArchiveFileMetrics(job.StreamID)
+		m.reportArchiveFileMetrics(job)
 		phase := lifecycle.ErrorPhase(err)
 		if phase == "upload" {
 			m.reportMetric(job.StreamID, "archive.package_status", 1)
@@ -1106,7 +1109,7 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 			Attributes: packageFailureAttributes(err),
 		})
 		if m.ArtifactReporter != nil {
-			layout, layoutErr := archive.NewLayout(m.ArchiveRoot, job.StreamID)
+			layout, layoutErr := archiveLayoutForPackage(m.ArchiveRoot, job)
 			if layoutErr == nil {
 				artifacts := control.ArchiveArtifacts(layout)
 				finalMP4Exists := false
@@ -1118,7 +1121,7 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 				}
 				if finalMP4Exists {
 					reportCtx, cancelReport := context.WithTimeout(context.Background(), m.artifactReportTimeout())
-					reportErr := m.ArtifactReporter.ReportArtifacts(reportCtx, job.StreamID, artifacts)
+					reportErr := m.ArtifactReporter.ReportArtifacts(reportCtx, job.StreamID, artifacts, artifactReportArchiveRuns(job)...)
 					cancelReport()
 					if reportErr != nil {
 						m.report(observability.Signal{
@@ -1155,7 +1158,7 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 		m.mu.Unlock()
 		return
 	}
-	m.reportArchiveFileMetrics(job.StreamID)
+	m.reportArchiveFileMetrics(job)
 	m.reportMetric(job.StreamID, "archive.package_status", 1)
 	m.reportMetric(job.StreamID, "archive.package_partial", boolMetric(result.Partial))
 	m.reportMetric(job.StreamID, "archive.final_mkv_usable", boolMetric(result.ArchiveSource == "final_mkv"))
@@ -1202,7 +1205,7 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 		artifacts := control.ArchiveArtifacts(result.Layout)
 		if len(artifacts) > 0 {
 			reportCtx, cancelReport := context.WithTimeout(context.Background(), m.artifactReportTimeout())
-			err := m.ArtifactReporter.ReportArtifacts(reportCtx, job.StreamID, artifacts)
+			err := m.ArtifactReporter.ReportArtifacts(reportCtx, job.StreamID, artifacts, artifactReportArchiveRuns(job)...)
 			cancelReport()
 			if err != nil {
 				m.report(observability.Signal{
@@ -1232,13 +1235,27 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 	tracked, ok = m.processes[job.StreamID]
 	if ok {
 		tracked.snapshot.Status = "completed"
-		tracked.snapshot.Archive["final_artifact_set"] = "final/" + job.StreamID
+		tracked.snapshot.Archive["final_artifact_set"] = lifecycle.ArchiveArtifactsForRun(job.StreamID, job.ArchiveRunID)["final_artifact_set"]
 		tracked.snapshot.Archive["final_mp4"] = "final.mp4"
 		tracked.snapshot.Archive["archive_source"] = result.ArchiveSource
 		tracked.snapshot.Archive["archive_partial"] = strconv.FormatBool(result.Partial)
 		scrubTrackedProcessJob(tracked)
 	}
 	m.mu.Unlock()
+}
+
+func archiveLayoutForPackage(root string, job lifecycle.PackageJob) (archive.Layout, error) {
+	if strings.TrimSpace(job.ArchiveRunID) == "" {
+		return archive.NewLayout(root, job.StreamID)
+	}
+	return archive.NewRunLayout(root, job.StreamID, job.ArchiveRunID)
+}
+
+func artifactReportArchiveRuns(job lifecycle.PackageJob) []control.ArchiveRun {
+	if strings.TrimSpace(job.ArchiveRunID) == "" {
+		return nil
+	}
+	return []control.ArchiveRun{{ID: job.ArchiveRunID, StartedAt: job.StartedAt}}
 }
 
 func scrubTrackedProcessJob(tracked *trackedProcess) {
@@ -1271,11 +1288,12 @@ func (m *Manager) artifactReportTimeout() time.Duration {
 	return 10 * time.Second
 }
 
-func (m *Manager) reportArchiveFileMetrics(streamID string) {
-	layout, err := archive.NewLayout(m.archiveRoot(), streamID)
+func (m *Manager) reportArchiveFileMetrics(job lifecycle.PackageJob) {
+	layout, err := archiveLayoutForPackage(m.archiveRoot(), job)
 	if err != nil {
 		return
 	}
+	streamID := job.StreamID
 	if fileSize(layout.FinalMKV()) > 0 {
 		m.reportMetric(streamID, "archive.final_mkv_exists", 1)
 	} else {
@@ -1449,6 +1467,9 @@ func maxFloat(a, b float64) float64 {
 
 func writeStartMetadata(layout archive.Layout, job lifecycle.StreamJob, snapshot Snapshot, args []string, bin, outputRoute string) error {
 	extra := map[string]any{"live_process": true}
+	if archiveRunID := strings.TrimSpace(job.ArchiveRunID); archiveRunID != "" {
+		extra["archive_run_id"] = archiveRunID
+	}
 	if job.InputMode != "" {
 		extra["input_mode"] = job.InputMode
 	}

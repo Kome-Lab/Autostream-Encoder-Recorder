@@ -8,6 +8,10 @@ import (
 )
 
 func ArchiveArtifacts(layout archive.Layout) []Artifact {
+	basePath := path.Join("final", layout.StreamID)
+	if layout.ArchiveRunID != "" {
+		basePath = path.Join(basePath, layout.ArchiveRunID)
+	}
 	candidates := []struct {
 		kind string
 		name string
@@ -28,7 +32,7 @@ func ArchiveArtifacts(layout archive.Layout) []Artifact {
 		artifacts = append(artifacts, Artifact{
 			Kind:         candidate.kind,
 			Name:         candidate.name,
-			RelativePath: path.Join("final", layout.StreamID, candidate.name),
+			RelativePath: path.Join(basePath, candidate.name),
 			SizeBytes:    info.Size(),
 		})
 	}

@@ -205,6 +205,57 @@ func TestPackageRunsRemuxAndUpload(t *testing.T) {
 	}
 }
 
+func TestPackagePreservesMultipleRunsForSameStream(t *testing.T) {
+	root := t.TempDir()
+	legacy, err := archive.NewLayout(root, "stream-history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(legacy.TmpDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy.FinalMKV(), []byte("mkv"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy.TmpLogs(), []byte("{}\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.DryRunUploader{}}
+	runs := []string{"20260818_140629_000000001_JST", "20260818_150629_000000002_JST"}
+	for _, runID := range runs {
+		result, err := manager.Package(context.Background(), PackageJob{
+			StreamID: "stream-history", ArchiveRunID: runID, Name: "History", StartedAt: time.Now().UTC(), DryRun: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Layout.ArchiveRunID != runID {
+			t.Fatalf("packaged run = %q, want %q", result.Layout.ArchiveRunID, runID)
+		}
+	}
+	for _, runID := range runs {
+		layout, err := archive.NewRunLayout(root, "stream-history", runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(layout.FinalMP4()); err != nil {
+			t.Fatalf("run %s was overwritten or missing: %v", runID, err)
+		}
+	}
+}
+
+func TestPackageRequiresStartedAtForArchiveRun(t *testing.T) {
+	manager := Manager{ArchiveRoot: t.TempDir()}
+	_, err := manager.Package(context.Background(), PackageJob{
+		StreamID:     "stream-history",
+		ArchiveRunID: "20260818_140629_000000001_JST",
+		Name:         "History",
+	})
+	if err == nil || !strings.Contains(err.Error(), "started_at is required") {
+		t.Fatalf("expected archive run started_at validation error, got %v", err)
+	}
+}
+
 func TestPackageUsesRealFFmpegRemuxWhenAvailable(t *testing.T) {
 	ffmpegBin, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -433,7 +484,7 @@ func TestCleanupExpiredLocalArchivesKeepsCurrentAndRecent(t *testing.T) {
 	recentDir := writeFinalArchiveForTest(t, root, "stream-recent", now.Add(-10*24*time.Hour))
 	currentDir := writeFinalArchiveForTest(t, root, "stream-current", now.Add(-90*24*time.Hour))
 
-	if err := cleanupExpiredLocalArchives(root, "stream-current", 30, now); err != nil {
+	if err := cleanupExpiredLocalArchives(root, "stream-current", "", 30, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
@@ -444,6 +495,42 @@ func TestCleanupExpiredLocalArchivesKeepsCurrentAndRecent(t *testing.T) {
 	}
 	if _, err := os.Stat(currentDir); err != nil {
 		t.Fatalf("expected current archive to remain: %v", err)
+	}
+}
+
+func TestCleanupExpiredLocalArchivesRemovesOldRunWithinCurrentStream(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	writeRun := func(runID string, modifiedAt time.Time) archive.Layout {
+		t.Helper()
+		layout, err := archive.NewRunLayout(root, "stream-current", runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(layout.FinalDir(), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(layout.FinalMP4(), []byte("mp4"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(layout.FinalMP4(), modifiedAt, modifiedAt); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(layout.FinalDir(), modifiedAt, modifiedAt); err != nil {
+			t.Fatal(err)
+		}
+		return layout
+	}
+	oldRun := writeRun("run-old", now.Add(-45*24*time.Hour))
+	currentRun := writeRun("run-current", now.Add(-90*24*time.Hour))
+	if err := cleanupExpiredLocalArchives(root, "stream-current", "run-current", 30, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldRun.FinalDir()); !os.IsNotExist(err) {
+		t.Fatalf("expired prior run should be removed, err=%v", err)
+	}
+	if _, err := os.Stat(currentRun.FinalDir()); err != nil {
+		t.Fatalf("current run should remain: %v", err)
 	}
 }
 

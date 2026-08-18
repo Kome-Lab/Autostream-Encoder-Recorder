@@ -34,6 +34,23 @@ func TestArchiveArtifactsReturnsOnlyExistingLogicalArtifacts(t *testing.T) {
 	}
 }
 
+func TestArchiveArtifactsUsesRunScopedLogicalPath(t *testing.T) {
+	layout, err := archive.NewRunLayout(t.TempDir(), "stream-01", "run-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout.FinalDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.FinalMP4(), []byte("mp4"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := ArchiveArtifacts(layout)
+	if len(artifacts) != 1 || artifacts[0].RelativePath != "final/stream-01/run-01/final.mp4" {
+		t.Fatalf("run-scoped artifacts = %#v", artifacts)
+	}
+}
+
 func TestArchiveArtifactsSkipsSymlinks(t *testing.T) {
 	root := t.TempDir()
 	layout, err := archive.NewLayout(root, "stream-01")

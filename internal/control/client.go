@@ -101,9 +101,16 @@ type Artifact struct {
 }
 
 type ArtifactReport struct {
-	ServiceID string     `json:"service_id"`
-	StreamID  string     `json:"stream_id"`
-	Artifacts []Artifact `json:"artifacts"`
+	ServiceID        string     `json:"service_id"`
+	StreamID         string     `json:"stream_id"`
+	ArchiveRunID     string     `json:"archive_run_id,omitempty"`
+	ArchiveStartedAt *time.Time `json:"archive_started_at,omitempty"`
+	Artifacts        []Artifact `json:"artifacts"`
+}
+
+type ArchiveRun struct {
+	ID        string
+	StartedAt time.Time
 }
 
 type RuntimeSecretResolveRequest struct {
@@ -522,6 +529,7 @@ func serviceCapabilities() map[string]any {
 		"health_endpoint":               true,
 		"package_endpoint":              true,
 		"live_encoder_runtime_settings": true,
+		"archive_runs":                  true,
 		"default_resolution":            "1920x1080",
 		"default_fps":                   60,
 	}
@@ -590,16 +598,29 @@ func (c Client) HeartbeatWithMetrics(ctx context.Context, status, currentStreamI
 	return c.post(ctx, "/services/heartbeat", body)
 }
 
-func (c Client) ReportArtifacts(ctx context.Context, streamID string, artifacts []Artifact) error {
+func (c Client) ReportArtifacts(ctx context.Context, streamID string, artifacts []Artifact, archiveRuns ...ArchiveRun) error {
 	if strings.TrimSpace(streamID) == "" {
 		return errors.New("stream id is required")
 	}
 	if len(artifacts) == 0 {
 		return errors.New("artifacts are required")
 	}
+	if len(archiveRuns) > 1 {
+		return errors.New("at most one archive run is allowed")
+	}
 	reportCtx, cancel := context.WithTimeout(ctx, envDuration("CONTROL_PANEL_ARTIFACT_REPORT_TIMEOUT_SEC", 5*time.Second))
 	defer cancel()
 	body := ArtifactReport{ServiceID: c.Config.ServiceID, StreamID: streamID, Artifacts: artifacts}
+	if len(archiveRuns) == 1 {
+		run := archiveRuns[0]
+		run.ID = strings.TrimSpace(run.ID)
+		if run.ID == "" || run.StartedAt.IsZero() {
+			return errors.New("archive run id and start time are required together")
+		}
+		startedAt := run.StartedAt.UTC()
+		body.ArchiveRunID = run.ID
+		body.ArchiveStartedAt = &startedAt
+	}
 	var reportErr error
 	for attempt := 1; attempt <= artifactReportMaxAttempts; attempt++ {
 		if err := reportCtx.Err(); err != nil {

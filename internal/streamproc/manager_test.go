@@ -192,6 +192,23 @@ func TestManagerStartWritesMetadataAndMasksStreamKey(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsArchiveRunWithoutStartedAtBeforeStartingFFmpeg(t *testing.T) {
+	starter := &fakeStarter{}
+	manager := &Manager{Starter: starter}
+
+	_, err := manager.Start(lifecycle.StreamJob{
+		StreamID:     "stream-01",
+		Name:         "Morning Stream",
+		ArchiveRunID: "run-01",
+	})
+	if err == nil || !strings.Contains(err.Error(), "archive run started_at is required") {
+		t.Fatalf("expected archive run start time validation, got %v", err)
+	}
+	if starter.process != nil || len(starter.args) > 0 {
+		t.Fatalf("ffmpeg must not start for an invalid archive run: process=%#v args=%#v", starter.process, starter.args)
+	}
+}
+
 func TestManagerStartUsesLiveWatermarkFeedAndAddsOverlayFilter(t *testing.T) {
 	root := t.TempDir()
 	starter := &fakeStarter{}
@@ -1654,10 +1671,11 @@ func TestManagerReportsMediaInputTimeoutWhenProgressStalls(t *testing.T) {
 
 func TestManagerPackagesArchiveAfterStoppedProcess(t *testing.T) {
 	reporter := &fakeReporter{}
-	packager := &fakePackager{root: t.TempDir()}
+	root := t.TempDir()
+	packager := &fakePackager{root: root}
 	artifactReporter := &fakeArtifactReporter{}
 	manager := &Manager{
-		ArchiveRoot:         t.TempDir(),
+		ArchiveRoot:         filepath.Join(root, "archives"),
 		FFmpegBin:           "ffmpeg",
 		Starter:             &fakeStarter{},
 		Reporter:            reporter,
@@ -1668,7 +1686,7 @@ func TestManagerPackagesArchiveAfterStoppedProcess(t *testing.T) {
 	}
 	job := lifecycle.StreamJob{
 		StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key",
-		StartedAt: time.Date(2026, 5, 31, 1, 2, 3, 0, time.UTC),
+		ArchiveRunID: "run-01", StartedAt: time.Date(2026, 5, 31, 1, 2, 3, 0, time.UTC),
 		ArchiveConfig: lifecycle.ArchiveConfig{
 			AuthMode:    "service_account",
 			FolderID:    "drive-folder-id",
@@ -1676,8 +1694,12 @@ func TestManagerPackagesArchiveAfterStoppedProcess(t *testing.T) {
 			SharedDrive: true,
 		},
 	}
-	if _, err := manager.Start(job); err != nil {
+	snapshot, err := manager.Start(job)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if got := snapshot.Archive["final_artifact_set"]; got != "final/stream-01/run-01" {
+		t.Fatalf("final artifact set = %q, want run-scoped path", got)
 	}
 	if _, err := manager.Stop("stream-01"); err != nil {
 		t.Fatal(err)
@@ -1698,6 +1720,9 @@ func TestManagerPackagesArchiveAfterStoppedProcess(t *testing.T) {
 			if got, ok := packager.jobWith(job.StreamID); !ok || got.ArchiveConfig.FolderID != "drive-folder-id" || !got.ArchiveConfig.SharedDrive {
 				t.Fatalf("archive config was not forwarded to packager: %#v", got.ArchiveConfig)
 			}
+			if got, _ := packager.jobWith(job.StreamID); got.ArchiveRunID != job.ArchiveRunID {
+				t.Fatalf("archive run was not forwarded to packager: %#v", got)
+			}
 			if !reporter.has("archive.package.started") || !reporter.has("archive.package.completed") {
 				t.Fatalf("missing package signals: %#v", reporter.names())
 			}
@@ -1706,8 +1731,14 @@ func TestManagerPackagesArchiveAfterStoppedProcess(t *testing.T) {
 					t.Fatalf("missing package metric %s: %#v", metric, reporter.names())
 				}
 			}
+			if !reporter.hasValueAtLeast("archive.final_mp4_exists", 1) {
+				t.Fatalf("run-scoped final mp4 was not reflected in metrics: %#v", reporter.signals)
+			}
 			if !artifactReporter.calledWith(job.StreamID, "final.mp4") {
 				t.Fatalf("archive artifacts were not reported: %#v", artifactReporter.calls)
+			}
+			if !artifactReporter.calledWithRun(job.StreamID, job.ArchiveRunID) {
+				t.Fatalf("archive run metadata was not reported: %#v", artifactReporter.calls)
 			}
 			if !reporter.has("archive.artifact_report.completed") {
 				t.Fatalf("missing artifact report completion signal: %#v", reporter.names())
@@ -2038,8 +2069,9 @@ type fakePackager struct {
 }
 
 type artifactReportCall struct {
-	streamID  string
-	artifacts []control.Artifact
+	streamID    string
+	artifacts   []control.Artifact
+	archiveRuns []control.ArchiveRun
 }
 
 type fakeArtifactReporter struct {
@@ -2048,17 +2080,29 @@ type fakeArtifactReporter struct {
 	calls []artifactReportCall
 }
 
-func (r *fakeArtifactReporter) ReportArtifacts(ctx context.Context, streamID string, artifacts []control.Artifact) error {
+func (r *fakeArtifactReporter) ReportArtifacts(ctx context.Context, streamID string, artifacts []control.Artifact, archiveRuns ...control.ArchiveRun) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, artifactReportCall{
-		streamID:  streamID,
-		artifacts: append([]control.Artifact(nil), artifacts...),
+		streamID:    streamID,
+		artifacts:   append([]control.Artifact(nil), artifacts...),
+		archiveRuns: append([]control.ArchiveRun(nil), archiveRuns...),
 	})
 	return r.err
+}
+
+func (r *fakeArtifactReporter) calledWithRun(streamID, archiveRunID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, call := range r.calls {
+		if call.streamID == streamID && len(call.archiveRuns) == 1 && call.archiveRuns[0].ID == archiveRunID {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *fakeArtifactReporter) calledWith(streamID, name string) bool {
@@ -2068,8 +2112,12 @@ func (r *fakeArtifactReporter) calledWith(streamID, name string) bool {
 		if call.streamID != streamID {
 			continue
 		}
+		expectedPath := "final/" + streamID + "/" + name
+		if len(call.archiveRuns) == 1 && call.archiveRuns[0].ID != "" {
+			expectedPath = "final/" + streamID + "/" + call.archiveRuns[0].ID + "/" + name
+		}
 		for _, artifact := range call.artifacts {
-			if artifact.Name == name && artifact.RelativePath == "final/"+streamID+"/"+name {
+			if artifact.Name == name && artifact.RelativePath == expectedPath {
 				return true
 			}
 		}
@@ -2100,7 +2148,13 @@ func (p *fakePackager) Package(ctx context.Context, job lifecycle.PackageJob) (l
 	if p.err != nil && !p.artifactsBeforeError {
 		return lifecycle.Result{}, p.err
 	}
-	layout, err := archive.NewLayout(filepath.Join(p.root, "archives"), job.StreamID)
+	var layout archive.Layout
+	var err error
+	if job.ArchiveRunID == "" {
+		layout, err = archive.NewLayout(filepath.Join(p.root, "archives"), job.StreamID)
+	} else {
+		layout, err = archive.NewRunLayout(filepath.Join(p.root, "archives"), job.StreamID, job.ArchiveRunID)
+	}
 	if err != nil {
 		return lifecycle.Result{}, err
 	}
