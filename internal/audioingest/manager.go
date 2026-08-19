@@ -6,31 +6,40 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/example/autostream-encoder-recorder/internal/archive"
+	pionopus "github.com/pion/opus"
 )
 
 const (
-	audioRTPFrameInterval = 20 * time.Millisecond
-	audioRTPClockStep     = uint32(960)
-	audioRTPPayloadType   = byte(111)
-	audioRTPSSRC          = uint32(0x41535452)
-	audioRTPQueueSize     = 500
+	audioRTPFrameInterval    = 20 * time.Millisecond
+	audioRTPClockStep        = uint32(960)
+	audioRTPPayloadType      = byte(96)
+	audioRTPSSRC             = uint32(0x41535452)
+	audioRTPQueueSize        = 2048
+	audioSamplesPerFrame     = 960
+	audioChannels            = 2
+	audioBytesPerSample      = 2
+	audioPCMFrameSamples     = audioSamplesPerFrame * audioChannels
+	audioPCMFrameBytes       = audioPCMFrameSamples * audioBytesPerSample
+	audioMaxOpusFrameSamples = 5760 * audioChannels
+	audioSpeakerQueueSize    = 25
+	audioMaxTrackedSpeakers  = 24
+	audioSpeakerIdleTimeout  = 30 * time.Second
 )
 
-// Discord may omit Opus packets while a channel is silent (and DAVE failures
-// can delay the first packet indefinitely). FFmpeg's RTP input blocks amix
-// until that input has a clock, which also stalls otherwise healthy video and
-// HLS outputs. This standard 20 ms Opus silence frame keeps a single local RTP
-// timeline alive; real Discord Opus payloads replace silence on that timeline.
-var opusSilenceFrame = []byte{0xf8, 0xff, 0xfe}
+// Discord may omit packets while a channel is silent. Keep FFmpeg's local RTP
+// clock alive with one 20 ms stereo PCM frame even when no speaker contributes.
+var pcmSilenceFrame = make([]byte, audioPCMFrameBytes)
 
 type Packet struct {
 	SSRC       uint32    `json:"ssrc"`
@@ -75,22 +84,56 @@ type Bridge struct {
 }
 
 type bridgeRecord struct {
-	conn     *net.UDPConn
-	target   *net.UDPAddr
-	packets  chan []byte
-	stop     chan struct{}
-	done     chan struct{}
-	stopOnce sync.Once
+	conn           *net.UDPConn
+	target         *net.UDPAddr
+	packets        chan queuedOpusPacket
+	decoderFactory func() (opusPCMDecoder, error)
+	stop           chan struct{}
+	done           chan struct{}
+	stopOnce       sync.Once
+
+	trackedSpeakers        atomic.Int64
+	mixedFramesTotal       atomic.Int64
+	decodeErrorsTotal      atomic.Int64
+	queueDropsTotal        atomic.Int64
+	speakerLimitDropsTotal atomic.Int64
+	clippingPreventedTotal atomic.Int64
+}
+
+type queuedOpusPacket struct {
+	ssrc      uint32
+	sequence  uint16
+	timestamp uint32
+	opus      []byte
+}
+
+type opusPCMDecoder interface {
+	DecodeToInt16(in []byte, out []int16) (int, error)
+}
+
+type speakerDecoder struct {
+	decoder          opusPCMDecoder
+	queue            []queuedOpusPacket
+	pcm              []int16
+	lastSeen         time.Time
+	expectedSequence uint16
+	hasSequence      bool
 }
 
 type Stats struct {
-	StreamID         string    `json:"stream_id"`
-	BridgeActive     bool      `json:"bridge_active"`
-	StartedAt        time.Time `json:"started_at"`
-	LastPacketAt     time.Time `json:"last_packet_at,omitempty"`
-	PacketsTotal     int64     `json:"packets_total"`
-	RTPForwarded     int64     `json:"rtp_forwarded"`
-	LastPacketAgeSec float64   `json:"last_packet_age_sec"`
+	StreamID               string    `json:"stream_id"`
+	BridgeActive           bool      `json:"bridge_active"`
+	StartedAt              time.Time `json:"started_at"`
+	LastPacketAt           time.Time `json:"last_packet_at,omitempty"`
+	PacketsTotal           int64     `json:"packets_total"`
+	RTPForwarded           int64     `json:"rtp_forwarded"`
+	LastPacketAgeSec       float64   `json:"last_packet_age_sec"`
+	TrackedSpeakers        int       `json:"tracked_speakers"`
+	MixedFramesTotal       int64     `json:"mixed_frames_total"`
+	DecodeErrorsTotal      int64     `json:"decode_errors_total"`
+	QueueDropsTotal        int64     `json:"queue_drops_total"`
+	SpeakerLimitDropsTotal int64     `json:"speaker_limit_drops_total"`
+	ClippingPreventedTotal int64     `json:"clipping_prevented_total"`
 }
 
 func NewManager(archiveRoot string) *Manager {
@@ -139,11 +182,12 @@ func (m *Manager) StartBridge(streamID string) (Bridge, error) {
 		return Bridge{}, err
 	}
 	record := &bridgeRecord{
-		conn:    conn,
-		target:  target,
-		packets: make(chan []byte, audioRTPQueueSize),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		conn:           conn,
+		target:         target,
+		packets:        make(chan queuedOpusPacket, audioRTPQueueSize),
+		decoderFactory: newOpusPCMDecoder,
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 	if m.stats == nil {
 		m.stats = map[string]Stats{}
@@ -172,6 +216,16 @@ func (m *Manager) StopBridge(streamID string) {
 	m.mu.Unlock()
 	if record != nil {
 		record.close()
+		m.mu.Lock()
+		stats := m.stats[streamID]
+		stats.TrackedSpeakers = 0
+		stats.MixedFramesTotal += record.mixedFramesTotal.Load()
+		stats.DecodeErrorsTotal += record.decodeErrorsTotal.Load()
+		stats.QueueDropsTotal += record.queueDropsTotal.Load()
+		stats.SpeakerLimitDropsTotal += record.speakerLimitDropsTotal.Load()
+		stats.ClippingPreventedTotal += record.clippingPreventedTotal.Load()
+		m.stats[streamID] = stats
+		m.mu.Unlock()
 	}
 }
 
@@ -183,7 +237,16 @@ func (m *Manager) Status(streamID string, now time.Time) Stats {
 	defer m.mu.Unlock()
 	stats := m.stats[streamID]
 	stats.StreamID = streamID
-	_, stats.BridgeActive = m.bridges[streamID]
+	bridge, active := m.bridges[streamID]
+	stats.BridgeActive = active
+	if bridge != nil {
+		stats.TrackedSpeakers = int(bridge.trackedSpeakers.Load())
+		stats.MixedFramesTotal += bridge.mixedFramesTotal.Load()
+		stats.DecodeErrorsTotal += bridge.decodeErrorsTotal.Load()
+		stats.QueueDropsTotal += bridge.queueDropsTotal.Load()
+		stats.SpeakerLimitDropsTotal += bridge.speakerLimitDropsTotal.Load()
+		stats.ClippingPreventedTotal += bridge.clippingPreventedTotal.Load()
+	}
 	if stats.StartedAt.IsZero() {
 		stats.StartedAt = now
 	}
@@ -291,7 +354,12 @@ func (m *Manager) Add(req IngestRequest) (Result, error) {
 	}
 	if hasBridge {
 		for _, decoded := range acceptedPackets {
-			if bridge.enqueue(decoded.opus) {
+			if bridge.enqueue(queuedOpusPacket{
+				ssrc:      decoded.packet.SSRC,
+				sequence:  decoded.packet.Sequence,
+				timestamp: decoded.packet.Timestamp,
+				opus:      decoded.opus,
+			}) {
 				rtpForwarded++
 			}
 		}
@@ -373,12 +441,11 @@ func freeUDPPort() (int, error) {
 func sdpForPort(port int) string {
 	return fmt.Sprintf("v=0\n"+
 		"o=- 0 0 IN IP4 127.0.0.1\n"+
-		"s=AutoStream Discord Opus\n"+
+		"s=AutoStream Discord Mixed PCM\n"+
 		"c=IN IP4 127.0.0.1\n"+
 		"t=0 0\n"+
-		"m=audio %d RTP/AVP 111\n"+
-		"a=rtpmap:111 opus/48000/2\n"+
-		"a=fmtp:111 minptime=10;useinbandfec=1\n"+
+		"m=audio %d RTP/AVP 96\n"+
+		"a=rtpmap:96 L16/48000/2\n"+
 		"a=recvonly\n", port)
 }
 
@@ -394,19 +461,18 @@ func (r *bridgeRecord) run() {
 	defer r.conn.Close()
 	ticker := time.NewTicker(audioRTPFrameInterval)
 	defer ticker.Stop()
+	speakers := make(map[uint32]*speakerDecoder)
 	var sequence uint16
 	var timestamp uint32
 	for {
 		select {
 		case <-r.stop:
 			return
+		case packet := <-r.packets:
+			r.queueSpeakerPacket(speakers, packet, time.Now())
 		case <-ticker.C:
-			payload := opusSilenceFrame
-			select {
-			case packet := <-r.packets:
-				payload = packet
-			default:
-			}
+			r.drainPackets(speakers)
+			payload := r.mixFrame(speakers, time.Now())
 			_, _ = r.conn.WriteToUDP(buildRTPPacket(sequence, timestamp, payload), r.target)
 			sequence++
 			timestamp += audioRTPClockStep
@@ -414,31 +480,185 @@ func (r *bridgeRecord) run() {
 	}
 }
 
-func (r *bridgeRecord) enqueue(opus []byte) bool {
-	payload := append([]byte(nil), opus...)
+func (r *bridgeRecord) enqueue(packet queuedOpusPacket) bool {
+	packet.opus = append([]byte(nil), packet.opus...)
 	select {
 	case <-r.stop:
 		return false
 	default:
 	}
 	select {
-	case r.packets <- payload:
+	case r.packets <- packet:
 		return true
 	default:
 	}
-	// Keep live audio latency bounded. If HTTP delivery briefly outruns the
-	// 20 ms RTP clock, discard the oldest queued payload and converge on current
-	// audio instead of accumulating an unbounded delay.
+	// Keep latency bounded even if an HTTP burst exceeds the mixer intake.
 	select {
 	case <-r.packets:
+		r.queueDropsTotal.Add(1)
 	default:
 	}
 	select {
-	case r.packets <- payload:
+	case r.packets <- packet:
 		return true
 	default:
+		r.queueDropsTotal.Add(1)
 		return false
 	}
+}
+
+func newOpusPCMDecoder() (opusPCMDecoder, error) {
+	decoder, err := pionopus.NewDecoderWithOutput(48000, audioChannels)
+	if err != nil {
+		return nil, err
+	}
+	return &decoder, nil
+}
+
+func (r *bridgeRecord) drainPackets(speakers map[uint32]*speakerDecoder) {
+	for {
+		select {
+		case packet := <-r.packets:
+			r.queueSpeakerPacket(speakers, packet, time.Now())
+		default:
+			return
+		}
+	}
+}
+
+func (r *bridgeRecord) queueSpeakerPacket(speakers map[uint32]*speakerDecoder, packet queuedOpusPacket, now time.Time) {
+	r.evictIdleSpeakers(speakers, now)
+	speaker := speakers[packet.ssrc]
+	if speaker == nil {
+		if len(speakers) >= audioMaxTrackedSpeakers {
+			r.speakerLimitDropsTotal.Add(1)
+			return
+		}
+		decoder, err := r.decoderFactory()
+		if err != nil {
+			r.decodeErrorsTotal.Add(1)
+			return
+		}
+		speaker = &speakerDecoder{decoder: decoder}
+		speakers[packet.ssrc] = speaker
+		r.trackedSpeakers.Store(int64(len(speakers)))
+	}
+	speaker.lastSeen = now
+	if len(speaker.queue) >= audioSpeakerQueueSize {
+		dropped := len(speaker.queue) - audioSpeakerQueueSize + 1
+		copy(speaker.queue, speaker.queue[dropped:])
+		speaker.queue = speaker.queue[:len(speaker.queue)-dropped]
+		speaker.pcm = speaker.pcm[:0]
+		speaker.hasSequence = false
+		if decoder, err := r.decoderFactory(); err == nil {
+			speaker.decoder = decoder
+		} else {
+			r.decodeErrorsTotal.Add(1)
+		}
+		r.queueDropsTotal.Add(int64(dropped))
+	}
+	speaker.queue = append(speaker.queue, packet)
+}
+
+func (r *bridgeRecord) evictIdleSpeakers(speakers map[uint32]*speakerDecoder, now time.Time) {
+	for ssrc, speaker := range speakers {
+		if len(speaker.queue) == 0 && len(speaker.pcm) == 0 && now.Sub(speaker.lastSeen) >= audioSpeakerIdleTimeout {
+			delete(speakers, ssrc)
+		}
+	}
+	r.trackedSpeakers.Store(int64(len(speakers)))
+}
+
+func (r *bridgeRecord) mixFrame(speakers map[uint32]*speakerDecoder, now time.Time) []byte {
+	r.evictIdleSpeakers(speakers, now)
+	ssrcs := make([]uint32, 0, len(speakers))
+	for ssrc := range speakers {
+		ssrcs = append(ssrcs, ssrc)
+	}
+	sort.Slice(ssrcs, func(i, j int) bool { return ssrcs[i] < ssrcs[j] })
+
+	mixed := make([]int64, audioPCMFrameSamples)
+	contributors := 0
+	for _, ssrc := range ssrcs {
+		frame, ok := r.nextSpeakerFrame(speakers[ssrc])
+		if !ok {
+			continue
+		}
+		contributors++
+		for i, sample := range frame {
+			mixed[i] += int64(sample)
+		}
+	}
+	if contributors == 0 {
+		return pcmSilenceFrame
+	}
+	r.mixedFramesTotal.Add(1)
+
+	scale := 1 / math.Sqrt(float64(contributors))
+	peak := float64(0)
+	for _, sample := range mixed {
+		magnitude := math.Abs(float64(sample) * scale)
+		if magnitude > peak {
+			peak = magnitude
+		}
+	}
+	if peak > math.MaxInt16 {
+		scale *= float64(math.MaxInt16) / peak
+		r.clippingPreventedTotal.Add(1)
+	}
+	payload := make([]byte, audioPCMFrameBytes)
+	for i, sample := range mixed {
+		value := int64(math.Round(float64(sample) * scale))
+		if value > math.MaxInt16 {
+			value = math.MaxInt16
+		} else if value < math.MinInt16 {
+			value = math.MinInt16
+		}
+		binary.BigEndian.PutUint16(payload[i*audioBytesPerSample:], uint16(int16(value)))
+	}
+	return payload
+}
+
+func (r *bridgeRecord) nextSpeakerFrame(speaker *speakerDecoder) ([]int16, bool) {
+	for len(speaker.pcm) < audioPCMFrameSamples && len(speaker.queue) > 0 {
+		packet := speaker.queue[0]
+		speaker.queue = speaker.queue[1:]
+		if speaker.hasSequence && packet.sequence != speaker.expectedSequence {
+			decoder, err := r.decoderFactory()
+			if err != nil {
+				r.decodeErrorsTotal.Add(1)
+				continue
+			}
+			speaker.decoder = decoder
+			speaker.pcm = speaker.pcm[:0]
+		}
+		speaker.expectedSequence = packet.sequence + 1
+		speaker.hasSequence = true
+
+		decoded := make([]int16, audioMaxOpusFrameSamples)
+		samplesPerChannel, err := speaker.decoder.DecodeToInt16(packet.opus, decoded)
+		if err != nil || samplesPerChannel <= 0 || samplesPerChannel*audioChannels > len(decoded) {
+			r.decodeErrorsTotal.Add(1)
+			decoder, resetErr := r.decoderFactory()
+			if resetErr == nil {
+				speaker.decoder = decoder
+			} else {
+				r.decodeErrorsTotal.Add(1)
+			}
+			speaker.pcm = speaker.pcm[:0]
+			speaker.hasSequence = false
+			continue
+		}
+		speaker.pcm = append(speaker.pcm, decoded[:samplesPerChannel*audioChannels]...)
+	}
+	if len(speaker.pcm) == 0 {
+		return nil, false
+	}
+	frame := make([]int16, audioPCMFrameSamples)
+	count := min(len(speaker.pcm), len(frame))
+	copy(frame, speaker.pcm[:count])
+	speaker.pcm = speaker.pcm[count:]
+	return frame, true
 }
 
 func (r *bridgeRecord) close() {
@@ -446,14 +666,14 @@ func (r *bridgeRecord) close() {
 	<-r.done
 }
 
-func buildRTPPacket(sequence uint16, timestamp uint32, opus []byte) []byte {
-	rtp := make([]byte, 12+len(opus))
+func buildRTPPacket(sequence uint16, timestamp uint32, payload []byte) []byte {
+	rtp := make([]byte, 12+len(payload))
 	rtp[0] = 0x80
 	rtp[1] = audioRTPPayloadType
 	binary.BigEndian.PutUint16(rtp[2:4], sequence)
 	binary.BigEndian.PutUint32(rtp[4:8], timestamp)
 	binary.BigEndian.PutUint32(rtp[8:12], audioRTPSSRC)
-	copy(rtp[12:], opus)
+	copy(rtp[12:], payload)
 	return rtp
 }
 
