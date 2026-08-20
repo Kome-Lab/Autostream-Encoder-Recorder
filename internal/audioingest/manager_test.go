@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -126,6 +127,35 @@ func TestManagerRejectsDuplicateBridgeWithoutChangingSDP(t *testing.T) {
 	}
 }
 
+func TestManagerPreservesAudioGapDiagnosticsAfterBridgeStop(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	if _, err := manager.StartBridge("stream-01"); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.mu.Lock()
+	record := manager.bridges["stream-01"]
+	record.sequenceGapEventsTotal.Store(3)
+	record.missingPacketsTotal.Store(7)
+	record.concealedFramesTotal.Store(5)
+	record.latePacketsDroppedTotal.Store(2)
+	record.decoderResetsTotal.Store(1)
+	manager.mu.Unlock()
+
+	live := manager.Status("stream-01", time.Now())
+	if !live.BridgeActive || live.SequenceGapEventsTotal != 3 || live.MissingPacketsTotal != 7 ||
+		live.ConcealedFramesTotal != 5 || live.LatePacketsDroppedTotal != 2 || live.DecoderResetsTotal != 1 {
+		t.Fatalf("unexpected live gap diagnostics: %#v", live)
+	}
+
+	manager.StopBridge("stream-01")
+	stopped := manager.Status("stream-01", time.Now())
+	if stopped.BridgeActive || stopped.SequenceGapEventsTotal != 3 || stopped.MissingPacketsTotal != 7 ||
+		stopped.ConcealedFramesTotal != 5 || stopped.LatePacketsDroppedTotal != 2 || stopped.DecoderResetsTotal != 1 {
+		t.Fatalf("unexpected stopped gap diagnostics: %#v", stopped)
+	}
+}
+
 func TestBridgeEmitsContinuousSilenceAndNormalizesRealOpusTimeline(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	bridge, err := manager.StartBridge("stream-01")
@@ -204,6 +234,278 @@ func TestBridgeMixesConcurrentSpeakersWithoutSerializingTheirTimelines(t *testin
 	}
 }
 
+func TestBridgeConcealsBoundedSequenceGapWithoutReinitializingDecoder(t *testing.T) {
+	factoryCalls := 0
+	record := &bridgeRecord{decoderFactory: func() (opusPCMDecoder, error) {
+		factoryCalls++
+		return newOpusPCMDecoder()
+	}}
+	speakers := make(map[uint32]*speakerDecoder)
+	now := time.Now()
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 100, timestamp: 960, opus: tone440OpusFrame,
+	}, now)
+	if payload := record.mixFrame(speakers, now); len(payload) != audioPCMFrameBytes {
+		t.Fatalf("first mixed payload bytes = %d, want %d", len(payload), audioPCMFrameBytes)
+	}
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 102, timestamp: 2880, opus: tone440OpusFrame,
+	}, now)
+	if payload := record.mixFrame(speakers, now); len(payload) != audioPCMFrameBytes {
+		t.Fatalf("concealed mixed payload bytes = %d, want %d", len(payload), audioPCMFrameBytes)
+	}
+
+	if factoryCalls != 1 {
+		t.Fatalf("decoder factory calls = %d, want 1 across a bounded packet gap", factoryCalls)
+	}
+	if got := record.sequenceGapEventsTotal.Load(); got != 1 {
+		t.Fatalf("sequence gap events = %d, want 1", got)
+	}
+	if got := record.missingPacketsTotal.Load(); got != 1 {
+		t.Fatalf("missing packets = %d, want 1", got)
+	}
+	if got := record.concealedFramesTotal.Load(); got != 1 {
+		t.Fatalf("concealed frames = %d, want 1", got)
+	}
+	if got := record.decodeErrorsTotal.Load(); got != 0 {
+		t.Fatalf("decode errors = %d, want 0", got)
+	}
+}
+
+func TestBridgeDropsLatePacketWithoutRewindingDecoder(t *testing.T) {
+	factoryCalls := 0
+	record := &bridgeRecord{decoderFactory: func() (opusPCMDecoder, error) {
+		factoryCalls++
+		return newOpusPCMDecoder()
+	}}
+	speakers := make(map[uint32]*speakerDecoder)
+	now := time.Now()
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 100, timestamp: 960, opus: tone440OpusFrame,
+	}, now)
+	if _, ok := record.nextSpeakerFrame(speakers[1]); !ok {
+		t.Fatal("initial speaker frame was not decoded")
+	}
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 102, timestamp: 2880, opus: tone440OpusFrame,
+	}, now)
+	if _, ok := record.nextSpeakerFrame(speakers[1]); !ok {
+		t.Fatal("packet-loss concealment frame was not produced")
+	}
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 101, timestamp: 1920, opus: tone440OpusFrame,
+	}, now)
+	if _, ok := record.nextSpeakerFrame(speakers[1]); !ok {
+		t.Fatal("already decoded sequence 102 frame was not preserved")
+	}
+	if _, ok := record.nextSpeakerFrame(speakers[1]); ok {
+		t.Fatal("late sequence 101 packet rewound the speaker timeline")
+	}
+
+	if factoryCalls != 1 {
+		t.Fatalf("decoder factory calls = %d, want 1 after dropping a late packet", factoryCalls)
+	}
+	if got := record.latePacketsDroppedTotal.Load(); got != 1 {
+		t.Fatalf("late packets dropped = %d, want 1", got)
+	}
+}
+
+func TestBridgePrefersExpectedPacketAlreadyBuffered(t *testing.T) {
+	record := &bridgeRecord{decoderFactory: newOpusPCMDecoder}
+	speakers := make(map[uint32]*speakerDecoder)
+	now := time.Now()
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 100, timestamp: 960, opus: tone440OpusFrame,
+	}, now)
+	if _, ok := record.nextSpeakerFrame(speakers[1]); !ok {
+		t.Fatal("initial speaker frame was not decoded")
+	}
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 102, timestamp: 2880, opus: tone440OpusFrame,
+	}, now)
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 101, timestamp: 1920, opus: tone440OpusFrame,
+	}, now)
+
+	if _, ok := record.nextSpeakerFrame(speakers[1]); !ok {
+		t.Fatal("expected sequence 101 frame was not decoded")
+	}
+	if got := speakers[1].expectedSequence; got != 102 {
+		t.Fatalf("expected sequence after reorder = %d, want 102", got)
+	}
+	if len(speakers[1].queue) != 1 || speakers[1].queue[0].sequence != 102 {
+		t.Fatalf("future packet was not retained after reorder: %#v", speakers[1].queue)
+	}
+	if got := record.sequenceGapEventsTotal.Load(); got != 0 {
+		t.Fatalf("reordered buffered packets counted as sequence gaps: %d", got)
+	}
+}
+
+func TestBridgeSequenceWrapDoesNotCountAsLoss(t *testing.T) {
+	factoryCalls := 0
+	record := &bridgeRecord{decoderFactory: func() (opusPCMDecoder, error) {
+		factoryCalls++
+		return newOpusPCMDecoder()
+	}}
+	speakers := make(map[uint32]*speakerDecoder)
+	now := time.Now()
+
+	for _, sequence := range []uint16{65535, 0} {
+		record.queueSpeakerPacket(speakers, queuedOpusPacket{
+			ssrc: 1, sequence: sequence, opus: tone440OpusFrame,
+		}, now)
+		if _, ok := record.nextSpeakerFrame(speakers[1]); !ok {
+			t.Fatalf("sequence %d frame was not decoded", sequence)
+		}
+	}
+
+	if factoryCalls != 1 {
+		t.Fatalf("decoder factory calls across sequence wrap = %d, want 1", factoryCalls)
+	}
+	if got := record.sequenceGapEventsTotal.Load(); got != 0 {
+		t.Fatalf("sequence wrap counted as a gap: %d", got)
+	}
+	if got := record.latePacketsDroppedTotal.Load(); got != 0 {
+		t.Fatalf("sequence wrap counted as late: %d", got)
+	}
+}
+
+func TestBridgeBoundsLargeGapConcealmentToOneHundredMilliseconds(t *testing.T) {
+	record := &bridgeRecord{decoderFactory: newOpusPCMDecoder}
+	speakers := make(map[uint32]*speakerDecoder)
+	now := time.Now()
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 100, timestamp: 960, opus: tone440OpusFrame,
+	}, now)
+	if _, ok := record.nextSpeakerFrame(speakers[1]); !ok {
+		t.Fatal("initial speaker frame was not decoded")
+	}
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 200, timestamp: 96960, opus: tone440OpusFrame,
+	}, now)
+	if _, ok := record.nextSpeakerFrame(speakers[1]); !ok {
+		t.Fatal("bounded concealment frame was not produced")
+	}
+
+	if got := record.missingPacketsTotal.Load(); got != 99 {
+		t.Fatalf("missing packets = %d, want 99", got)
+	}
+	if got := record.concealedFramesTotal.Load(); got != audioMaxConcealmentFrames {
+		t.Fatalf("concealed frames = %d, want bounded %d", got, audioMaxConcealmentFrames)
+	}
+	if got, want := len(speakers[1].pcm), audioMaxConcealmentFrames*audioPCMFrameSamples; got != want {
+		t.Fatalf("buffered samples after bounded concealment = %d, want %d", got, want)
+	}
+}
+
+func TestBridgeQueueOverflowDoesNotResetDecoder(t *testing.T) {
+	factoryCalls := 0
+	record := &bridgeRecord{decoderFactory: func() (opusPCMDecoder, error) {
+		factoryCalls++
+		return newOpusPCMDecoder()
+	}}
+	speakers := make(map[uint32]*speakerDecoder)
+	now := time.Now()
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{
+		ssrc: 1, sequence: 1, timestamp: 960, opus: tone440OpusFrame,
+	}, now)
+	if _, ok := record.nextSpeakerFrame(speakers[1]); !ok {
+		t.Fatal("initial speaker frame was not decoded")
+	}
+	for sequence := uint16(2); sequence <= uint16(audioSpeakerQueueSize+2); sequence++ {
+		record.queueSpeakerPacket(speakers, queuedOpusPacket{
+			ssrc: 1, sequence: sequence, timestamp: uint32(sequence) * audioRTPClockStep, opus: tone440OpusFrame,
+		}, now)
+	}
+
+	if factoryCalls != 1 {
+		t.Fatalf("decoder factory calls after queue overflow = %d, want 1", factoryCalls)
+	}
+	if got := record.queueDropsTotal.Load(); got != 1 {
+		t.Fatalf("queue drops = %d, want 1", got)
+	}
+	if got := len(speakers[1].queue); got != audioSpeakerQueueSize {
+		t.Fatalf("speaker queue length = %d, want %d", got, audioSpeakerQueueSize)
+	}
+}
+
+func TestBridgeSilentSpeakerJoinDoesNotStepExistingSpeakerGain(t *testing.T) {
+	record := &bridgeRecord{decoderFactory: newConstantPCMDecoder}
+	speakers := make(map[uint32]*speakerDecoder)
+	now := time.Now()
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{ssrc: 1, sequence: 1, opus: constantPCMFrame(12000)}, now)
+	before := record.mixFrame(speakers, now)
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{ssrc: 1, sequence: 2, opus: constantPCMFrame(12000)}, now)
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{ssrc: 2, sequence: 1, opus: constantPCMFrame(0)}, now)
+	after := record.mixFrame(speakers, now)
+
+	if !bytes.Equal(after, before) {
+		t.Fatalf("silent speaker join changed the existing speaker PCM gain: before=%d after=%d", firstPCMSample(before), firstPCMSample(after))
+	}
+}
+
+func TestBridgeRampsGainWhenAnotherSpeakerStarts(t *testing.T) {
+	record := &bridgeRecord{decoderFactory: newConstantPCMDecoder}
+	speakers := make(map[uint32]*speakerDecoder)
+	now := time.Now()
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{ssrc: 1, sequence: 1, opus: constantPCMFrame(12000)}, now)
+	before := record.mixFrame(speakers, now)
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{ssrc: 1, sequence: 2, opus: constantPCMFrame(12000)}, now)
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{ssrc: 2, sequence: 1, opus: constantPCMFrame(1)}, now)
+	after := record.mixFrame(speakers, now)
+
+	boundaryStep := int(firstPCMSample(after)) - int(lastPCMSample(before))
+	if boundaryStep < -2 || boundaryStep > 2 {
+		t.Fatalf("speaker join caused an abrupt PCM boundary step: before=%d after=%d step=%d", lastPCMSample(before), firstPCMSample(after), boundaryStep)
+	}
+	if got := lastPCMSample(after); got >= firstPCMSample(after) {
+		t.Fatalf("mix gain was not ramped toward the multi-speaker target: first=%d last=%d", firstPCMSample(after), got)
+	}
+}
+
+func TestBridgeCountsSoftLimiterActivationOncePerFrame(t *testing.T) {
+	record := &bridgeRecord{decoderFactory: newConstantPCMDecoder}
+	speakers := make(map[uint32]*speakerDecoder)
+	now := time.Now()
+
+	record.queueSpeakerPacket(speakers, queuedOpusPacket{ssrc: 1, sequence: 1, opus: constantPCMFrame(32000)}, now)
+	payload := record.mixFrame(speakers, now)
+
+	if got := firstPCMSample(payload); got >= 32000 {
+		t.Fatalf("soft limiter did not reduce the near-ceiling sample: got=%d", got)
+	}
+	if got := record.clippingPreventedTotal.Load(); got != 1 {
+		t.Fatalf("clipping prevention frames = %d, want 1", got)
+	}
+}
+
+func TestSoftLimitPCMSampleIsSymmetricAndBounded(t *testing.T) {
+	positive, positiveLimited := softLimitPCMSample(math.MaxInt16 * 2)
+	negative, negativeLimited := softLimitPCMSample(math.MinInt16 * 2)
+	if !positiveLimited || !negativeLimited {
+		t.Fatalf("soft limiter activation = positive:%t negative:%t, want both true", positiveLimited, negativeLimited)
+	}
+	if positive <= 0 || negative >= 0 || int(positive) != -int(negative) {
+		t.Fatalf("soft limiter output is not symmetric: positive=%d negative=%d", positive, negative)
+	}
+
+	unchanged, limited := softLimitPCMSample(30000)
+	if limited || unchanged != 30000 {
+		t.Fatalf("sample below soft knee changed: got=%d limited=%t", unchanged, limited)
+	}
+}
+
 func TestBridgeSupportsFifteenConcurrentSpeakersWithHeadroom(t *testing.T) {
 	packets := make([]Packet, 0, 15)
 	for speaker := 0; speaker < 15; speaker++ {
@@ -224,6 +526,48 @@ func TestBridgeSupportsFifteenConcurrentSpeakersWithHeadroom(t *testing.T) {
 	}
 	if audioMaxTrackedSpeakers <= len(packets) {
 		t.Fatalf("speaker limit %d does not leave headroom above %d speakers", audioMaxTrackedSpeakers, len(packets))
+	}
+}
+
+func TestBridgeConcealsOnePacketGapAcrossFifteenSpeakers(t *testing.T) {
+	record := &bridgeRecord{decoderFactory: newOpusPCMDecoder}
+	speakers := make(map[uint32]*speakerDecoder, 15)
+	now := time.Now()
+	queueSequence := func(sequence uint16) {
+		for speaker := 0; speaker < 15; speaker++ {
+			frame := tone440OpusFrame
+			if speaker%2 == 1 {
+				frame = tone880OpusFrame
+			}
+			record.queueSpeakerPacket(speakers, queuedOpusPacket{
+				ssrc:      uint32(speaker + 1),
+				sequence:  sequence,
+				timestamp: uint32(sequence) * audioRTPClockStep,
+				opus:      frame,
+			}, now)
+		}
+	}
+
+	queueSequence(1)
+	if payload := record.mixFrame(speakers, now); len(payload) != audioPCMFrameBytes || isSilentRTPPayload(payload) {
+		t.Fatal("initial 15-speaker frame was not audible")
+	}
+	queueSequence(3)
+	if payload := record.mixFrame(speakers, now); len(payload) != audioPCMFrameBytes {
+		t.Fatalf("concealed 15-speaker frame bytes = %d, want %d", len(payload), audioPCMFrameBytes)
+	}
+
+	if got := record.sequenceGapEventsTotal.Load(); got != 15 {
+		t.Fatalf("sequence gap events = %d, want 15", got)
+	}
+	if got := record.missingPacketsTotal.Load(); got != 15 {
+		t.Fatalf("missing packets = %d, want 15", got)
+	}
+	if got := record.concealedFramesTotal.Load(); got != 15 {
+		t.Fatalf("concealed frames = %d, want 15", got)
+	}
+	if got := record.decoderResetsTotal.Load(); got != 0 {
+		t.Fatalf("decoder resets = %d, want 0", got)
 	}
 }
 
@@ -292,6 +636,34 @@ func BenchmarkMixFrameFifteenSpeakersSteadyState(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		queueFrame()
+		if payload := record.mixFrame(speakers, now); len(payload) != audioPCMFrameBytes {
+			b.Fatalf("mixed payload bytes = %d", len(payload))
+		}
+	}
+}
+
+func BenchmarkMixFrameFifteenSpeakersOnePacketGap(b *testing.B) {
+	for b.Loop() {
+		record := &bridgeRecord{decoderFactory: newOpusPCMDecoder}
+		speakers := make(map[uint32]*speakerDecoder, 15)
+		now := time.Now()
+		queueSequence := func(sequence uint16) {
+			for speaker := 0; speaker < 15; speaker++ {
+				frame := tone440OpusFrame
+				if speaker%2 == 1 {
+					frame = tone880OpusFrame
+				}
+				record.queueSpeakerPacket(speakers, queuedOpusPacket{
+					ssrc:      uint32(speaker + 1),
+					sequence:  sequence,
+					timestamp: uint32(sequence) * audioRTPClockStep,
+					opus:      frame,
+				}, now)
+			}
+		}
+		queueSequence(1)
+		_ = record.mixFrame(speakers, now)
+		queueSequence(3)
 		if payload := record.mixFrame(speakers, now); len(payload) != audioPCMFrameBytes {
 			b.Fatalf("mixed payload bytes = %d", len(payload))
 		}
@@ -381,6 +753,34 @@ func isSilentRTPPayload(payload []byte) bool {
 		}
 	}
 	return true
+}
+
+type constantPCMDecoder struct{}
+
+func newConstantPCMDecoder() (opusPCMDecoder, error) {
+	return constantPCMDecoder{}, nil
+}
+
+func (constantPCMDecoder) DecodeToInt16(in []byte, out []int16) (int, error) {
+	value := int16(binary.BigEndian.Uint16(in))
+	for i := 0; i < audioPCMFrameSamples; i++ {
+		out[i] = value
+	}
+	return audioSamplesPerFrame, nil
+}
+
+func constantPCMFrame(value int16) []byte {
+	frame := make([]byte, 2)
+	binary.BigEndian.PutUint16(frame, uint16(value))
+	return frame
+}
+
+func firstPCMSample(payload []byte) int16 {
+	return int16(binary.BigEndian.Uint16(payload))
+}
+
+func lastPCMSample(payload []byte) int16 {
+	return int16(binary.BigEndian.Uint16(payload[len(payload)-audioBytesPerSample:]))
 }
 
 func TestManagerRejectsInvalidOpusBase64(t *testing.T) {

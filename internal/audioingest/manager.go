@@ -35,6 +35,11 @@ const (
 	audioSpeakerQueueSize    = 25
 	audioMaxTrackedSpeakers  = 24
 	audioSpeakerIdleTimeout  = 30 * time.Second
+	// Discord normally emits one 20 ms Opus frame per RTP packet. Bound both
+	// synthesized audio and decoder work so a large gap cannot grow latency.
+	audioMaxConcealmentFrames  = 5
+	audioMaxConcealmentPackets = 5
+	audioSequenceHalfRange     = uint16(1 << 15)
 )
 
 // Discord may omit packets while a channel is silent. Keep FFmpeg's local RTP
@@ -92,12 +97,19 @@ type bridgeRecord struct {
 	done           chan struct{}
 	stopOnce       sync.Once
 
-	trackedSpeakers        atomic.Int64
-	mixedFramesTotal       atomic.Int64
-	decodeErrorsTotal      atomic.Int64
-	queueDropsTotal        atomic.Int64
-	speakerLimitDropsTotal atomic.Int64
-	clippingPreventedTotal atomic.Int64
+	trackedSpeakers         atomic.Int64
+	mixedFramesTotal        atomic.Int64
+	decodeErrorsTotal       atomic.Int64
+	queueDropsTotal         atomic.Int64
+	speakerLimitDropsTotal  atomic.Int64
+	clippingPreventedTotal  atomic.Int64
+	sequenceGapEventsTotal  atomic.Int64
+	missingPacketsTotal     atomic.Int64
+	concealedFramesTotal    atomic.Int64
+	latePacketsDroppedTotal atomic.Int64
+	decoderResetsTotal      atomic.Int64
+	mixScale                float64
+	mixScaleInitialized     bool
 }
 
 type queuedOpusPacket struct {
@@ -118,22 +130,29 @@ type speakerDecoder struct {
 	lastSeen         time.Time
 	expectedSequence uint16
 	hasSequence      bool
+	lastTOC          byte
+	hasLastTOC       bool
 }
 
 type Stats struct {
-	StreamID               string    `json:"stream_id"`
-	BridgeActive           bool      `json:"bridge_active"`
-	StartedAt              time.Time `json:"started_at"`
-	LastPacketAt           time.Time `json:"last_packet_at,omitempty"`
-	PacketsTotal           int64     `json:"packets_total"`
-	RTPForwarded           int64     `json:"rtp_forwarded"`
-	LastPacketAgeSec       float64   `json:"last_packet_age_sec"`
-	TrackedSpeakers        int       `json:"tracked_speakers"`
-	MixedFramesTotal       int64     `json:"mixed_frames_total"`
-	DecodeErrorsTotal      int64     `json:"decode_errors_total"`
-	QueueDropsTotal        int64     `json:"queue_drops_total"`
-	SpeakerLimitDropsTotal int64     `json:"speaker_limit_drops_total"`
-	ClippingPreventedTotal int64     `json:"clipping_prevented_total"`
+	StreamID                string    `json:"stream_id"`
+	BridgeActive            bool      `json:"bridge_active"`
+	StartedAt               time.Time `json:"started_at"`
+	LastPacketAt            time.Time `json:"last_packet_at,omitempty"`
+	PacketsTotal            int64     `json:"packets_total"`
+	RTPForwarded            int64     `json:"rtp_forwarded"`
+	LastPacketAgeSec        float64   `json:"last_packet_age_sec"`
+	TrackedSpeakers         int       `json:"tracked_speakers"`
+	MixedFramesTotal        int64     `json:"mixed_frames_total"`
+	DecodeErrorsTotal       int64     `json:"decode_errors_total"`
+	QueueDropsTotal         int64     `json:"queue_drops_total"`
+	SpeakerLimitDropsTotal  int64     `json:"speaker_limit_drops_total"`
+	ClippingPreventedTotal  int64     `json:"clipping_prevented_total"`
+	SequenceGapEventsTotal  int64     `json:"sequence_gap_events_total"`
+	MissingPacketsTotal     int64     `json:"missing_packets_total"`
+	ConcealedFramesTotal    int64     `json:"concealed_frames_total"`
+	LatePacketsDroppedTotal int64     `json:"late_packets_dropped_total"`
+	DecoderResetsTotal      int64     `json:"decoder_resets_total"`
 }
 
 func NewManager(archiveRoot string) *Manager {
@@ -224,6 +243,11 @@ func (m *Manager) StopBridge(streamID string) {
 		stats.QueueDropsTotal += record.queueDropsTotal.Load()
 		stats.SpeakerLimitDropsTotal += record.speakerLimitDropsTotal.Load()
 		stats.ClippingPreventedTotal += record.clippingPreventedTotal.Load()
+		stats.SequenceGapEventsTotal += record.sequenceGapEventsTotal.Load()
+		stats.MissingPacketsTotal += record.missingPacketsTotal.Load()
+		stats.ConcealedFramesTotal += record.concealedFramesTotal.Load()
+		stats.LatePacketsDroppedTotal += record.latePacketsDroppedTotal.Load()
+		stats.DecoderResetsTotal += record.decoderResetsTotal.Load()
 		m.stats[streamID] = stats
 		m.mu.Unlock()
 	}
@@ -246,6 +270,11 @@ func (m *Manager) Status(streamID string, now time.Time) Stats {
 		stats.QueueDropsTotal += bridge.queueDropsTotal.Load()
 		stats.SpeakerLimitDropsTotal += bridge.speakerLimitDropsTotal.Load()
 		stats.ClippingPreventedTotal += bridge.clippingPreventedTotal.Load()
+		stats.SequenceGapEventsTotal += bridge.sequenceGapEventsTotal.Load()
+		stats.MissingPacketsTotal += bridge.missingPacketsTotal.Load()
+		stats.ConcealedFramesTotal += bridge.concealedFramesTotal.Load()
+		stats.LatePacketsDroppedTotal += bridge.latePacketsDroppedTotal.Load()
+		stats.DecoderResetsTotal += bridge.decoderResetsTotal.Load()
 	}
 	if stats.StartedAt.IsZero() {
 		stats.StartedAt = now
@@ -548,13 +577,6 @@ func (r *bridgeRecord) queueSpeakerPacket(speakers map[uint32]*speakerDecoder, p
 		dropped := len(speaker.queue) - audioSpeakerQueueSize + 1
 		copy(speaker.queue, speaker.queue[dropped:])
 		speaker.queue = speaker.queue[:len(speaker.queue)-dropped]
-		speaker.pcm = speaker.pcm[:0]
-		speaker.hasSequence = false
-		if decoder, err := r.decoderFactory(); err == nil {
-			speaker.decoder = decoder
-		} else {
-			r.decodeErrorsTotal.Add(1)
-		}
 		r.queueDropsTotal.Add(int64(dropped))
 	}
 	speaker.queue = append(speaker.queue, packet)
@@ -584,56 +606,101 @@ func (r *bridgeRecord) mixFrame(speakers map[uint32]*speakerDecoder, now time.Ti
 		if !ok {
 			continue
 		}
+		if !pcmFrameHasSignal(frame) {
+			continue
+		}
 		contributors++
 		for i, sample := range frame {
 			mixed[i] += int64(sample)
 		}
 	}
 	if contributors == 0 {
+		r.mixScale = 1
+		r.mixScaleInitialized = true
 		return pcmSilenceFrame
 	}
 	r.mixedFramesTotal.Add(1)
 
-	scale := 1 / math.Sqrt(float64(contributors))
+	targetScale := 1 / math.Sqrt(float64(contributors))
 	peak := float64(0)
 	for _, sample := range mixed {
-		magnitude := math.Abs(float64(sample) * scale)
+		magnitude := math.Abs(float64(sample) * targetScale)
 		if magnitude > peak {
 			peak = magnitude
 		}
 	}
+	clippingPrevented := false
 	if peak > math.MaxInt16 {
-		scale *= float64(math.MaxInt16) / peak
-		r.clippingPreventedTotal.Add(1)
+		targetScale *= float64(math.MaxInt16) / peak
+		clippingPrevented = true
 	}
+	startScale := targetScale
+	if r.mixScaleInitialized {
+		startScale = r.mixScale
+	}
+	r.mixScale = targetScale
+	r.mixScaleInitialized = true
+
 	payload := make([]byte, audioPCMFrameBytes)
 	for i, sample := range mixed {
+		frameIndex := i / audioChannels
+		progress := float64(frameIndex) / float64(audioSamplesPerFrame-1)
+		scale := startScale + (targetScale-startScale)*progress
 		value := int64(math.Round(float64(sample) * scale))
-		if value > math.MaxInt16 {
-			value = math.MaxInt16
-		} else if value < math.MinInt16 {
-			value = math.MinInt16
-		}
-		binary.BigEndian.PutUint16(payload[i*audioBytesPerSample:], uint16(int16(value)))
+		limitedValue, limited := softLimitPCMSample(value)
+		clippingPrevented = clippingPrevented || limited
+		binary.BigEndian.PutUint16(payload[i*audioBytesPerSample:], uint16(limitedValue))
+	}
+	if clippingPrevented {
+		r.clippingPreventedTotal.Add(1)
 	}
 	return payload
 }
 
+func pcmFrameHasSignal(frame []int16) bool {
+	for _, sample := range frame {
+		if sample != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func softLimitPCMSample(value int64) (int16, bool) {
+	const (
+		ceiling   = int64(math.MaxInt16)
+		threshold = ceiling * 15 / 16
+		headroom  = ceiling - threshold
+	)
+
+	sign := int64(1)
+	magnitude := value
+	if magnitude < 0 {
+		sign = -1
+		magnitude = -magnitude
+	}
+	if magnitude <= threshold {
+		return int16(value), false
+	}
+	excess := magnitude - threshold
+	limited := threshold + headroom*excess/(headroom+excess)
+	return int16(sign * limited), true
+}
+
 func (r *bridgeRecord) nextSpeakerFrame(speaker *speakerDecoder) ([]int16, bool) {
 	for len(speaker.pcm) < audioPCMFrameSamples && len(speaker.queue) > 0 {
-		packet := speaker.queue[0]
-		speaker.queue = speaker.queue[1:]
-		if speaker.hasSequence && packet.sequence != speaker.expectedSequence {
-			decoder, err := r.decoderFactory()
-			if err != nil {
-				r.decodeErrorsTotal.Add(1)
-				continue
-			}
-			speaker.decoder = decoder
-			speaker.pcm = speaker.pcm[:0]
+		packet, ok := r.popNextSpeakerPacket(speaker)
+		if !ok {
+			break
 		}
-		speaker.expectedSequence = packet.sequence + 1
-		speaker.hasSequence = true
+		if speaker.hasSequence {
+			missing := int(uint16(packet.sequence - speaker.expectedSequence))
+			if missing > 0 {
+				r.sequenceGapEventsTotal.Add(1)
+				r.missingPacketsTotal.Add(int64(missing))
+				r.appendPacketLossConcealment(speaker, missing)
+			}
+		}
 
 		decoded := make([]int16, audioMaxOpusFrameSamples)
 		samplesPerChannel, err := speaker.decoder.DecodeToInt16(packet.opus, decoded)
@@ -642,13 +709,18 @@ func (r *bridgeRecord) nextSpeakerFrame(speaker *speakerDecoder) ([]int16, bool)
 			decoder, resetErr := r.decoderFactory()
 			if resetErr == nil {
 				speaker.decoder = decoder
+				r.decoderResetsTotal.Add(1)
 			} else {
 				r.decodeErrorsTotal.Add(1)
 			}
-			speaker.pcm = speaker.pcm[:0]
 			speaker.hasSequence = false
+			speaker.hasLastTOC = false
 			continue
 		}
+		speaker.expectedSequence = packet.sequence + 1
+		speaker.hasSequence = true
+		speaker.lastTOC = packet.opus[0]
+		speaker.hasLastTOC = true
 		speaker.pcm = append(speaker.pcm, decoded[:samplesPerChannel*audioChannels]...)
 	}
 	if len(speaker.pcm) == 0 {
@@ -659,6 +731,92 @@ func (r *bridgeRecord) nextSpeakerFrame(speaker *speakerDecoder) ([]int16, bool)
 	copy(frame, speaker.pcm[:count])
 	speaker.pcm = speaker.pcm[count:]
 	return frame, true
+}
+
+func (r *bridgeRecord) popNextSpeakerPacket(speaker *speakerDecoder) (queuedOpusPacket, bool) {
+	if len(speaker.queue) == 0 {
+		return queuedOpusPacket{}, false
+	}
+	if !speaker.hasSequence {
+		packet := speaker.queue[0]
+		speaker.queue = speaker.queue[1:]
+		return packet, true
+	}
+
+	bestIndex := -1
+	bestDistance := uint16(0)
+	latePackets := 0
+	for index, packet := range speaker.queue {
+		// RTP sequence arithmetic is modulo 2^16. Distances in the forward
+		// half-range are current/future; the other half contains late packets.
+		distance := uint16(packet.sequence - speaker.expectedSequence)
+		if distance >= audioSequenceHalfRange {
+			latePackets++
+			continue
+		}
+		if bestIndex < 0 || distance < bestDistance {
+			bestIndex = index
+			bestDistance = distance
+		}
+	}
+	if latePackets > 0 {
+		r.latePacketsDroppedTotal.Add(int64(latePackets))
+	}
+	if bestIndex < 0 {
+		speaker.queue = speaker.queue[:0]
+		return queuedOpusPacket{}, false
+	}
+
+	packet := speaker.queue[bestIndex]
+	writeIndex := 0
+	for index, queued := range speaker.queue {
+		distance := uint16(queued.sequence - speaker.expectedSequence)
+		if index == bestIndex || distance >= audioSequenceHalfRange {
+			continue
+		}
+		speaker.queue[writeIndex] = queued
+		writeIndex++
+	}
+	speaker.queue = speaker.queue[:writeIndex]
+	return packet, true
+}
+
+func (r *bridgeRecord) appendPacketLossConcealment(speaker *speakerDecoder, missingPackets int) {
+	remainingSamplesPerChannel := audioMaxConcealmentFrames * audioSamplesPerFrame
+	concealedSamplesPerChannel := 0
+	packetLimit := min(missingPackets, audioMaxConcealmentPackets)
+	for packetIndex := 0; packetIndex < packetLimit && remainingSamplesPerChannel > 0; packetIndex++ {
+		decoded := make([]int16, audioMaxOpusFrameSamples)
+		samplesPerChannel := audioSamplesPerFrame
+		decodedOK := false
+		if speaker.hasLastTOC {
+			// Pion Opus v0.1.0 has no public PLC method. A code-0 TOC-only packet
+			// enters its no-data/PLC path while retaining mode, bandwidth, stereo,
+			// and the existing per-speaker decoder history.
+			plcPacket := []byte{speaker.lastTOC &^ byte(0x03)}
+			var err error
+			samplesPerChannel, err = speaker.decoder.DecodeToInt16(plcPacket, decoded)
+			if err == nil && samplesPerChannel > 0 && samplesPerChannel*audioChannels <= len(decoded) {
+				decodedOK = true
+			} else {
+				r.decodeErrorsTotal.Add(1)
+				samplesPerChannel = audioSamplesPerFrame
+			}
+		}
+		samplesPerChannel = min(samplesPerChannel, remainingSamplesPerChannel)
+		interleavedSamples := samplesPerChannel * audioChannels
+		if decodedOK {
+			speaker.pcm = append(speaker.pcm, decoded[:interleavedSamples]...)
+		} else {
+			speaker.pcm = append(speaker.pcm, make([]int16, interleavedSamples)...)
+		}
+		concealedSamplesPerChannel += samplesPerChannel
+		remainingSamplesPerChannel -= samplesPerChannel
+	}
+	concealedFrames := (concealedSamplesPerChannel + audioSamplesPerFrame - 1) / audioSamplesPerFrame
+	if concealedFrames > 0 {
+		r.concealedFramesTotal.Add(int64(concealedFrames))
+	}
 }
 
 func (r *bridgeRecord) close() {
