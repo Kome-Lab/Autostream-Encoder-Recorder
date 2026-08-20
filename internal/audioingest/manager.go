@@ -32,9 +32,13 @@ const (
 	audioPCMFrameSamples     = audioSamplesPerFrame * audioChannels
 	audioPCMFrameBytes       = audioPCMFrameSamples * audioBytesPerSample
 	audioMaxOpusFrameSamples = 5760 * audioChannels
-	audioSpeakerQueueSize    = 25
-	audioMaxTrackedSpeakers  = 24
-	audioSpeakerIdleTimeout  = 30 * time.Second
+	// Keep enough per-speaker headroom for the bounded upstream SSRC identity
+	// window (up to 1.5 seconds) without adding playout delay. The mixer still
+	// consumes immediately at 20 ms intervals and drops oldest data only after
+	// a two-second burst, so latency remains bounded during transport stalls.
+	audioSpeakerQueueSize   = int((2 * time.Second) / audioRTPFrameInterval)
+	audioMaxTrackedSpeakers = 24
+	audioSpeakerIdleTimeout = 30 * time.Second
 	// Discord normally emits one 20 ms Opus frame per RTP packet. Bound both
 	// synthesized audio and decoder work so a large gap cannot grow latency.
 	audioMaxConcealmentFrames  = 5

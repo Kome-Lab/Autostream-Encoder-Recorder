@@ -436,6 +436,27 @@ func TestBridgeQueueOverflowDoesNotResetDecoder(t *testing.T) {
 	}
 }
 
+func TestBridgeSpeakerQueueBuffersUnresolvedSSRCBurst(t *testing.T) {
+	record := &bridgeRecord{decoderFactory: newConstantPCMDecoder}
+	speakers := make(map[uint32]*speakerDecoder)
+	now := time.Now()
+	packetCount := int((1500 * time.Millisecond) / audioRTPFrameInterval)
+	for sequence := 1; sequence <= packetCount; sequence++ {
+		record.queueSpeakerPacket(speakers, queuedOpusPacket{
+			ssrc:     1,
+			sequence: uint16(sequence),
+			opus:     constantPCMFrame(1000),
+		}, now)
+	}
+
+	if got := record.queueDropsTotal.Load(); got != 0 {
+		t.Fatalf("bounded unresolved SSRC burst dropped %d packets, want 0", got)
+	}
+	if got := len(speakers[1].queue); got != packetCount {
+		t.Fatalf("buffered unresolved SSRC packets = %d, want %d", got, packetCount)
+	}
+}
+
 func TestBridgeSilentSpeakerJoinDoesNotStepExistingSpeakerGain(t *testing.T) {
 	record := &bridgeRecord{decoderFactory: newConstantPCMDecoder}
 	speakers := make(map[uint32]*speakerDecoder)
