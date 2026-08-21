@@ -190,7 +190,7 @@ func buildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSetting
 		filter, audioMap = appendComplexAudioStats(filter, audioStatsPath)
 	}
 	args = append(args, "-filter_complex", filter, "-map", "[v]", "-map", audioMap)
-	args = append(args, liveVideoCodecArgs(p)...)
+	args = append(args, workerSceneLiveVideoCodecArgs(p)...)
 	args = append(args, "-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate))
 	if progressPath != "" {
 		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
@@ -381,16 +381,33 @@ func audioStatsFilter(path string) string {
 }
 
 func liveVideoCodecArgs(p EncoderProfile) []string {
-	return []string{
+	return liveVideoCodecArgsWithTune(p, "zerolatency")
+}
+
+func workerSceneLiveVideoCodecArgs(p EncoderProfile) []string {
+	// The known-good Worker scene command allowed normal H.264 frame
+	// reordering. Keep the faster preset, but do not force zero-latency tuning
+	// on this provider-facing path.
+	return liveVideoCodecArgsWithTune(p, "")
+}
+
+func liveVideoCodecArgsWithTune(p EncoderProfile, tune string) []string {
+	args := []string{
 		// Keep the coded geometry explicit at the output boundary. The complex
 		// filter graph already normalizes frames, but tee/FLV consumers must not
 		// be allowed to infer a square coded size from an upstream stream.
 		"-s:v", itoa(p.Width) + "x" + itoa(p.Height), "-aspect", displayAspect(p.Width, p.Height),
-		"-c:v", "libx264", "-preset", liveVideoPreset, "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
-		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
-		"-r", itoa(p.FPS), "-g", itoa(p.FPS * p.KeyframeSec), "-keyint_min", itoa(p.FPS * p.KeyframeSec), "-sc_threshold", "0",
-		"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr",
+		"-c:v", "libx264", "-preset", liveVideoPreset,
 	}
+	if tune = strings.TrimSpace(tune); tune != "" {
+		args = append(args, "-tune", tune)
+	}
+	return append(args,
+		"-pix_fmt", "yuv420p", "-b:v", p.VideoBitrate,
+		"-minrate:v", p.VideoBitrate, "-maxrate:v", p.VideoBitrate, "-bufsize:v", cbrBufferSize(p.VideoBitrate),
+		"-r", itoa(p.FPS), "-g", itoa(p.FPS*p.KeyframeSec), "-keyint_min", itoa(p.FPS*p.KeyframeSec), "-sc_threshold", "0",
+		"-x264-params", "repeat-headers=1:open-gop=0:nal-hrd=cbr",
+	)
 }
 
 func displayAspect(width, height int) string {

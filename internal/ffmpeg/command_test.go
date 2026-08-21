@@ -143,6 +143,7 @@ func TestBuildWorkerVideoDiscordAudioArgsKeepsCredentialOutOfFFmpegAndAppliesWat
 		"-map [v] -map [aout_stats]",
 		"-s:v 1920x1080",
 		"-aspect 16:9",
+		"-preset superfast",
 		"-minrate:v 8000k -maxrate:v 8000k -bufsize:v 16000k",
 		"-f tee",
 		"[aout]astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level+Peak_level,ametadata=print:file=C:/tmp/audio-stats.txt:direct=1:enable='not(mod(n,50))'[aout_stats]",
@@ -151,6 +152,9 @@ func TestBuildWorkerVideoDiscordAudioArgsKeepsCredentialOutOfFFmpegAndAppliesWat
 		if !strings.Contains(joined, required) {
 			t.Fatalf("missing %q in args: %s", required, joined)
 		}
+	}
+	if strings.Contains(joined, "-tune zerolatency") {
+		t.Fatalf("Worker scene output must keep H.264 frame reordering enabled: %s", joined)
 	}
 	if strings.Contains(joined, "-filter:a") {
 		t.Fatalf("Worker video audio stats must not use a simple filter with complex output: %s", joined)
