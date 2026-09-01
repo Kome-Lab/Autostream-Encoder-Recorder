@@ -130,7 +130,7 @@ func TestVideoCoverFetchMapsControlPlaneFaultsToContractSafeCodes(t *testing.T) 
 }
 
 func TestVideoCoverFetchFailsClosedOnMissingOrMismatchedResponseIdentity(t *testing.T) {
-	body := []byte("processed-cover")
+	body := []byte(strings.Repeat("x", 1024))
 	tests := []struct {
 		name      string
 		assetID   string
