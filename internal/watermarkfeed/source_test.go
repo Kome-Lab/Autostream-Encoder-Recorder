@@ -65,3 +65,30 @@ func TestSourcePushesUpdatedFrameWithoutWaitingForPeriodicRefresh(t *testing.T) 
 		t.Fatalf("updated watermark frame=%q, want %q", got, updated)
 	}
 }
+
+func TestSourcePreservesWatermarkErrorContract(t *testing.T) {
+	var nilSource *Source
+	if err := nilSource.Update([]byte("frame")); err == nil {
+		t.Fatal("expected nil source update to fail")
+	} else if got, want := err.Error(), "watermark frame is required"; got != want {
+		t.Fatalf("nil source update error=%q, want %q", got, want)
+	}
+
+	source, err := New(map[string]any{"watermark_enabled": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Update(nil); err == nil {
+		t.Fatal("expected empty watermark frame to fail")
+	} else if got, want := err.Error(), "watermark frame is required"; got != want {
+		t.Fatalf("empty watermark update error=%q, want %q", got, want)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Update([]byte("frame")); err == nil {
+		t.Fatal("expected update after close to fail")
+	} else if got, want := err.Error(), "watermark source is closed"; got != want {
+		t.Fatalf("closed watermark update error=%q, want %q", got, want)
+	}
+}

@@ -8,10 +8,9 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"net"
 	"strings"
-	"sync"
-	"time"
+
+	"github.com/example/autostream-encoder-recorder/internal/imagefeed"
 
 	_ "golang.org/x/image/webp"
 	_ "image/jpeg"
@@ -20,23 +19,12 @@ import (
 const (
 	maxImageBytes  = 5 << 20
 	maxImagePixels = 4096 * 4096
-	frameInterval  = 500 * time.Millisecond
 )
 
-// Source presents a continuously available piped-PNG input on loopback.
-// Replacing the current frame changes the Encoder watermark without changing
-// the FFmpeg process or any of its output clocks.
+// Source preserves the watermark feed API while sharing the generic image
+// transport used by independently controlled visual layers.
 type Source struct {
-	listener net.Listener
-
-	mu      sync.RWMutex
-	frame   []byte
-	current net.Conn
-	closed  bool
-
-	done    chan struct{}
-	updated chan struct{}
-	wg      sync.WaitGroup
+	feed *imagefeed.Source
 }
 
 func New(config map[string]any) (*Source, error) {
@@ -44,117 +32,35 @@ func New(config map[string]any) (*Source, error) {
 	if err != nil {
 		return nil, err
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	feed, err := imagefeed.New("watermark", frame)
 	if err != nil {
 		return nil, err
 	}
-	source := &Source{listener: listener, frame: frame, done: make(chan struct{}), updated: make(chan struct{}, 1)}
-	source.wg.Add(1)
-	go source.serve()
-	return source, nil
+	return &Source{feed: feed}, nil
 }
 
 func (s *Source) InputURL() string {
-	if s == nil || s.listener == nil {
+	if s == nil || s.feed == nil {
 		return ""
 	}
-	return "tcp://" + s.listener.Addr().String()
+	return s.feed.InputURL()
 }
 
 func (s *Source) Update(frame []byte) error {
 	if s == nil || len(frame) == 0 {
 		return errors.New("watermark frame is required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	if s.feed == nil {
 		return errors.New("watermark source is closed")
 	}
-	s.frame = append(s.frame[:0], frame...)
-	select {
-	case s.updated <- struct{}{}:
-	default:
-	}
-	return nil
+	return s.feed.Update(frame)
 }
 
 func (s *Source) Close() error {
-	if s == nil {
+	if s == nil || s.feed == nil {
 		return nil
 	}
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return nil
-	}
-	s.closed = true
-	close(s.done)
-	listener := s.listener
-	current := s.current
-	s.mu.Unlock()
-	if current != nil {
-		_ = current.Close()
-	}
-	var err error
-	if listener != nil {
-		err = listener.Close()
-	}
-	s.wg.Wait()
-	return err
-}
-
-func (s *Source) serve() {
-	defer s.wg.Done()
-	for {
-		conn, err := s.listener.Accept()
-		if err != nil {
-			select {
-			case <-s.done:
-				return
-			default:
-				continue
-			}
-		}
-		s.mu.Lock()
-		if s.closed {
-			s.mu.Unlock()
-			_ = conn.Close()
-			return
-		}
-		s.current = conn
-		s.mu.Unlock()
-		s.writeFrames(conn)
-		s.mu.Lock()
-		if s.current == conn {
-			s.current = nil
-		}
-		s.mu.Unlock()
-		_ = conn.Close()
-	}
-}
-
-func (s *Source) writeFrames(conn net.Conn) {
-	ticker := time.NewTicker(frameInterval)
-	defer ticker.Stop()
-	for {
-		s.mu.RLock()
-		frame := append([]byte(nil), s.frame...)
-		closed := s.closed
-		s.mu.RUnlock()
-		if closed {
-			return
-		}
-		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		if _, err := conn.Write(frame); err != nil {
-			return
-		}
-		select {
-		case <-s.done:
-			return
-		case <-s.updated:
-		case <-ticker.C:
-		}
-	}
+	return s.feed.Close()
 }
 
 // Frame validates and normalizes a Control Panel watermark profile to PNG.
