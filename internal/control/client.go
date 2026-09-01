@@ -3,6 +3,7 @@ package control
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/observability"
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/version"
+	"github.com/example/autostream-encoder-recorder/internal/videocover"
 	"github.com/example/autostream-encoder-recorder/internal/videoingest"
 )
 
@@ -536,6 +538,10 @@ func serviceCapabilities() map[string]any {
 	if videoingest.NewManagerFromEnv().Available() {
 		capabilities["worker_frame_ingest_mjpeg_srt"] = true
 	}
+	coverConfig := ConfigFromEnv()
+	if coverConfig.Validate() == nil {
+		capabilities[videocover.Capability] = true
+	}
 	if !relayConfigValid {
 		return capabilities
 	}
@@ -547,6 +553,115 @@ func serviceCapabilities() map[string]any {
 		capabilities["output_relay_binding_id"] = policy.BindingID
 	}
 	return capabilities
+}
+
+// Fetch retrieves one immutable processed Video Cover variant. The request URL
+// is derived locally from safe identifiers and the bearer token is never
+// returned in an error. Redirects are rejected so credentials cannot cross an
+// origin boundary.
+func (c Client) Fetch(ctx context.Context, ref videocover.AssetRef, maxBytes int64) ([]byte, videocover.FetchMetadata, error) {
+	if err := c.Config.Validate(); err != nil {
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorCapabilityRequired)
+	}
+	if maxBytes < 1 || maxBytes > videocover.MaxAssetBytes {
+		maxBytes = videocover.MaxAssetBytes
+	}
+	endpoint := "/internal/streams/" + url.PathEscape(ref.StreamID) + "/media-assets/" + url.PathEscape(ref.VariantID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinURL(c.Config.ControlPanelURL, endpoint), nil)
+	if err != nil {
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetTimeout)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Config.Token)
+	req.Header.Set("Accept", "image/png, image/jpeg, image/webp")
+	req.Header.Set("Accept-Encoding", "identity")
+	client := noRedirectClient()
+	if c.HTTP != nil {
+		clone := *c.HTTP
+		clone.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &clone
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetTimeout)
+		}
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetVariantFailed)
+	}
+	defer res.Body.Close()
+	switch res.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetUnauthorized)
+	case http.StatusNotFound:
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetNotFound)
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetTimeout)
+	case http.StatusRequestEntityTooLarge:
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetTooLarge)
+	case http.StatusUnsupportedMediaType:
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetFormatUnsupported)
+	case http.StatusConflict:
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetHashMismatch)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetVariantFailed)
+	}
+	if res.ContentLength == 0 {
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetVariantFailed)
+	}
+	if res.ContentLength > 0 {
+		if res.ContentLength > maxBytes {
+			return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetTooLarge)
+		}
+		if res.ContentLength != maxBytes {
+			return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetHashMismatch)
+		}
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxBytes+1))
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetTimeout)
+		}
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetVariantFailed)
+	}
+	if len(body) == 0 {
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetVariantFailed)
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetTooLarge)
+	}
+	meta := videocover.FetchMetadata{
+		MediaType: res.Header.Get("Content-Type"), ByteSize: int64(len(body)),
+		AssetID: res.Header.Get("X-AutoStream-Asset-ID"), VariantID: res.Header.Get("X-AutoStream-Variant-ID"),
+		Width: headerInt(res.Header.Get("X-AutoStream-Width")), Height: headerInt(res.Header.Get("X-AutoStream-Height")),
+		SHA256: digestSHA256Hex(res.Header.Get("Digest")),
+	}
+	if strings.TrimSpace(meta.MediaType) == "" || meta.AssetID != ref.AssetID || meta.VariantID != ref.VariantID || meta.Width < 1 || meta.Height < 1 || meta.SHA256 == "" {
+		return nil, videocover.FetchMetadata{}, videocover.NewError(videocover.ErrorMediaAssetVariantFailed)
+	}
+	return body, meta, nil
+}
+
+func headerInt(value string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || parsed < 1 {
+		return 0
+	}
+	return parsed
+}
+
+func digestSHA256Hex(value string) string {
+	for _, part := range strings.Split(value, ",") {
+		algorithm, encoded, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(algorithm), "sha-256") {
+			continue
+		}
+		encoded = strings.Trim(strings.TrimSpace(encoded), ":")
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err == nil && len(decoded) == 32 {
+			return fmt.Sprintf("%x", decoded)
+		}
+	}
+	return ""
 }
 
 func reportHostname() string {

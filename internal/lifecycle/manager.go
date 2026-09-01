@@ -15,6 +15,7 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/archive"
 	"github.com/example/autostream-encoder-recorder/internal/ffmpeg"
 	"github.com/example/autostream-encoder-recorder/internal/redaction"
+	"github.com/example/autostream-encoder-recorder/internal/videocover"
 )
 
 type Manager struct {
@@ -27,27 +28,29 @@ type Manager struct {
 }
 
 type StreamJob struct {
-	StreamID             string                `json:"stream_id"`
-	ArchiveRunID         string                `json:"archive_run_id,omitempty"`
-	Name                 string                `json:"name"`
-	InputURL             string                `json:"input_url"`
-	InputMode            string                `json:"input_mode,omitempty"`
-	AudioInputURL        string                `json:"-"`
-	RTMPURL              string                `json:"rtmp_url"`
-	StreamKey            string                `json:"stream_key,omitempty"`
-	StreamKeySecretName  string                `json:"stream_key_secret_name,omitempty"`
-	YouTubeOutputMode    string                `json:"-"`
-	OutputRelayBindingID string                `json:"-"`
-	YouTubeOutputReady   bool                  `json:"-"`
-	EncoderProfileID     string                `json:"encoder_profile_id,omitempty"`
-	EncoderProfile       ffmpeg.EncoderProfile `json:"-"`
-	OverlayProfileID     string                `json:"overlay_profile_id,omitempty"`
-	OverlayConfig        map[string]any        `json:"-"`
-	EncoderAudioGainDB   float64               `json:"encoder_audio_gain_db,omitempty"`
-	WatermarkInputURL    string                `json:"-"`
-	StartedAt            time.Time             `json:"started_at"`
-	DryRun               bool                  `json:"dry_run"`
-	ArchiveConfig        ArchiveConfig         `json:"archive_config,omitempty"`
+	StreamID             string                    `json:"stream_id"`
+	ArchiveRunID         string                    `json:"archive_run_id,omitempty"`
+	Name                 string                    `json:"name"`
+	InputURL             string                    `json:"input_url"`
+	InputMode            string                    `json:"input_mode,omitempty"`
+	AudioInputURL        string                    `json:"-"`
+	RTMPURL              string                    `json:"rtmp_url"`
+	StreamKey            string                    `json:"stream_key,omitempty"`
+	StreamKeySecretName  string                    `json:"stream_key_secret_name,omitempty"`
+	YouTubeOutputMode    string                    `json:"-"`
+	OutputRelayBindingID string                    `json:"-"`
+	YouTubeOutputReady   bool                      `json:"-"`
+	EncoderProfileID     string                    `json:"encoder_profile_id,omitempty"`
+	EncoderProfile       ffmpeg.EncoderProfile     `json:"-"`
+	OverlayProfileID     string                    `json:"overlay_profile_id,omitempty"`
+	OverlayConfig        map[string]any            `json:"-"`
+	EncoderAudioGainDB   float64                   `json:"encoder_audio_gain_db,omitempty"`
+	WatermarkInputURL    string                    `json:"-"`
+	CoverInputURL        string                    `json:"-"`
+	VideoCoverStart      *videocover.StartSnapshot `json:"video_cover_start,omitempty"`
+	StartedAt            time.Time                 `json:"started_at"`
+	DryRun               bool                      `json:"dry_run"`
+	ArchiveConfig        ArchiveConfig             `json:"archive_config,omitempty"`
 }
 
 type PackageJob struct {
@@ -547,6 +550,15 @@ func BuildLiveArgsToOutputTargetWithPreviewAndOverlay(job StreamJob, outputTarge
 	watermarkInput := watermarkPath
 	if strings.TrimSpace(job.WatermarkInputURL) != "" {
 		watermarkInput = job.WatermarkInputURL
+	}
+	if strings.TrimSpace(job.CoverInputURL) != "" {
+		if job.InputMode == "worker_scene_frames_srt" {
+			return ffmpeg.BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers(job.InputURL, job.AudioInputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, job.CoverInputURL, watermarkInput, job.EncoderAudioGainDB, profile)
+		}
+		if job.InputMode == "discord_opus_rtp" {
+			return ffmpeg.BuildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, job.CoverInputURL, watermarkInput, job.EncoderAudioGainDB, profile)
+		}
+		return ffmpeg.BuildLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers(job.InputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, job.CoverInputURL, watermarkInput, job.EncoderAudioGainDB, profile)
 	}
 	if job.InputMode == "worker_scene_frames_srt" {
 		return ffmpeg.BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(job.InputURL, job.AudioInputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput, job.EncoderAudioGainDB, profile)

@@ -2,6 +2,7 @@ package watermarkfeed
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -54,6 +55,20 @@ func (s *Source) Update(frame []byte) error {
 		return errors.New("watermark source is closed")
 	}
 	return s.feed.Update(frame)
+}
+
+// UpdateAndWait replaces the Watermark frame and waits until the exact feed
+// version has been written to the connected graph input. This is only the
+// transport half of an applied witness; callers must also observe downstream
+// output progress before publishing the new Watermark state.
+func (s *Source) UpdateAndWait(ctx context.Context, frame []byte) error {
+	if s == nil || len(frame) == 0 {
+		return errors.New("watermark frame is required")
+	}
+	if s.feed == nil {
+		return errors.New("watermark source is closed")
+	}
+	return s.feed.UpdateAndWait(ctx, frame)
 }
 
 func (s *Source) Close() error {

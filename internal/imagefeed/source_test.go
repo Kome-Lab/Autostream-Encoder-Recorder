@@ -2,12 +2,54 @@ package imagefeed
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestSourceDeliveryWitnessIsPerFrameVersion(t *testing.T) {
+	source, err := New("cover", []byte("initial"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = source.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	if err := source.UpdateAndWait(ctx, []byte("not-connected")); err == nil {
+		t.Fatal("delivery witness must not succeed before a consumer connects")
+	}
+
+	conn, err := net.DialTimeout("tcp", strings.TrimPrefix(source.InputURL(), "tcp://"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	current := []byte("not-connected")
+	got := make([]byte, len(current))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, current) {
+		t.Fatalf("current=%q want=%q", got, current)
+	}
+
+	next := []byte("next-version")
+	witnessCtx, witnessCancel := context.WithTimeout(context.Background(), time.Second)
+	defer witnessCancel()
+	done := make(chan error, 1)
+	go func() { done <- source.UpdateAndWait(witnessCtx, next) }()
+	got = make([]byte, len(next))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("delivery witness: %v", err)
+	}
+}
 
 func TestSourceServesInitialFrameAndPushesUpdateImmediately(t *testing.T) {
 	initial := []byte("initial-image-frame")

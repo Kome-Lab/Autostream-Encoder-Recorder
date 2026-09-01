@@ -29,6 +29,7 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/streamproc"
 	"github.com/example/autostream-encoder-recorder/internal/version"
+	"github.com/example/autostream-encoder-recorder/internal/videocover"
 	"github.com/example/autostream-encoder-recorder/internal/videoingest"
 	"github.com/example/autostream-encoder-recorder/internal/workerevents"
 )
@@ -306,6 +307,8 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	mux.HandleFunc("POST /streams/dry-run", dryRunStream(verifier, runtimeConfig))
 	mux.HandleFunc("POST /streams/start", startStream(processManager, audioManager, videoManager, verifier, resolver, runtimeConfig))
 	mux.HandleFunc("PUT /streams/{id}/runtime-settings", updateStreamRuntimeSettings(processManager, verifier, runtimeConfig))
+	mux.HandleFunc("GET /streams/{id}/video-cover-state", getVideoCoverState(processManager, verifier))
+	mux.HandleFunc("PUT /streams/{id}/video-cover-state", putVideoCoverState(processManager, verifier))
 	mux.HandleFunc("POST /streams/{id}/stop", stopStream(processManager, audioManager, videoManager, verifier))
 	mux.HandleFunc("GET /streams/{id}/process-status", streamProcessStatus(processManager, verifier))
 	mux.HandleFunc("GET /streams/{id}/preview/{name}", streamPreview(processArchiveRoot, verifier))
@@ -362,6 +365,102 @@ func updateStreamRuntimeSettings(processManager *streamproc.Manager, verifier To
 		default:
 			writeJSON(w, http.StatusOK, publicProcessSnapshot(snapshot))
 		}
+	}
+}
+
+func getVideoCoverState(processManager *streamproc.Manager, verifier TokenVerifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		if processManager == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "process_manager_not_configured"})
+			return
+		}
+		state, err := processManager.VideoCoverState(r.PathValue("id"))
+		switch {
+		case errors.Is(err, streamproc.ErrNotRunning):
+			writeJSON(w, http.StatusNotFound, map[string]string{"code": "stream_not_running"})
+		case videocover.ErrorCodeOf(err) == videocover.ErrorCapabilityRequired:
+			writeJSON(w, http.StatusNotFound, map[string]videocover.ErrorCode{"code": videocover.ErrorCapabilityRequired})
+		case videocover.ErrorCodeOf(err) != "":
+			writeJSON(w, http.StatusInternalServerError, map[string]videocover.ErrorCode{"code": videocover.ErrorCodeOf(err)})
+		case err != nil:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "video_cover_state_unavailable"})
+		default:
+			writeJSON(w, http.StatusOK, state)
+		}
+	}
+}
+
+func putVideoCoverState(processManager *streamproc.Manager, verifier TokenVerifier) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if !requireServiceToken(w, r, verifier) {
+			return
+		}
+		if processManager == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "process_manager_not_configured"})
+			return
+		}
+		var request videocover.ApplyRequest
+		if status, err := decodeLimitedStrictJSON(w, r, maxControlBodyBytes, &request); err != nil {
+			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
+			return
+		}
+		response, err := processManager.ApplyVideoCover(r.Context(), r.PathValue("id"), request)
+		if err != nil {
+			code := videocover.ErrorCodeOf(err)
+			switch {
+			case errors.Is(err, streamproc.ErrNotRunning):
+				if rejected, ok := processManager.VideoCoverRejection(r.PathValue("id"), request, videocover.ErrorCoverGraphUnavailable); ok {
+					writeJSON(w, coverRejectionStatus(rejected.Error), rejected)
+					return
+				}
+				writeJSON(w, http.StatusNotFound, map[string]string{"code": "stream_not_running"})
+			case code == videocover.ErrorInvalidRequest:
+				writeJSON(w, http.StatusBadRequest, map[string]videocover.ErrorCode{"code": code})
+			case code == videocover.ErrorCapabilityRequired:
+				if rejected, ok := processManager.VideoCoverRejection(r.PathValue("id"), request, code); ok {
+					writeJSON(w, coverRejectionStatus(rejected.Error), rejected)
+					return
+				}
+				// A legacy start has no negotiated job generation, so it cannot
+				// truthfully produce the versioned ApplyResponse contract.
+				writeJSON(w, http.StatusNotFound, map[string]videocover.ErrorCode{"code": code})
+			case code != "":
+				writeJSON(w, http.StatusConflict, map[string]videocover.ErrorCode{"code": code})
+			default:
+				writeJSON(w, http.StatusBadGateway, map[string]string{"code": "video_cover_apply_failed"})
+			}
+			return
+		}
+		status := http.StatusOK
+		if response.Outcome == videocover.OutcomeAmbiguous {
+			status = http.StatusAccepted
+		} else if response.Outcome == videocover.OutcomeRejected {
+			status = coverRejectionStatus(response.Error)
+		}
+		writeJSON(w, status, response)
+	}
+}
+
+func coverRejectionStatus(safeError *videocover.SafeError) int {
+	if safeError == nil {
+		return http.StatusConflict
+	}
+	switch safeError.Code {
+	case videocover.ErrorMediaAssetUnauthorized, videocover.ErrorMediaAssetNotFound,
+		videocover.ErrorMediaAssetHashMismatch, videocover.ErrorMediaAssetDimensionMismatch,
+		videocover.ErrorMediaAssetTimeout, videocover.ErrorMediaAssetFormatUnsupported,
+		videocover.ErrorMediaAssetTooLarge, videocover.ErrorMediaAssetDecodeFailed,
+		videocover.ErrorMediaAssetAspectRatioInvalid, videocover.ErrorMediaAssetVariantProcessing,
+		videocover.ErrorMediaAssetVariantFailed,
+		videocover.ErrorCoverGraphUnavailable, videocover.ErrorCapabilityRequired:
+		return http.StatusBadGateway
+	default:
+		return http.StatusConflict
 	}
 }
 
@@ -793,6 +892,16 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			}
 			if videoBridgeMode && videoManager != nil {
 				videoManager.StopBridge(job.StreamID)
+			}
+			if code := videocover.ErrorCodeOf(err); code != "" {
+				status := http.StatusBadRequest
+				if code == videocover.ErrorCapabilityRequired {
+					status = http.StatusConflict
+				} else if code != videocover.ErrorInvalidRequest {
+					status = http.StatusBadGateway
+				}
+				writeJSON(w, status, map[string]videocover.ErrorCode{"code": code})
+				return
 			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "start_stream_failed"})
 			return
@@ -1613,6 +1722,20 @@ func discordOpusAudio(audioManager *audioingest.Manager, processManager *streamp
 func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, limit int64, dst any) (int, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(dst); err != nil {
+		return limitedJSONStatus(err), err
+	}
+	if err := decoder.Decode(&struct{}{}); errors.Is(err, io.EOF) {
+		return http.StatusOK, nil
+	} else {
+		return limitedJSONStatus(err), err
+	}
+}
+
+func decodeLimitedStrictJSON(w http.ResponseWriter, r *http.Request, limit int64, dst any) (int, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		return limitedJSONStatus(err), err
 	}

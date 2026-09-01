@@ -191,6 +191,127 @@ func TestBuildWorkerVideoRuntimeSettingsKeepStableNamedGainAndDynamicWatermarkIn
 	}
 }
 
+func TestBuildVisualLayersKeepsCoverBelowWatermarkAndSingleTee(t *testing.T) {
+	tests := []struct {
+		name           string
+		args           []string
+		coverIndex     string
+		watermarkIndex string
+	}{
+		{
+			name:       "external",
+			args:       BuildLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers("srt://input.example.com:9000", "rtmp://127.0.0.1/autostream/stream-01", "C:/tmp/final.mkv", "C:/tmp/preview/index.m3u8", "C:/tmp/progress.txt", "C:/tmp/audio.txt", "tcp://127.0.0.1:42000", "tcp://127.0.0.1:42001", 1.5, DefaultProfile()),
+			coverIndex: "[1:v]", watermarkIndex: "[2:v]",
+		},
+		{
+			name:       "discord",
+			args:       BuildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers("C:/tmp/audio.sdp", "rtmp://127.0.0.1/autostream/stream-01", "C:/tmp/final.mkv", "C:/tmp/preview/index.m3u8", "C:/tmp/progress.txt", "C:/tmp/audio.txt", "tcp://127.0.0.1:42000", "tcp://127.0.0.1:42001", 1.5, DefaultProfile()),
+			coverIndex: "[3:v]", watermarkIndex: "[4:v]",
+		},
+		{
+			name:       "worker",
+			args:       BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers("internal_worker_video:tcp://127.0.0.1:41001", "internal_discord_audio:C:/tmp/audio.sdp", "rtmp://127.0.0.1/autostream/stream-01", "C:/tmp/final.mkv", "C:/tmp/preview/index.m3u8", "C:/tmp/progress.txt", "C:/tmp/audio.txt", "tcp://127.0.0.1:42000", "tcp://127.0.0.1:42001", 1.5, DefaultProfile()),
+			coverIndex: "[3:v]", watermarkIndex: "[4:v]",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			joined := strings.Join(tt.args, " ")
+			cover := tt.coverIndex + "format=rgba,scale=1920:1080[cover]"
+			watermark := tt.watermarkIndex + "format=rgba,scale=1920:1080[wm]"
+			for _, want := range []string{cover, "[base][cover]overlay=0:0:format=auto[covered]", watermark, "[covered][wm]overlay=0:0:format=auto,format=yuv420p[v]", "-f tee"} {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("missing %q: %s", want, joined)
+				}
+			}
+			if strings.Index(joined, "[base][cover]") > strings.Index(joined, "[covered][wm]") || strings.Count(joined, "-f tee") != 1 {
+				t.Fatalf("visual/tee topology changed: %s", joined)
+			}
+			tee := tt.args[len(tt.args)-1]
+			for _, parity := range []string{"[f=flv:onfail=ignore]", "[f=matroska]", "f=hls"} {
+				if !strings.Contains(tee, parity) {
+					t.Fatalf("output parity missing %q: %s", parity, tee)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildVisualLayersPreservesAudioClockCodecAndSequenceTopology(t *testing.T) {
+	p := DefaultProfile()
+	tests := []struct {
+		name         string
+		before       []string
+		after        []string
+		complexAudio bool
+	}{
+		{
+			name:   "external",
+			before: BuildLiveArchiveArgsToOutputTargetWithRuntimeSettings("srt://input.example.com:9000", "rtmp://127.0.0.1/autostream/s", "C:/tmp/a.mkv", "C:/tmp/p/index.m3u8", "C:/tmp/progress", "C:/tmp/audio", "tcp://127.0.0.1:42001", 2.5, p),
+			after:  BuildLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers("srt://input.example.com:9000", "rtmp://127.0.0.1/autostream/s", "C:/tmp/a.mkv", "C:/tmp/p/index.m3u8", "C:/tmp/progress", "C:/tmp/audio", "tcp://127.0.0.1:42000", "tcp://127.0.0.1:42001", 2.5, p),
+		},
+		{
+			name:         "discord",
+			before:       BuildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings("C:/tmp/audio.sdp", "rtmp://127.0.0.1/autostream/s", "C:/tmp/a.mkv", "C:/tmp/p/index.m3u8", "C:/tmp/progress", "C:/tmp/audio", "tcp://127.0.0.1:42001", 2.5, p),
+			after:        BuildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers("C:/tmp/audio.sdp", "rtmp://127.0.0.1/autostream/s", "C:/tmp/a.mkv", "C:/tmp/p/index.m3u8", "C:/tmp/progress", "C:/tmp/audio", "tcp://127.0.0.1:42000", "tcp://127.0.0.1:42001", 2.5, p),
+			complexAudio: true,
+		},
+		{
+			name:         "worker",
+			before:       BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings("internal_worker_video:tcp://127.0.0.1:41001", "internal_discord_audio:C:/tmp/audio.sdp", "rtmp://127.0.0.1/autostream/s", "C:/tmp/a.mkv", "C:/tmp/p/index.m3u8", "C:/tmp/progress", "C:/tmp/audio", "tcp://127.0.0.1:42001", 2.5, p),
+			after:        BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers("internal_worker_video:tcp://127.0.0.1:41001", "internal_discord_audio:C:/tmp/audio.sdp", "rtmp://127.0.0.1/autostream/s", "C:/tmp/a.mkv", "C:/tmp/p/index.m3u8", "C:/tmp/progress", "C:/tmp/audio", "tcp://127.0.0.1:42000", "tcp://127.0.0.1:42001", 2.5, p),
+			complexAudio: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if before, after := audioOptionFingerprint(tt.before), audioOptionFingerprint(tt.after); before != after {
+				t.Fatalf("audio codec/map topology changed:\nbefore=%s\nafter=%s", before, after)
+			}
+			if tt.complexAudio {
+				before, after := complexAudioPrefix(tt.before), complexAudioPrefix(tt.after)
+				if before == "" || before != after {
+					t.Fatalf("continuous audio clock graph changed:\nbefore=%s\nafter=%s", before, after)
+				}
+			}
+			joined := strings.Join(tt.after, " ")
+			for _, forbidden := range []string{"asetpts=", "aresample=async", "-itsoffset", "-shortest"} {
+				if strings.Contains(joined, forbidden) {
+					t.Fatalf("Cover graph introduced audio PTS/sequence mutation %q: %s", forbidden, joined)
+				}
+			}
+		})
+	}
+}
+
+func audioOptionFingerprint(args []string) string {
+	var out []string
+	for index := 0; index+1 < len(args); index++ {
+		switch args[index] {
+		case "-c:a", "-b:a", "-ar", "-filter:a":
+			out = append(out, args[index], args[index+1])
+		case "-map":
+			if strings.Contains(args[index+1], "a") {
+				out = append(out, args[index], args[index+1])
+			}
+		}
+	}
+	return strings.Join(out, "\x00")
+}
+
+func complexAudioPrefix(args []string) string {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] != "-filter_complex" {
+			continue
+		}
+		filter := args[index+1]
+		if split := strings.Index(filter, ";[0:v]"); split >= 0 {
+			return filter[:split]
+		}
+	}
+	return ""
+}
+
 func TestBuildLiveArchiveArgsWithPreviewKeepsStartToNowDVR(t *testing.T) {
 	preview := `C:\Auto Stream\preview\index.m3u8`
 	args := BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(

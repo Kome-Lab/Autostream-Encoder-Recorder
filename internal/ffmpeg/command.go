@@ -54,6 +54,24 @@ func BuildLiveArchiveArgsToOutputTargetWithRuntimeSettings(inputURL, outputTarge
 	return buildLiveArchiveArgsToOutputTargetWithRuntimeSettings(inputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput, audioGainDB, true, p)
 }
 
+// BuildLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers builds
+// the fixed Video Cover graph. Cover and Watermark are separate continuous
+// image inputs, so either can change without rebuilding or restarting FFmpeg.
+func BuildLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers(inputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, coverInput, watermarkInput string, audioGainDB float64, p EncoderProfile) []string {
+	output := filepath.Clean(archivePath)
+	args := []string{"-hide_banner", "-y", "-i", ResolveInputTarget(inputURL)}
+	args = append(args, watermarkInputArgs(coverInput)...)
+	args = append(args, watermarkInputArgs(watermarkInput)...)
+	args = append(args, "-filter_complex", externalVisualLayersFilter(p), "-map", "[v]", "-map", "0:a:0?")
+	args = append(args, liveVideoCodecArgs(p)...)
+	args = append(args, "-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate))
+	if progressPath != "" {
+		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
+	}
+	args = append(args, "-filter:a", runtimeAudioFilter(audioGainDB, audioStatsPath))
+	return append(args, "-f", "tee", buildLiveTeeOutput(outputTarget, output, previewPlaylistPath))
+}
+
 func buildLiveArchiveArgsToOutputTargetWithRuntimeSettings(inputURL, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput string, audioGainDB float64, runtimeAudio bool, p EncoderProfile) []string {
 	output := filepath.Clean(archivePath)
 	input := ResolveInputTarget(inputURL)
@@ -104,6 +122,33 @@ func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithTelemetryAndPreviewAndWat
 
 func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput string, audioGainDB float64, p EncoderProfile) []string {
 	return buildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput, audioGainDB, true, p)
+}
+
+// BuildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers
+// preserves the Discord audio graph and places Cover below Watermark.
+func BuildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers(audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, coverInput, watermarkInput string, audioGainDB float64, p EncoderProfile) []string {
+	output := filepath.Clean(archivePath)
+	input := ResolveInputTarget(audioSDPPath)
+	args := []string{
+		"-hide_banner", "-y",
+		"-f", "lavfi", "-re", "-i", "color=c=0x0b1020:s=" + itoa(p.Width) + "x" + itoa(p.Height) + ":r=" + itoa(p.FPS),
+		"-protocol_whitelist", "file,udp,rtp", "-i", filepath.Clean(input),
+		"-re", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=" + itoa(p.SampleRate),
+	}
+	args = append(args, watermarkInputArgs(coverInput)...)
+	args = append(args, watermarkInputArgs(watermarkInput)...)
+	filter := discordAudioRuntimeVisualLayersFilterWithSilence(p, audioGainDB)
+	audioMap := "[aout]"
+	if strings.TrimSpace(audioStatsPath) != "" {
+		filter, audioMap = appendComplexAudioStats(filter, audioStatsPath)
+	}
+	args = append(args, "-filter_complex", filter, "-map", "[v]", "-map", audioMap)
+	args = append(args, liveVideoCodecArgs(p)...)
+	args = append(args, "-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate))
+	if progressPath != "" {
+		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
+	}
+	return append(args, "-f", "tee", buildLiveTeeOutput(outputTarget, output, previewPlaylistPath))
 }
 
 func buildDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput string, audioGainDB float64, runtimeAudio bool, p EncoderProfile) []string {
@@ -160,6 +205,32 @@ func BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSetting
 	return buildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(videoInputURL, audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput, audioGainDB, true, p)
 }
 
+// BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers
+// preserves the Worker/Discord clocks while adding the fixed Cover input.
+func BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers(videoInputURL, audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, coverInput, watermarkInput string, audioGainDB float64, p EncoderProfile) []string {
+	output := filepath.Clean(archivePath)
+	args := []string{
+		"-hide_banner", "-y",
+		"-thread_queue_size", "512", "-f", "mjpeg", "-framerate", "60", "-i", ResolveInputTarget(videoInputURL),
+		"-thread_queue_size", "512", "-protocol_whitelist", "file,udp,rtp", "-i", filepath.Clean(ResolveInputTarget(audioSDPPath)),
+		"-re", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=" + itoa(p.SampleRate),
+	}
+	args = append(args, watermarkInputArgs(coverInput)...)
+	args = append(args, watermarkInputArgs(watermarkInput)...)
+	filter := workerSceneRuntimeVisualLayersFilterWithSilence(p, audioGainDB)
+	audioMap := "[aout]"
+	if strings.TrimSpace(audioStatsPath) != "" {
+		filter, audioMap = appendComplexAudioStats(filter, audioStatsPath)
+	}
+	args = append(args, "-filter_complex", filter, "-map", "[v]", "-map", audioMap)
+	args = append(args, workerSceneLiveVideoCodecArgs(p)...)
+	args = append(args, "-c:a", "aac", "-b:a", p.AudioBitrate, "-ar", itoa(p.SampleRate))
+	if progressPath != "" {
+		args = append(args, "-nostats", "-progress", filepath.Clean(progressPath))
+	}
+	return append(args, "-f", "tee", buildLiveTeeOutput(outputTarget, output, previewPlaylistPath))
+}
+
 func buildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettings(videoInputURL, audioSDPPath, outputTarget, archivePath, previewPlaylistPath, progressPath, audioStatsPath, watermarkInput string, audioGainDB float64, runtimeAudio bool, p EncoderProfile) []string {
 	output := filepath.Clean(archivePath)
 	videoInput := ResolveInputTarget(videoInputURL)
@@ -200,6 +271,22 @@ func buildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSetting
 
 func watermarkFilter(p EncoderProfile) string {
 	return "[0:v]scale=" + itoa(p.Width) + ":" + itoa(p.Height) + ":force_original_aspect_ratio=decrease,pad=" + itoa(p.Width) + ":" + itoa(p.Height) + ":(ow-iw)/2:(oh-ih)/2:color=0x0b1020,setsar=1,format=rgba[base];[1:v]format=rgba,scale=" + itoa(p.Width) + ":" + itoa(p.Height) + "[wm];[base][wm]overlay=0:0:format=auto,format=yuv420p[v]"
+}
+
+func externalVisualLayersFilter(p EncoderProfile) string {
+	return "[0:v]scale=" + itoa(p.Width) + ":" + itoa(p.Height) + ":force_original_aspect_ratio=decrease,pad=" + itoa(p.Width) + ":" + itoa(p.Height) + ":(ow-iw)/2:(oh-ih)/2:color=0x0b1020,setsar=1,format=rgba[base];" + visualLayersTail(1, 2, p)
+}
+
+func discordAudioRuntimeVisualLayersFilterWithSilence(p EncoderProfile, audioGainDB float64) string {
+	return "[1:a:0][2:a:0]amix=inputs=2:duration=longest:dropout_transition=0,volume@gain=" + formatGainDB(audioGainDB) + "dB,asplit=2[aout][wavein];[0:v]format=rgba[bg];[wavein]showwaves=s=" + itoa(p.Width) + "x" + itoa(p.Height/2) + ":mode=line:rate=30:colors=0x38bdf8,format=rgba[wave];[bg][wave]overlay=0:" + itoa(p.Height/4) + ":eof_action=repeat:repeatlast=1:shortest=0,format=rgba[base];" + visualLayersTail(3, 4, p)
+}
+
+func workerSceneRuntimeVisualLayersFilterWithSilence(p EncoderProfile, audioGainDB float64) string {
+	return "[1:a:0][2:a:0]amix=inputs=2:duration=longest:dropout_transition=0,volume@gain=" + formatGainDB(audioGainDB) + "dB[aout];[0:v]scale=" + itoa(p.Width) + ":" + itoa(p.Height) + ":force_original_aspect_ratio=decrease,pad=" + itoa(p.Width) + ":" + itoa(p.Height) + ":(ow-iw)/2:(oh-ih)/2:color=0x0b1020,setsar=1,format=rgba[base];" + visualLayersTail(3, 4, p)
+}
+
+func visualLayersTail(coverIndex, watermarkIndex int, p EncoderProfile) string {
+	return "[" + itoa(coverIndex) + ":v]format=rgba,scale=" + itoa(p.Width) + ":" + itoa(p.Height) + "[cover];[base][cover]overlay=0:0:format=auto[covered];[" + itoa(watermarkIndex) + ":v]format=rgba,scale=" + itoa(p.Width) + ":" + itoa(p.Height) + "[wm];[covered][wm]overlay=0:0:format=auto,format=yuv420p[v]"
 }
 
 func discordAudioFilter(p EncoderProfile) string {

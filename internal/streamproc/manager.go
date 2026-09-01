@@ -2,6 +2,7 @@ package streamproc
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,14 +16,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/example/autostream-encoder-recorder/internal/archive"
 	"github.com/example/autostream-encoder-recorder/internal/control"
 	"github.com/example/autostream-encoder-recorder/internal/ffmpeg"
+	"github.com/example/autostream-encoder-recorder/internal/imagefeed"
 	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
 	"github.com/example/autostream-encoder-recorder/internal/observability"
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/redaction"
+	"github.com/example/autostream-encoder-recorder/internal/videocover"
 	"github.com/example/autostream-encoder-recorder/internal/watermarkfeed"
 )
 
@@ -217,9 +222,36 @@ type Manager struct {
 	OutputRelayBindingID     string
 	RequireOutputRelay       bool
 	ProcessExitHook          func(streamID string)
+	CoverAssets              *videocover.Loader
+	CoverWitness             CoverGraphWitness
+	WatermarkWitness         WatermarkGraphWitness
+	CoverApplyTimeout        time.Duration
+	CoverFetchTimeout        time.Duration
 
-	mu        sync.Mutex
-	processes map[string]*trackedProcess
+	mu               sync.Mutex
+	processes        map[string]*trackedProcess
+	coverGenerations map[string]coverGeneration
+}
+
+// CoverGraphWitness is the narrow graph-observation seam. Production waits
+// for the exact feed version to be consumed and then for output progress to
+// advance. Tests can provide a deterministic witness without launching
+// FFmpeg.
+type CoverGraphWitness interface {
+	Apply(ctx context.Context, source *imagefeed.Source, frame []byte, initial bool, progressPath string) error
+}
+
+// WatermarkGraphWitness mirrors the Cover graph witness for the independently
+// controlled Watermark feed. A successful source update alone is not enough:
+// production also waits for downstream output progress before the new layer
+// revision can appear in applied_witness.watermark.
+type WatermarkGraphWitness interface {
+	Apply(ctx context.Context, source *watermarkfeed.Source, frame []byte, progressPath string) error
+}
+
+type coverGeneration struct {
+	JobGeneration uint64
+	Generation    uint64
 }
 
 type Reporter interface {
@@ -235,13 +267,30 @@ type ArchivePackager interface {
 }
 
 type trackedProcess struct {
-	snapshot  Snapshot
-	process   RunningProcess
-	job       lifecycle.StreamJob
-	done      chan error
-	watermark *watermarkfeed.Source
-	runtimeMu sync.Mutex
+	snapshot           Snapshot
+	process            RunningProcess
+	job                lifecycle.StreamJob
+	done               chan error
+	watermark          *watermarkfeed.Source
+	runtimeMu          sync.Mutex
+	watermarkMu        sync.Mutex
+	watermarkState     videocover.LayerState
+	cover              *imagefeed.Source
+	coverMu            sync.Mutex
+	coverState         videocover.RuntimeState
+	terminalCoverState *videocover.RuntimeState
+	coverReplay        map[string]coverReplay
+	coverReplayOrder   []string
+	transparentCover   []byte
+	progressPath       string
 }
+
+type coverReplay struct {
+	fingerprint [32]byte
+	response    videocover.ApplyResponse
+}
+
+const maxCoverReplayEntries = 256
 
 type Snapshot struct {
 	StreamID           string            `json:"stream_id"`
@@ -266,10 +315,15 @@ func NewManagerFromEnv() *Manager {
 	ffmpegBin := envDefault("FFMPEG_BIN", "ffmpeg")
 	controlConfig := control.ConfigFromEnv()
 	var artifactReporter ArtifactReporter
+	var coverAssets *videocover.Loader
 	if controlConfig.ControlPanelURL != "" && controlConfig.Token != "" {
-		artifactReporter = control.Client{Config: controlConfig}
+		controlClient := control.Client{Config: controlConfig}
+		artifactReporter = controlClient
+		if controlConfig.Validate() == nil {
+			coverAssets = videocover.NewLoader(controlClient, envInt("VIDEO_COVER_CACHE_ENTRIES", 16), int64(envInt("VIDEO_COVER_CACHE_MIB", 64))<<20)
+		}
 		if reporter == nil {
-			reporter = control.Client{Config: controlConfig}
+			reporter = controlClient
 		}
 	}
 	return &Manager{
@@ -291,6 +345,11 @@ func NewManagerFromEnv() *Manager {
 		// accidentally turn an invalid persisted value into a trusted binding.
 		OutputRelayBindingID: os.Getenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID"),
 		RequireOutputRelay:   outputrelay.RequireRelayFromEnv(),
+		CoverAssets:          coverAssets,
+		CoverWitness:         progressCoverWitness{},
+		WatermarkWitness:     progressWatermarkWitness{},
+		CoverApplyTimeout:    envDuration("VIDEO_COVER_APPLY_TIMEOUT_SEC", 6*time.Second),
+		CoverFetchTimeout:    envDuration("VIDEO_COVER_FETCH_TIMEOUT_SEC", 10*time.Second),
 		Packager: lifecycle.Manager{
 			ArchiveRoot: archiveRoot,
 			FFmpegBin:   ffmpegBin,
@@ -410,6 +469,37 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 		profile = ffmpeg.DefaultProfile()
 	}
 	job.EncoderProfile = profile
+	transparentCover, err := videocover.TransparentFrame(profile.Width, profile.Height)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	coverFrame := transparentCover
+	if job.VideoCoverStart != nil {
+		if err := validateCoverStart(*job.VideoCoverStart); err != nil {
+			return Snapshot{}, err
+		}
+		if m.CoverAssets == nil {
+			return Snapshot{}, videocover.NewError(videocover.ErrorCapabilityRequired)
+		}
+		if job.VideoCoverStart.Active {
+			fetchCtx, cancelFetch := context.WithTimeout(context.Background(), m.coverFetchTimeout())
+			coverFrame, err = m.CoverAssets.Load(fetchCtx, job.StreamID, *job.VideoCoverStart.CoverAsset, profile.Width, profile.Height)
+			cancelFetch()
+			if err != nil {
+				return Snapshot{}, err
+			}
+		}
+	}
+	coverSource, err := imagefeed.New("video cover", coverFrame)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	coverActive := true
+	defer func() {
+		if coverActive {
+			_ = coverSource.Close()
+		}
+	}()
 	watermarkSource, err := watermarkfeed.New(job.OverlayConfig)
 	if err != nil {
 		return Snapshot{}, err
@@ -421,6 +511,8 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 		}
 	}()
 	job.WatermarkInputURL = watermarkSource.InputURL()
+	job.CoverInputURL = coverSource.InputURL()
+	watermarkState := initialWatermarkState(job.OverlayProfileID, job.OverlayConfig)
 	job.OverlayConfig = nil
 	args := lifecycle.BuildLiveArgsToOutputTargetWithPreviewAndOverlay(job, outputTarget, layout.FinalMKV(), layout.PreviewPlaylist(), layout.TmpFFmpegProgress(), layout.TmpFFmpegAudioStats(), "", profile)
 	starter := m.Starter
@@ -431,6 +523,30 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	process, err := starter.Start(context.Background(), m.ffmpegBin(), args)
 	if err != nil {
 		return Snapshot{}, err
+	}
+	jobGeneration := uint64(0)
+	if job.VideoCoverStart != nil {
+		jobGeneration = job.VideoCoverStart.JobGeneration
+	}
+	graphGeneration, err := m.nextCoverGeneration(job.StreamID, jobGeneration)
+	if err != nil {
+		_ = process.Kill()
+		_ = coverSource.Close()
+		_ = watermarkSource.Close()
+		return Snapshot{}, err
+	}
+	coverState := initialCoverRuntimeState(job.StreamID, graphGeneration, job.VideoCoverStart, watermarkState)
+	if job.VideoCoverStart != nil {
+		witnessCtx, cancelWitness := context.WithTimeout(context.Background(), m.coverApplyTimeout())
+		witnessErr := m.coverGraphWitness().Apply(witnessCtx, coverSource, coverFrame, true, layout.TmpFFmpegProgress())
+		cancelWitness()
+		if witnessErr != nil {
+			_ = process.Kill()
+			_ = coverSource.Close()
+			_ = watermarkSource.Close()
+			return Snapshot{}, videocover.NewError(videocover.ErrorCoverGraphUnavailable)
+		}
+		markCoverApplied(&coverState, job.VideoCoverStart.Revision, job.VideoCoverStart.Active, job.VideoCoverStart.CoverAsset, watermarkState)
 	}
 	snapshot := Snapshot{
 		StreamID:           job.StreamID,
@@ -444,14 +560,21 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	}
 	if err := writeStartMetadata(layout, job, snapshot, args, m.ffmpegBin(), outputRoute); err != nil {
 		_ = process.Kill()
+		_ = coverSource.Close()
 		_ = watermarkSource.Close()
 		return Snapshot{}, err
 	}
 
 	done := make(chan error, 1)
 	m.mu.Lock()
-	m.processes[job.StreamID] = &trackedProcess{snapshot: snapshot, process: process, job: job, done: done, watermark: watermarkSource}
+	m.processes[job.StreamID] = &trackedProcess{
+		snapshot: snapshot, process: process, job: job, done: done, watermark: watermarkSource,
+		watermarkState: watermarkState, cover: coverSource, coverState: coverState,
+		coverReplay: map[string]coverReplay{}, transparentCover: transparentCover,
+		progressPath: layout.TmpFFmpegProgress(),
+	}
 	m.mu.Unlock()
+	coverActive = false
 	watermarkActive = false
 	reservationActive = false
 
@@ -510,9 +633,37 @@ func (m *Manager) UpdateRuntimeSettings(streamID string, settings RuntimeSetting
 	if err := commander.Command("volume@gain", "volume", argument); err != nil {
 		return Snapshot{}, err
 	}
-	if err := tracked.watermark.Update(frame); err != nil {
-		return Snapshot{}, err
+	// Serialize the two independently mutable visual inputs only for the short
+	// witness window. This prevents a concurrent Cover apply from publishing a
+	// witness that pairs its new Cover revision with a pre-witness Watermark.
+	tracked.coverMu.Lock()
+	witnessCtx, cancelWitness := context.WithTimeout(context.Background(), m.coverApplyTimeout())
+	witnessErr := m.watermarkGraphWitness().Apply(witnessCtx, tracked.watermark, frame, tracked.progressPath)
+	cancelWitness()
+	if witnessErr != nil {
+		tracked.markWatermarkWitnessUnknownLocked()
+		tracked.coverMu.Unlock()
+		return Snapshot{}, videocover.NewError(videocover.ErrorCoverGraphUnavailable)
 	}
+	tracked.watermarkMu.Lock()
+	tracked.watermarkState.Revision++
+	tracked.watermarkState.Enabled = watermarkEnabled(settings.OverlayConfig)
+	if tracked.watermarkState.Enabled {
+		tracked.watermarkState.VariantID = strings.TrimSpace(settings.OverlayProfileID)
+	} else {
+		tracked.watermarkState.VariantID = ""
+	}
+	watermarkState := tracked.watermarkState
+	tracked.watermarkMu.Unlock()
+	if tracked.coverState.JobGeneration != 0 {
+		tracked.coverState.Watermark = watermarkState
+		if tracked.coverState.AppliedWitness != nil {
+			witness := *tracked.coverState.AppliedWitness
+			witness.Watermark = watermarkState
+			tracked.coverState.AppliedWitness = &witness
+		}
+	}
+	tracked.coverMu.Unlock()
 
 	m.mu.Lock()
 	current, ok := m.processes[streamID]
@@ -542,6 +693,508 @@ func (m *Manager) UpdateRuntimeSettings(streamID string, settings RuntimeSetting
 		},
 	})
 	return snapshot, nil
+}
+
+// VideoCoverState returns only a negotiated Cover runtime. Legacy starts that
+// omitted video_cover_start remain transparently inactive and cannot be
+// mutated through the capability path.
+func (m *Manager) VideoCoverState(streamID string) (videocover.RuntimeState, error) {
+	m.mu.Lock()
+	tracked, ok := m.processes[streamID]
+	if !ok || tracked.snapshot.Status != "running" || tracked.cover == nil {
+		m.mu.Unlock()
+		return videocover.RuntimeState{}, ErrNotRunning
+	}
+	m.mu.Unlock()
+
+	tracked.coverMu.Lock()
+	defer tracked.coverMu.Unlock()
+	if tracked.coverState.JobGeneration == 0 {
+		return videocover.RuntimeState{}, videocover.NewError(videocover.ErrorCapabilityRequired)
+	}
+	return tracked.coverStateSnapshot(), nil
+}
+
+// ApplyVideoCover performs a single fenced mutation. Asset failures are
+// rejected before the feed changes. Once feed delivery begins, any missing
+// graph witness is ambiguous and is never retried automatically; exact replay
+// returns the stored response without another fetch or feed write.
+func (m *Manager) ApplyVideoCover(ctx context.Context, streamID string, request videocover.ApplyRequest) (videocover.ApplyResponse, error) {
+	if err := validateCoverApply(streamID, request); err != nil {
+		return videocover.ApplyResponse{}, err
+	}
+	m.mu.Lock()
+	tracked, ok := m.processes[streamID]
+	if !ok {
+		m.mu.Unlock()
+		return videocover.ApplyResponse{}, ErrNotRunning
+	}
+	tracked.coverMu.Lock()
+	running := tracked.snapshot.Status == "running" && tracked.cover != nil
+	m.mu.Unlock()
+	defer tracked.coverMu.Unlock()
+	if !running {
+		if state, exists := tracked.videoCoverRejectionStateLocked(); exists {
+			switch {
+			case request.JobGeneration != state.JobGeneration:
+				return rejectedCoverResponseFromState(state, request, videocover.ErrorStaleJobGeneration), nil
+			case request.ExpectedGeneration != state.Generation:
+				return rejectedCoverResponseFromState(state, request, videocover.ErrorStaleCoverGeneration), nil
+			case request.Revision < state.Desired.Revision:
+				return rejectedCoverResponseFromState(state, request, videocover.ErrorStaleCoverRevision), nil
+			case request.Revision == state.Desired.Revision:
+				return rejectedCoverResponseFromState(state, request, videocover.ErrorRevisionPayloadConflict), nil
+			}
+			return rejectedCoverResponseFromState(terminalVideoCoverState(state), request, videocover.ErrorCoverGraphUnavailable), nil
+		}
+		return videocover.ApplyResponse{}, ErrNotRunning
+	}
+	if tracked.coverState.JobGeneration == 0 {
+		return videocover.ApplyResponse{}, videocover.NewError(videocover.ErrorCapabilityRequired)
+	}
+	fingerprint := coverRequestFingerprint(request)
+	if replay, exists := tracked.coverReplay[request.IdempotencyKey]; exists {
+		if replay.fingerprint != fingerprint {
+			return rejectedCoverResponse(tracked, request, videocover.ErrorIdempotencyConflict), nil
+		}
+		return replay.response, nil
+	}
+	if request.JobGeneration != tracked.coverState.JobGeneration {
+		response := rejectedCoverResponse(tracked, request, videocover.ErrorStaleJobGeneration)
+		tracked.storeCoverReplay(request.IdempotencyKey, coverReplay{fingerprint: fingerprint, response: response})
+		return response, nil
+	}
+	if request.ExpectedGeneration != tracked.coverState.Generation {
+		response := rejectedCoverResponse(tracked, request, videocover.ErrorStaleCoverGeneration)
+		tracked.storeCoverReplay(request.IdempotencyKey, coverReplay{fingerprint: fingerprint, response: response})
+		return response, nil
+	}
+	if request.Revision < tracked.coverState.Desired.Revision {
+		response := rejectedCoverResponse(tracked, request, videocover.ErrorStaleCoverRevision)
+		tracked.storeCoverReplay(request.IdempotencyKey, coverReplay{fingerprint: fingerprint, response: response})
+		return response, nil
+	}
+	if request.Revision == tracked.coverState.Desired.Revision {
+		response := rejectedCoverResponse(tracked, request, videocover.ErrorRevisionPayloadConflict)
+		tracked.storeCoverReplay(request.IdempotencyKey, coverReplay{fingerprint: fingerprint, response: response})
+		return response, nil
+	}
+
+	frame := tracked.transparentCover
+	if request.Active {
+		if m.CoverAssets == nil {
+			response := rejectedCoverResponse(tracked, request, videocover.ErrorCapabilityRequired)
+			tracked.storeCoverReplay(request.IdempotencyKey, coverReplay{fingerprint: fingerprint, response: response})
+			return response, nil
+		}
+		fetchCtx, cancelFetch := context.WithTimeout(ctx, m.coverFetchTimeout())
+		loaded, err := m.CoverAssets.Load(fetchCtx, streamID, *request.CoverAsset, tracked.job.EncoderProfile.Width, tracked.job.EncoderProfile.Height)
+		cancelFetch()
+		if err != nil {
+			code := videocover.ErrorCodeOf(err)
+			if code == videocover.ErrorInvalidRequest {
+				return videocover.ApplyResponse{}, err
+			}
+			if code == "" {
+				code = videocover.ErrorMediaAssetTimeout
+			}
+			response := rejectedCoverResponse(tracked, request, code)
+			tracked.storeCoverReplay(request.IdempotencyKey, coverReplay{fingerprint: fingerprint, response: response})
+			return response, nil
+		}
+		frame = loaded
+	}
+
+	lastGood := tracked.coverState.Applied
+	if tracked.coverState.LastGoodApplied != nil {
+		lastGood = *tracked.coverState.LastGoodApplied
+	}
+	tracked.coverState.Desired = desiredFromRequest(request)
+	tracked.coverState.CoverAsset = nil
+	if request.Active && request.CoverAsset != nil {
+		asset := *request.CoverAsset
+		tracked.coverState.CoverAsset = &asset
+	}
+	witnessCtx, cancelWitness := context.WithTimeout(ctx, m.coverApplyTimeout())
+	witnessErr := m.coverGraphWitness().Apply(witnessCtx, tracked.cover, frame, false, tracked.progressPath)
+	cancelWitness()
+	watermark := tracked.currentWatermarkState()
+	if witnessErr != nil {
+		tracked.coverState.Readiness = videocover.ReadinessUnknown
+		tracked.coverState.Applied = videocover.AppliedState{State: "unknown"}
+		tracked.coverState.AppliedWitness = nil
+		tracked.coverState.LastGoodApplied = &lastGood
+		tracked.coverState.Error = &videocover.SafeError{Code: videocover.ErrorCoverApplyAmbiguous}
+		tracked.coverState.Watermark = watermark
+		response := videocover.ApplyResponse{
+			StreamID: streamID, JobGeneration: request.JobGeneration, RequestedRevision: request.Revision,
+			ActualGeneration: tracked.coverState.Generation, Accepted: true, Outcome: videocover.OutcomeAmbiguous,
+			Actual: tracked.coverState, Error: &videocover.SafeError{Code: videocover.ErrorCoverApplyAmbiguous},
+		}
+		tracked.storeCoverReplay(request.IdempotencyKey, coverReplay{fingerprint: fingerprint, response: response})
+		return response, nil
+	}
+	markCoverApplied(&tracked.coverState, request.Revision, request.Active, request.CoverAsset, watermark)
+	response := videocover.ApplyResponse{
+		StreamID: streamID, JobGeneration: request.JobGeneration, RequestedRevision: request.Revision,
+		ActualGeneration: tracked.coverState.Generation, Accepted: true, Applied: true,
+		Outcome: videocover.OutcomeApplied, Actual: tracked.coverState,
+	}
+	tracked.storeCoverReplay(request.IdempotencyKey, coverReplay{fingerprint: fingerprint, response: response})
+	return response, nil
+}
+
+func validateCoverStart(snapshot videocover.StartSnapshot) error {
+	if snapshot.JobGeneration < 1 || snapshot.Revision < 1 || !validIdempotencyKey(snapshot.IdempotencyKey) {
+		return videocover.NewError(videocover.ErrorInvalidRequest)
+	}
+	if snapshot.Active && snapshot.CoverAsset == nil || !snapshot.Active && snapshot.CoverAsset != nil {
+		return videocover.NewError(videocover.ErrorInvalidRequest)
+	}
+	if snapshot.CoverAsset != nil {
+		if err := videocover.ValidateDescriptor(*snapshot.CoverAsset); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateCoverApply(streamID string, request videocover.ApplyRequest) error {
+	if strings.TrimSpace(streamID) == "" || request.StreamID != streamID || request.JobGeneration < 1 || request.ExpectedGeneration < 1 || request.Revision < 1 || !validIdempotencyKey(request.IdempotencyKey) {
+		return videocover.NewError(videocover.ErrorInvalidRequest)
+	}
+	if request.Active {
+		if request.CoverAsset == nil || request.HideConfirmed {
+			return videocover.NewError(videocover.ErrorInvalidRequest)
+		}
+		if err := videocover.ValidateDescriptor(*request.CoverAsset); err != nil {
+			return err
+		}
+	} else if request.CoverAsset != nil || !request.HideConfirmed {
+		return videocover.NewError(videocover.ErrorInvalidRequest)
+	}
+	return nil
+}
+
+func validIdempotencyKey(value string) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	length := utf8.RuneCountInString(value)
+	if length < 1 || length > 128 {
+		return false
+	}
+	first, _ := utf8.DecodeRuneInString(value)
+	last, _ := utf8.DecodeLastRuneInString(value)
+	if idempotencyEdgeSpace(first) || idempotencyEdgeSpace(last) {
+		return false
+	}
+	for _, char := range value {
+		if char < 0x20 || char == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func idempotencyEdgeSpace(character rune) bool {
+	return unicode.IsSpace(character) || character == '\ufeff'
+}
+
+func initialCoverRuntimeState(streamID string, generation uint64, snapshot *videocover.StartSnapshot, watermark videocover.LayerState) videocover.RuntimeState {
+	state := videocover.RuntimeState{
+		StreamID: streamID, Generation: generation, Capability: videocover.Capability,
+		Readiness: videocover.ReadinessNotReady, Applied: videocover.AppliedState{State: "unknown"},
+		Cover: videocover.LayerState{Revision: 1}, Watermark: watermark,
+		Pipeline: videocover.FixedPipelineInvariant(), NoAutomaticResend: true,
+		Error: &videocover.SafeError{Code: videocover.ErrorCapabilityRequired},
+	}
+	if snapshot == nil {
+		return state
+	}
+	state.JobGeneration = snapshot.JobGeneration
+	state.Desired = videocover.DesiredState{Active: snapshot.Active, Revision: snapshot.Revision, Source: "none"}
+	if snapshot.Active && snapshot.CoverAsset != nil {
+		state.Desired.Source = "upload"
+		state.Desired.VariantID = snapshot.CoverAsset.VariantID
+	}
+	state.Error = &videocover.SafeError{Code: videocover.ErrorCoverGraphUnavailable}
+	return state
+}
+
+func markCoverApplied(state *videocover.RuntimeState, revision uint64, active bool, asset *videocover.MediaAssetDescriptor, watermark videocover.LayerState) {
+	if state == nil {
+		return
+	}
+	knownActive := active
+	variantID := ""
+	state.CoverAsset = nil
+	if active && asset != nil {
+		copyAsset := *asset
+		state.CoverAsset = &copyAsset
+		variantID = asset.VariantID
+	}
+	state.Desired = videocover.DesiredState{Active: active, Revision: revision, Source: "none", VariantID: variantID}
+	if active {
+		state.Desired.Source = "upload"
+	}
+	state.Applied = videocover.AppliedState{State: "known", Active: &knownActive, Revision: revision, VariantID: variantID}
+	state.Cover = videocover.LayerState{Enabled: active, Revision: revision, VariantID: variantID}
+	state.Watermark = watermark
+	state.Readiness = videocover.ReadinessReady
+	state.Error = nil
+	state.LastGoodApplied = nil
+	state.AppliedWitness = &videocover.AppliedWitness{
+		GraphApplied: true, Generation: state.Generation, Revision: revision, Active: active,
+		Cover: state.Cover, Watermark: watermark, Pipeline: videocover.FixedPipelineInvariant(),
+	}
+}
+
+func desiredFromRequest(request videocover.ApplyRequest) videocover.DesiredState {
+	desired := videocover.DesiredState{Active: request.Active, Revision: request.Revision, Source: "none"}
+	if request.Active && request.CoverAsset != nil {
+		desired.Source = "upload"
+		desired.VariantID = request.CoverAsset.VariantID
+	}
+	return desired
+}
+
+func rejectedCoverResponse(tracked *trackedProcess, request videocover.ApplyRequest, code videocover.ErrorCode) videocover.ApplyResponse {
+	return rejectedCoverResponseFromState(tracked.coverStateSnapshot(), request, code)
+}
+
+func rejectedCoverResponseFromState(state videocover.RuntimeState, request videocover.ApplyRequest, code videocover.ErrorCode) videocover.ApplyResponse {
+	safeError := &videocover.SafeError{Code: code}
+	if isCoverGraphOrAssetError(code) {
+		// Rejection does not mutate the authoritative graph state. The response
+		// still reports this operation as not-ready with the exact safe error,
+		// as required by the cross-repository response contract.
+		state.Readiness = videocover.ReadinessNotReady
+		state.Error = safeError
+	}
+	return videocover.ApplyResponse{
+		StreamID: state.StreamID, JobGeneration: state.JobGeneration, RequestedRevision: request.Revision,
+		ActualGeneration: state.Generation, Rejected: true, Outcome: videocover.OutcomeRejected,
+		Actual: state, Error: safeError,
+	}
+}
+
+// VideoCoverRejection returns a contract response only when the manager still
+// has an authoritative negotiated runtime snapshot. It deliberately refuses to
+// derive job/generation state from the rejected request.
+func (m *Manager) VideoCoverRejection(streamID string, request videocover.ApplyRequest, code videocover.ErrorCode) (videocover.ApplyResponse, bool) {
+	m.mu.Lock()
+	tracked, ok := m.processes[streamID]
+	if !ok {
+		m.mu.Unlock()
+		return videocover.ApplyResponse{}, false
+	}
+	tracked.coverMu.Lock()
+	m.mu.Unlock()
+	defer tracked.coverMu.Unlock()
+	state, ok := tracked.videoCoverRejectionStateLocked()
+	if !ok {
+		return videocover.ApplyResponse{}, false
+	}
+	return rejectedCoverResponseFromState(state, request, code), true
+}
+
+func isCoverGraphOrAssetError(code videocover.ErrorCode) bool {
+	switch code {
+	case videocover.ErrorMediaAssetUnauthorized,
+		videocover.ErrorMediaAssetNotFound,
+		videocover.ErrorMediaAssetHashMismatch,
+		videocover.ErrorMediaAssetDimensionMismatch,
+		videocover.ErrorMediaAssetTimeout,
+		videocover.ErrorMediaAssetFormatUnsupported,
+		videocover.ErrorMediaAssetTooLarge,
+		videocover.ErrorMediaAssetDecodeFailed,
+		videocover.ErrorMediaAssetAspectRatioInvalid,
+		videocover.ErrorMediaAssetVariantProcessing,
+		videocover.ErrorMediaAssetVariantFailed,
+		videocover.ErrorCoverGraphUnavailable,
+		videocover.ErrorCapabilityRequired:
+		return true
+	default:
+		return false
+	}
+}
+
+func coverRequestFingerprint(request videocover.ApplyRequest) [32]byte {
+	body, _ := json.Marshal(request)
+	return sha256.Sum256(body)
+}
+
+func (tracked *trackedProcess) storeCoverReplay(key string, replay coverReplay) {
+	if tracked.coverReplay == nil {
+		tracked.coverReplay = map[string]coverReplay{}
+	}
+	if _, exists := tracked.coverReplay[key]; !exists {
+		tracked.coverReplayOrder = append(tracked.coverReplayOrder, key)
+	}
+	tracked.coverReplay[key] = replay
+	for len(tracked.coverReplayOrder) > maxCoverReplayEntries {
+		oldest := tracked.coverReplayOrder[0]
+		tracked.coverReplayOrder = tracked.coverReplayOrder[1:]
+		delete(tracked.coverReplay, oldest)
+	}
+}
+
+func initialWatermarkState(profileID string, config map[string]any) videocover.LayerState {
+	state := videocover.LayerState{Enabled: watermarkEnabled(config), Revision: 1}
+	if state.Enabled {
+		state.VariantID = strings.TrimSpace(profileID)
+	}
+	return state
+}
+
+func watermarkEnabled(config map[string]any) bool {
+	enabled, ok := config["watermark_enabled"].(bool)
+	return ok && enabled
+}
+
+func (tracked *trackedProcess) currentWatermarkState() videocover.LayerState {
+	tracked.watermarkMu.Lock()
+	defer tracked.watermarkMu.Unlock()
+	return tracked.watermarkState
+}
+
+// markWatermarkWitnessUnknownLocked requires coverMu. The previous known Cover
+// remains as last-good state, but the combined graph witness is no longer safe
+// after a Watermark delivery whose downstream effect could not be observed.
+func (tracked *trackedProcess) markWatermarkWitnessUnknownLocked() {
+	if tracked.coverState.JobGeneration == 0 {
+		return
+	}
+	if tracked.coverState.Applied.State == "known" {
+		lastGood := tracked.coverState.Applied
+		tracked.coverState.LastGoodApplied = &lastGood
+	}
+	tracked.coverState.Readiness = videocover.ReadinessUnknown
+	tracked.coverState.Applied = videocover.AppliedState{State: "unknown"}
+	tracked.coverState.AppliedWitness = nil
+	tracked.coverState.Error = &videocover.SafeError{Code: videocover.ErrorCoverGraphUnavailable}
+	tracked.coverState.Watermark = tracked.currentWatermarkState()
+}
+
+// coverStateSnapshot binds the independently current Watermark observation to
+// both runtime state and its graph witness without changing any Cover-owned
+// revision or desired/applied field. Exact idempotency replays deliberately use
+// their stored historical response instead.
+func (tracked *trackedProcess) coverStateSnapshot() videocover.RuntimeState {
+	state := tracked.coverState
+	watermark := tracked.currentWatermarkState()
+	state.Watermark = watermark
+	if state.AppliedWitness != nil {
+		witness := *state.AppliedWitness
+		witness.Watermark = watermark
+		state.AppliedWitness = &witness
+	}
+	return state
+}
+
+func (tracked *trackedProcess) videoCoverRejectionStateLocked() (videocover.RuntimeState, bool) {
+	state := tracked.coverStateSnapshot()
+	if state.StreamID != "" && state.JobGeneration > 0 && state.Generation > 0 {
+		return state, true
+	}
+	if tracked.terminalCoverState == nil {
+		return videocover.RuntimeState{}, false
+	}
+	state = *tracked.terminalCoverState
+	return state, state.StreamID != "" && state.JobGeneration > 0 && state.Generation > 0
+}
+
+func terminalVideoCoverState(state videocover.RuntimeState) videocover.RuntimeState {
+	if state.Applied.State == "known" {
+		lastGood := state.Applied
+		state.LastGoodApplied = &lastGood
+	}
+	state.Readiness = videocover.ReadinessNotReady
+	state.Applied = videocover.AppliedState{State: "unknown"}
+	state.AppliedWitness = nil
+	state.Error = &videocover.SafeError{Code: videocover.ErrorCoverGraphUnavailable}
+	return state
+}
+
+func (m *Manager) coverApplyTimeout() time.Duration {
+	if m.CoverApplyTimeout > 0 {
+		return m.CoverApplyTimeout
+	}
+	return 6 * time.Second
+}
+
+func (m *Manager) coverFetchTimeout() time.Duration {
+	if m.CoverFetchTimeout > 0 {
+		return m.CoverFetchTimeout
+	}
+	return 10 * time.Second
+}
+
+func (m *Manager) coverGraphWitness() CoverGraphWitness {
+	if m.CoverWitness != nil {
+		return m.CoverWitness
+	}
+	return progressCoverWitness{}
+}
+
+func (m *Manager) watermarkGraphWitness() WatermarkGraphWitness {
+	if m.WatermarkWitness != nil {
+		return m.WatermarkWitness
+	}
+	return progressWatermarkWitness{}
+}
+
+type progressCoverWitness struct{}
+
+func (progressCoverWitness) Apply(ctx context.Context, source *imagefeed.Source, frame []byte, initial bool, progressPath string) error {
+	var err error
+	if initial {
+		err = source.WaitInitialDelivery(ctx)
+	} else {
+		err = source.UpdateAndWait(ctx, frame)
+	}
+	if err != nil {
+		return err
+	}
+	return waitForVisualOutputAdvance(ctx, progressPath)
+}
+
+type progressWatermarkWitness struct{}
+
+func (progressWatermarkWitness) Apply(ctx context.Context, source *watermarkfeed.Source, frame []byte, progressPath string) error {
+	if err := source.UpdateAndWait(ctx, frame); err != nil {
+		return err
+	}
+	return waitForVisualOutputAdvance(ctx, progressPath)
+}
+
+func waitForVisualOutputAdvance(ctx context.Context, progressPath string) error {
+	// Establish the output baseline only after the exact feed version was
+	// delivered. Progress that happened while the socket write was pending is
+	// not evidence that this visual-layer revision crossed the graph.
+	before := readCoverProgress(progressPath)
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		current := readCoverProgress(progressPath)
+		if current.Frame > before.Frame && current.OutTimeUS > before.OutTimeUS {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func readCoverProgress(path string) ffmpeg.Progress {
+	body, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return ffmpeg.Progress{}
+	}
+	return ffmpeg.ParseProgress(string(body))
 }
 
 // OutputRelayPolicy returns the non-secret routing configuration.  An unset
@@ -897,7 +1550,14 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 	scrubTrackedProcessJob(tracked)
 	watermarkSource := tracked.watermark
 	tracked.watermark = nil
+	tracked.coverMu.Lock()
+	coverSource := tracked.cover
+	tracked.cover = nil
+	tracked.coverMu.Unlock()
 	m.mu.Unlock()
+	if coverSource != nil {
+		_ = coverSource.Close()
+	}
 	if watermarkSource != nil {
 		_ = watermarkSource.Close()
 	}
@@ -938,6 +1598,7 @@ func redactedProcessStderr(stderr string, job lifecycle.StreamJob) string {
 		job.StreamKey,
 		job.InputURL,
 		job.AudioInputURL,
+		job.CoverInputURL,
 		job.WatermarkInputURL,
 		job.RTMPURL,
 		job.RTMPURL+"/"+job.StreamKey,
@@ -949,6 +1610,7 @@ func redactedProcessExit(err error, stderr string, job lifecycle.StreamJob) (str
 		job.StreamKey,
 		job.InputURL,
 		job.AudioInputURL,
+		job.CoverInputURL,
 		job.WatermarkInputURL,
 		job.RTMPURL,
 		job.RTMPURL+"/"+job.StreamKey,
@@ -1262,9 +1924,18 @@ func scrubTrackedProcessJob(tracked *trackedProcess) {
 	if tracked == nil {
 		return
 	}
+	tracked.coverMu.Lock()
+	defer tracked.coverMu.Unlock()
+	if state, ok := tracked.videoCoverRejectionStateLocked(); ok {
+		state = terminalVideoCoverState(state)
+		tracked.terminalCoverState = &state
+	}
 	job := tracked.job
 	job.InputURL = ""
 	job.AudioInputURL = ""
+	job.CoverInputURL = ""
+	job.WatermarkInputURL = ""
+	job.VideoCoverStart = nil
 	job.RTMPURL = ""
 	job.StreamKey = ""
 	job.ArchiveConfig.FolderID = ""
@@ -1272,6 +1943,10 @@ func scrubTrackedProcessJob(tracked *trackedProcess) {
 	job.ArchiveConfig.ClientSecret = ""
 	job.ArchiveConfig.RefreshToken = ""
 	tracked.job = job
+	tracked.transparentCover = nil
+	tracked.coverReplay = nil
+	tracked.coverReplayOrder = nil
+	tracked.coverState = videocover.RuntimeState{}
 }
 
 func (m *Manager) packageTimeout() time.Duration {
