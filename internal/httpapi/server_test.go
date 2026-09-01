@@ -279,6 +279,9 @@ func TestUpdaterVersionEndpointIsUnauthenticated(t *testing.T) {
 	if got := res.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("Content-Type = %q", got)
 	}
+	if got := res.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
 	var body map[string]any
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -289,6 +292,19 @@ func TestUpdaterVersionEndpointIsUnauthenticated(t *testing.T) {
 		body["service_type"] != control.ServiceType ||
 		body["config_revision"] != float64(7) {
 		t.Fatalf("body = %#v, want updater identity for configured service", body)
+	}
+
+	methodReq := httptest.NewRequest(http.MethodPost, "/updater/version", nil)
+	methodRes := httptest.NewRecorder()
+	handler.ServeHTTP(methodRes, methodReq)
+	if methodRes.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("updater version POST status = %d body = %s", methodRes.Code, methodRes.Body.String())
+	}
+	if got := methodRes.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("updater version POST cache control = %q", got)
+	}
+	if got := methodRes.Header().Get("Allow"); !strings.Contains(got, http.MethodGet) {
+		t.Fatalf("updater version POST Allow = %q", got)
 	}
 }
 
@@ -340,6 +356,9 @@ func TestUpdaterVersionFailsClosedWhenIdentityDriftsAfterConstruction(t *testing
 
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d body = %s, want 503", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("drift cache control = %q", got)
 	}
 	if strings.Contains(res.Body.String(), "service_id") {
 		t.Fatalf("drift response leaked service identity: %s", res.Body.String())
