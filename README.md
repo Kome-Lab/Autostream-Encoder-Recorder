@@ -102,6 +102,7 @@ output Relay capabilityも広告しません。
 the non-secret `AUTOSTREAM_OUTPUT_RELAY_BINDING_ID`, which must exactly match
 the Control Panel YouTube Output profile's `relay_binding_id`. The profile must
 be `live_api_relay_static`, ready, and binding-fenced before start or dry-run.
+If either condition cannot be proven, the managed Relay is unavailable/fail-closed.
 The binding format is exactly `relay-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
 with lowercase hexadecimal UUID characters. The binding ID is an identity fence
 only; never put the Relay RTMPS URL,

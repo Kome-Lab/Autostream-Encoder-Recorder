@@ -1,5 +1,7 @@
-github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260903195800-89c280936013 h1:OWGtXNvMPO0Sv0+nMCd8/Nk4hSZC8sIlUc9jJ/KKkz0=
-github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260903195800-89c280936013/go.mod h1:sJPMVofBZcO4uZd1T/y/VkN6/pwN0PJNAQGzlXI+GN4=
+github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260903202917-82716abd84f2 h1:1CJ6iVtbhX7ea6mf/rwZ1nDL/MhTzL+Eu8SZx55R9xo=
+github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260903202917-82716abd84f2/go.mod h1:sJPMVofBZcO4uZd1T/y/VkN6/pwN0PJNAQGzlXI+GN4=
+github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 h1:1EYB5IzjZawrrnELUi78f9fPu57HuXjmddZPjrls/28=
+github.com/santhosh-tekuri/jsonschema/v6 v6.0.3/go.mod h1:JXeL+ps8p7/KNMjDQk3TCwPpBy0wYklyWTfbkIzdIFU=
 cloud.google.com/go/auth v0.23.0 h1:6Gg1CMgpgubRG7DGz5Vf1pcoNo8RfiRiRAPS4crTp54=
 cloud.google.com/go/auth v0.23.0/go.mod h1:4DhBRcqvtljQN3dJ57qtqbib5ZGCYE5f2crfiiC2EM0=
 cloud.google.com/go/auth/oauth2adapt v0.2.8 h1:keo8NaayQZ6wimpNSmW5OPc283g65QNIiLpZnkHRbnc=
