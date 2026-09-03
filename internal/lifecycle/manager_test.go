@@ -20,11 +20,11 @@ func TestDryRunCreatesArchiveLayoutMetadataAndCommands(t *testing.T) {
 	root := t.TempDir()
 	runner := &ffmpeg.DryRunRunner{}
 	manager := Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Runner: runner, Uploader: archive.DryRunUploader{}}
-	result, err := manager.DryRun(context.Background(), StreamJob{
+	result, err := manager.DryRunToOutputTarget(context.Background(), StreamJob{
 		StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000?mode=caller&passphrase=input-secret",
 		RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "<YOUTUBE_STREAM_KEY>",
 		StartedAt: time.Date(2026, 5, 29, 1, 2, 3, 0, time.UTC), DryRun: true,
-	})
+	}, "rtmps://youtube.example.com/live2/<YOUTUBE_STREAM_KEY>")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestDryRunCreatesArchiveLayoutMetadataAndCommands(t *testing.T) {
 
 func TestDryRunRejectsUnsafeStreamID(t *testing.T) {
 	manager := Manager{ArchiveRoot: t.TempDir(), Runner: &ffmpeg.DryRunRunner{}}
-	if _, err := manager.DryRun(context.Background(), StreamJob{StreamID: "../secret", Name: "bad"}); err == nil {
+	if _, err := manager.DryRunToOutputTarget(context.Background(), StreamJob{StreamID: "../secret", Name: "bad"}, "rtmps://youtube.example.com/live2/key"); err == nil {
 		t.Fatal("expected unsafe stream id to fail")
 	}
 }
@@ -77,13 +77,13 @@ func TestDryRunRejectsArchiveParentSymlinkWithoutCreatingOutside(t *testing.T) {
 		t.Skipf("directory symlink creation is not available in this environment: %v", err)
 	}
 	manager := Manager{ArchiveRoot: root, Runner: &ffmpeg.DryRunRunner{}}
-	_, err := manager.DryRun(context.Background(), StreamJob{
+	_, err := manager.DryRunToOutputTarget(context.Background(), StreamJob{
 		StreamID: "stream-01",
 		Name:     "Morning Stream",
 		InputURL: "srt://input.example.com:9000?mode=caller",
 		RTMPURL:  "rtmps://youtube.example.com/live2",
 		DryRun:   true,
-	})
+	}, "rtmps://youtube.example.com/live2/key")
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("expected symlinked archive parent rejection, got %v", err)
 	}
@@ -116,7 +116,7 @@ func TestWriteFileNoSymlinkRejectsExistingSymlink(t *testing.T) {
 
 func TestPackageRunsRemuxAndUpload(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestPackageRunsRemuxAndUpload(t *testing.T) {
 	checkingUploader := &metadataCheckingUploader{t: t}
 	uploader := archive.RetryUploader{Inner: checkingUploader, Policy: archive.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }}}
 	manager := Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Runner: runner, Uploader: uploader}
-	result, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", StartedAt: time.Date(2026, 5, 29, 1, 2, 3, 0, time.UTC), DryRun: true})
+	result, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 5, 29, 1, 2, 3, 0, time.UTC), DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestPackageRequiresStartedAtForArchiveRun(t *testing.T) {
 		ArchiveRunID: "20260818_140629_000000001_JST",
 		Name:         "History",
 	})
-	if err == nil || !strings.Contains(err.Error(), "started_at is required") {
+	if err == nil || !strings.Contains(err.Error(), "archive_run_id and started_at are required") {
 		t.Fatalf("expected archive run started_at validation error, got %v", err)
 	}
 }
@@ -266,7 +266,7 @@ func TestPackageUsesRealFFmpegRemuxWhenAvailable(t *testing.T) {
 		t.Skipf("ffprobe is not available: %v", err)
 	}
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-real-remux")
+	layout, err := archive.NewRunLayout(root, "stream-real-remux", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestPackageUsesRealFFmpegRemuxWhenAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := Manager{ArchiveRoot: root, FFmpegBin: ffmpegBin, Uploader: archive.DryRunUploader{}}
-	result, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-real-remux", Name: "Real Remux", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true})
+	result, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-real-remux", ArchiveRunID: "run-01", Name: "Real Remux", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestPackageFallsBackToPreviewWhenFinalMKVRemuxFails(t *testing.T) {
 		t.Skipf("ffmpeg is not available: %v", err)
 	}
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-preview-fallback")
+	layout, err := archive.NewRunLayout(root, "stream-preview-fallback", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,10 +357,11 @@ func TestPackageFallsBackToPreviewWhenFinalMKVRemuxFails(t *testing.T) {
 	}
 	manager := Manager{ArchiveRoot: root, FFmpegBin: ffmpegBin, Uploader: archive.DryRunUploader{}}
 	result, err := manager.Package(context.Background(), PackageJob{
-		StreamID:  "stream-preview-fallback",
-		Name:      "Preview Fallback",
-		StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC),
-		DryRun:    true,
+		StreamID:     "stream-preview-fallback",
+		ArchiveRunID: "run-01",
+		Name:         "Preview Fallback",
+		StartedAt:    time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC),
+		DryRun:       true,
 	})
 	if err != nil {
 		t.Fatalf("expected HLS fallback package to succeed: %v", err)
@@ -385,7 +386,7 @@ func TestPackageFallsBackToPreviewWhenFinalMKVRemuxFails(t *testing.T) {
 
 func TestPackageUsesArchiveConfigUploaderFactory(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,12 +417,13 @@ func TestPackageUsesArchiveConfigUploaderFactory(t *testing.T) {
 		},
 	}
 	_, err = manager.Package(context.Background(), PackageJob{
-		StreamID: "stream-01",
-		Name:     "Morning Stream",
+		StreamID:     "stream-01",
+		ArchiveRunID: "run-01",
+		Name:         "Morning Stream",
+		StartedAt:    time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC),
 		ArchiveConfig: ArchiveConfig{
 			AuthMode:    "service_account",
 			FolderID:    "drive-folder-id",
-			BasePath:    "AutoStream",
 			SharedDrive: true,
 		},
 	})
@@ -435,7 +437,7 @@ func TestPackageUsesArchiveConfigUploaderFactory(t *testing.T) {
 
 func TestPackageUsesArchiveConfigFileNameForDriveUpload(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,8 +466,10 @@ func TestPackageUsesArchiveConfigFileNameForDriveUpload(t *testing.T) {
 		},
 	}
 	if _, err := manager.Package(context.Background(), PackageJob{
-		StreamID: "stream-01",
-		Name:     "Morning Stream",
+		StreamID:     "stream-01",
+		ArchiveRunID: "run-01",
+		Name:         "Morning Stream",
+		StartedAt:    time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC),
 		ArchiveConfig: ArchiveConfig{
 			ArchiveFileName: "Council Meeting",
 		},
@@ -477,7 +481,7 @@ func TestPackageUsesArchiveConfigFileNameForDriveUpload(t *testing.T) {
 	}
 }
 
-func TestCleanupExpiredLocalArchivesKeepsCurrentAndRecent(t *testing.T) {
+func TestCleanupExpiredLocalArchivesPreservesMigratedRunlessData(t *testing.T) {
 	root := t.TempDir()
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	oldDir := writeFinalArchiveForTest(t, root, "stream-old", now.Add(-45*24*time.Hour))
@@ -487,8 +491,8 @@ func TestCleanupExpiredLocalArchivesKeepsCurrentAndRecent(t *testing.T) {
 	if err := cleanupExpiredLocalArchives(root, "stream-current", "", 30, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
-		t.Fatalf("expected expired archive to be removed, err=%v", err)
+	if _, err := os.Stat(oldDir); err != nil {
+		t.Fatalf("expected migrated runless archive to remain: %v", err)
 	}
 	if _, err := os.Stat(recentDir); err != nil {
 		t.Fatalf("expected recent archive to remain: %v", err)
@@ -536,8 +540,18 @@ func TestCleanupExpiredLocalArchivesRemovesOldRunWithinCurrentStream(t *testing.
 
 func TestPackageAppliesLocalArchiveRetention(t *testing.T) {
 	root := t.TempDir()
-	oldDir := writeFinalArchiveForTest(t, root, "stream-old", time.Now().Add(-72*time.Hour))
-	layout, err := archive.NewLayout(root, "stream-01")
+	oldLayout, err := archive.NewRunLayout(root, "stream-old", "run-old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(oldLayout.FinalDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-72 * time.Hour)
+	if err := os.Chtimes(oldLayout.FinalDir(), oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,10 +568,10 @@ func TestPackageAppliesLocalArchiveRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.DryRunUploader{}}
-	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", ArchiveConfig: ArchiveConfig{RetentionDays: 1}}); err != nil {
+	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), ArchiveConfig: ArchiveConfig{RetentionDays: 1}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+	if _, err := os.Stat(oldLayout.FinalDir()); !os.IsNotExist(err) {
 		t.Fatalf("expected package retention cleanup to remove expired archive, err=%v", err)
 	}
 	if _, err := os.Stat(layout.FinalDir()); err != nil {
@@ -573,7 +587,6 @@ func TestArchiveConfigOAuth2BuildsGoogleDriveUploader(t *testing.T) {
 		ArchiveConfig: ArchiveConfig{
 			AuthMode:      "oauth2",
 			FolderID:      "drive-folder-id",
-			BasePath:      "AutoStream",
 			SharedDrive:   true,
 			SharedDriveID: "shared-drive-01",
 			ClientID:      "google-client-id",
@@ -602,7 +615,6 @@ func TestArchiveConfigServiceAccountJSONIsRejectedByGoogleDriveConfig(t *testing
 		ArchiveConfig: ArchiveConfig{
 			AuthMode:           "service_account",
 			FolderID:           "drive-folder-id",
-			BasePath:           "AutoStream",
 			SharedDrive:        true,
 			ServiceAccountJSON: `{"type":"service_account","client_email":"svc@example.com","private_key":"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"}`,
 		},
@@ -640,8 +652,8 @@ func TestArchiveConfigDoesNotFallBackToGoogleDriveEnvSecrets(t *testing.T) {
 	})
 	driveUploader := googleDriveUploaderFromRetry(t, uploader)
 	cfg := driveUploader.Config
-	if cfg.FolderID != "job-folder-id" || cfg.BasePath != "AutoStream" || !cfg.SharedDrive {
-		t.Fatalf("archive config was not isolated from env folder/base/shared-drive values: %#v", cfg)
+	if cfg.FolderID != "job-folder-id" || !cfg.SharedDrive {
+		t.Fatalf("archive config was not isolated from env folder/shared-drive values: %#v", cfg)
 	}
 	if cfg.ClientID != "job-client-id" || cfg.ClientSecret != "job-client-secret" || cfg.RefreshToken != "job-refresh-token" {
 		t.Fatalf("archive config was not isolated from env OAuth secrets: %#v", cfg)
@@ -689,7 +701,7 @@ func googleDriveUploaderFromRetry(t *testing.T, uploader archive.ArchiveUploader
 
 func TestArchiveMetadataIncludesSafeArchiveConfigOnly(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -715,8 +727,10 @@ func TestArchiveMetadataIncludesSafeArchiveConfigOnly(t *testing.T) {
 		},
 	}
 	_, err = manager.Package(context.Background(), PackageJob{
-		StreamID: "stream-01",
-		Name:     "Morning Stream",
+		StreamID:     "stream-01",
+		ArchiveRunID: "run-01",
+		Name:         "Morning Stream",
+		StartedAt:    time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC),
 		ArchiveConfig: ArchiveConfig{
 			DriveDestinationID:     "drive-destination-01",
 			ArchiveProfileID:       "archive-profile-01",
@@ -725,7 +739,6 @@ func TestArchiveMetadataIncludesSafeArchiveConfigOnly(t *testing.T) {
 			OAuthProviderID:        "oauth-provider-01",
 			FolderID:               "raw-drive-folder-id",
 			FolderIDSecretName:     "drive_destination:drive-destination-01:folder_id",
-			BasePath:               "AutoStream",
 			SharedDrive:            true,
 			SharedDriveID:          "raw-shared-drive-id",
 			ArchiveFileName:        "Council Meeting.mp4",
@@ -865,7 +878,7 @@ func (u *archiveConfigMetadataCheckingUploader) Upload(ctx context.Context, stre
 
 func TestPackageRequiresFinalMKV(t *testing.T) {
 	manager := Manager{ArchiveRoot: t.TempDir(), Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.DryRunUploader{}}
-	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream"}); err == nil {
+	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC)}); err == nil {
 		t.Fatal("expected missing final.mkv to fail")
 	} else if ErrorPhase(err) != "input" {
 		t.Fatalf("expected input failure phase, got %q: %v", ErrorPhase(err), err)
@@ -874,7 +887,7 @@ func TestPackageRequiresFinalMKV(t *testing.T) {
 
 func TestPackageClassifiesUploadFailure(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -891,7 +904,7 @@ func TestPackageClassifiesUploadFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := Manager{ArchiveRoot: root, Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.MockUploader{Err: errors.New("https://example.com/secret-token")}}
-	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", DryRun: true}); err == nil {
+	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true}); err == nil {
 		t.Fatal("expected upload failure")
 	} else if ErrorPhase(err) != "upload" {
 		t.Fatalf("expected upload failure phase, got %q: %v", ErrorPhase(err), err)
@@ -900,7 +913,7 @@ func TestPackageClassifiesUploadFailure(t *testing.T) {
 
 func TestPackageRejectsConcurrentSameStream(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -923,11 +936,11 @@ func TestPackageRejectsConcurrentSameStream(t *testing.T) {
 	manager := Manager{ArchiveRoot: root, Runner: &ffmpeg.DryRunRunner{}, Uploader: uploader}
 	done := make(chan error, 1)
 	go func() {
-		_, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", DryRun: true})
+		_, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true})
 		done <- err
 	}()
 	<-uploader.started
-	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", DryRun: true}); !errors.Is(err, ErrPackageInProgress) {
+	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true}); !errors.Is(err, ErrPackageInProgress) {
 		t.Fatalf("expected package-in-progress rejection, got %v", err)
 	}
 	close(uploader.release)
@@ -938,7 +951,7 @@ func TestPackageRejectsConcurrentSameStream(t *testing.T) {
 
 func TestPackageRejectsFinalMKVSymlink(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -959,7 +972,7 @@ func TestPackageRejectsFinalMKVSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := Manager{ArchiveRoot: root, Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.DryRunUploader{}}
-	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", DryRun: true}); err == nil {
+	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true}); err == nil {
 		t.Fatal("expected final.mkv symlink to be rejected")
 	} else if ErrorPhase(err) != "input" {
 		t.Fatalf("expected input failure phase, got %q: %v", ErrorPhase(err), err)
@@ -968,7 +981,7 @@ func TestPackageRejectsFinalMKVSymlink(t *testing.T) {
 
 func TestPackageRejectsExistingFinalMP4SymlinkBeforeRemux(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -989,7 +1002,7 @@ func TestPackageRejectsExistingFinalMP4SymlinkBeforeRemux(t *testing.T) {
 		t.Skipf("symlink creation is not available in this environment: %v", err)
 	}
 	manager := Manager{ArchiveRoot: root, Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.DryRunUploader{}}
-	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", DryRun: true}); err == nil {
+	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true}); err == nil {
 		t.Fatal("expected final.mp4 symlink to be rejected")
 	} else if ErrorPhase(err) != "remux" {
 		t.Fatalf("expected remux failure phase, got %q: %v", ErrorPhase(err), err)
@@ -1003,7 +1016,7 @@ func TestPackageRejectsExistingFinalMP4SymlinkBeforeRemux(t *testing.T) {
 
 func TestPackageRejectsFinalDirSymlink(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1024,7 +1037,7 @@ func TestPackageRejectsFinalDirSymlink(t *testing.T) {
 		t.Skipf("directory symlink creation is not available in this environment: %v", err)
 	}
 	manager := Manager{ArchiveRoot: root, Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.DryRunUploader{}}
-	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", DryRun: true}); err == nil {
+	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true}); err == nil {
 		t.Fatal("expected final directory symlink to be rejected")
 	} else if ErrorPhase(err) != "package" {
 		t.Fatalf("expected package failure phase, got %q: %v", ErrorPhase(err), err)
@@ -1036,7 +1049,7 @@ func TestPackageRejectsFinalDirSymlink(t *testing.T) {
 
 func TestPackageRejectsTmpDirSymlink(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1057,7 +1070,7 @@ func TestPackageRejectsTmpDirSymlink(t *testing.T) {
 		t.Skipf("directory symlink creation is not available in this environment: %v", err)
 	}
 	manager := Manager{ArchiveRoot: root, Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.DryRunUploader{}}
-	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", DryRun: true}); err == nil {
+	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true}); err == nil {
 		t.Fatal("expected tmp directory symlink to be rejected")
 	} else if ErrorPhase(err) != "input" {
 		t.Fatalf("expected input failure phase, got %q: %v", ErrorPhase(err), err)
@@ -1066,7 +1079,7 @@ func TestPackageRejectsTmpDirSymlink(t *testing.T) {
 
 func TestPackageRejectsTmpLogSymlink(t *testing.T) {
 	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
+	layout, err := archive.NewRunLayout(root, "stream-01", "run-01")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1090,7 +1103,7 @@ func TestPackageRejectsTmpLogSymlink(t *testing.T) {
 		t.Skipf("symlink creation is not available in this environment: %v", err)
 	}
 	manager := Manager{ArchiveRoot: root, Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.DryRunUploader{}}
-	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", Name: "Morning Stream", DryRun: true}); err == nil {
+	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true}); err == nil {
 		t.Fatal("expected tmp logs symlink to be rejected")
 	} else if ErrorPhase(err) != "package" {
 		t.Fatalf("expected package failure phase, got %q: %v", ErrorPhase(err), err)

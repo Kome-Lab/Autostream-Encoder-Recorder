@@ -70,7 +70,6 @@ const (
 
 var (
 	errRawArchiveSecretFieldsNotAllowed   = errors.New("raw_archive_secret_fields_not_allowed")
-	errRawYouTubeSecretFieldNotAllowed    = errors.New("raw_youtube_secret_field_not_allowed")
 	errRuntimeSecretResolverNotConfigured = errors.New("runtime_secret_resolver_not_configured")
 	errUnsupportedArchiveAuthMode         = errors.New("unsupported_archive_auth_mode")
 )
@@ -314,9 +313,6 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	mux.HandleFunc("GET /streams/{id}/preview/{name}", streamPreview(processArchiveRoot, verifier))
 	mux.HandleFunc("GET /streams/{id}/audio-status", discordAudioStatus(audioManager, verifier))
 	mux.HandleFunc("POST /streams/package", packageStream(verifier, resolver, runtimeConfig))
-	mux.HandleFunc("GET /streams/{id}/artifacts/{name}", downloadArchiveArtifact(eventManager.ArchiveRoot, verifier))
-	mux.HandleFunc("DELETE /streams/{id}/artifacts/{name}", deleteArchiveArtifact(eventManager.ArchiveRoot, verifier))
-	mux.HandleFunc("PUT /streams/{id}/artifacts/{name}", renameArchiveArtifact(eventManager.ArchiveRoot, verifier))
 	mux.HandleFunc("GET /streams/{id}/archive-runs/{run_id}/artifacts/{name}", downloadArchiveArtifact(eventManager.ArchiveRoot, verifier))
 	mux.HandleFunc("DELETE /streams/{id}/archive-runs/{run_id}/artifacts/{name}", deleteArchiveArtifact(eventManager.ArchiveRoot, verifier))
 	mux.HandleFunc("PUT /streams/{id}/archive-runs/{run_id}/artifacts/{name}", renameArchiveArtifact(eventManager.ArchiveRoot, verifier))
@@ -494,8 +490,8 @@ func buildPreflight(verifier TokenVerifier) preflightResponse {
 		ffmpegPreflight(envDefault("FFMPEG_BIN", "ffmpeg")),
 		archiveRootPreflight(envDefault("AUTOSTREAM_ARCHIVE_DIR", "/var/lib/autostream/archives")),
 		outputRelayPreflight(),
-		youtubeRuntimeConfigPreflight("youtube_rtmp_url", "YOUTUBE_RTMP_URL", "YouTube RTMPS URL"),
-		youtubeRuntimeConfigPreflight("youtube_stream_key", "YOUTUBE_STREAM_KEY", "YouTube stream key"),
+		youtubeRuntimeConfigPreflight("youtube_rtmp_url", "YouTube RTMPS URL"),
+		youtubeRuntimeConfigPreflight("youtube_stream_key", "YouTube stream key"),
 		googleDrivePreflight(),
 		observabilityPreflight(),
 	}
@@ -593,7 +589,7 @@ func outputRelayPreflight() preflightCheck {
 		}
 		message := "AUTOSTREAM_OUTPUT_RELAY_MODE and AUTOSTREAM_OUTPUT_RELAY_URL form an invalid output Relay configuration."
 		if errors.Is(err, outputrelay.ErrStaticBindingRequired) {
-			message = "AUTOSTREAM_OUTPUT_RELAY_BINDING_ID is required when AUTOSTREAM_OUTPUT_RELAY_MODE=live_api_static."
+			message = "AUTOSTREAM_OUTPUT_RELAY_BINDING_ID is required when AUTOSTREAM_OUTPUT_RELAY_MODE=live_api_relay_static."
 		} else if errors.Is(err, outputrelay.ErrInvalidRelayBindingID) {
 			message = "AUTOSTREAM_OUTPUT_RELAY_BINDING_ID must match relay-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx using lowercase hexadecimal UUID characters."
 		} else if errors.Is(err, outputrelay.ErrUnsafeRelayTarget) {
@@ -602,16 +598,16 @@ func outputRelayPreflight() preflightCheck {
 		return preflightCheck{ID: "output_relay", Status: "invalid", Severity: "critical", Message: message}
 	}
 	if !policy.UsesLocalRelay() {
-		return preflightCheck{ID: "output_relay", Status: "compatibility_mode", Severity: "warning", Message: "Output relay is not configured; FFmpeg will use the direct RTMPS target in compatibility mode."}
+		return preflightCheck{ID: "output_relay", Status: "ok", Severity: "critical", Message: "Canonical direct output mode is configured; the target is supplied by Control Panel runtime config."}
 	}
 	target := relayOutputTargetForPreflight(policy.URL, "preflight-stream")
 	if err := ffmpeg.ValidateRelayOutputTarget(target); err != nil {
 		return preflightCheck{ID: "output_relay", Status: "invalid", Severity: "critical", Message: "AUTOSTREAM_OUTPUT_RELAY_URL must resolve to a loopback RTMP/RTMPS relay target."}
 	}
-	if policy.Mode == outputrelay.ModeLiveAPIStatic {
+	if policy.Mode == outputrelay.ModeManagedLiveAPI {
 		return preflightCheck{ID: "output_relay", Status: "ok", Severity: "critical", Message: "Static Live API output Relay is configured; FFmpeg receives only the local relay target."}
 	}
-	return preflightCheck{ID: "output_relay", Status: "ok", Severity: "critical", Message: "Legacy stream-key output Relay is configured; FFmpeg receives only the local relay target."}
+	return preflightCheck{ID: "output_relay", Status: "ok", Severity: "critical", Message: "Canonical output routing is configured."}
 }
 
 func relayOutputTargetForPreflight(template, streamID string) string {
@@ -622,11 +618,8 @@ func relayOutputTargetForPreflight(template, streamID string) string {
 	return strings.TrimRight(template, "/") + "/" + escapedStreamID
 }
 
-func youtubeRuntimeConfigPreflight(id, key, label string) preflightCheck {
-	if strings.TrimSpace(os.Getenv(key)) != "" {
-		return preflightCheck{ID: id, Status: "ok", Severity: "warning", Message: label + " env fallback is configured. Prefer Control Panel YouTube output runtime config."}
-	}
-	return preflightCheck{ID: id, Status: "runtime_config_required", Severity: "warning", Message: label + " should be supplied by Control Panel YouTube output runtime config; env fallback is optional."}
+func youtubeRuntimeConfigPreflight(id, label string) preflightCheck {
+	return preflightCheck{ID: id, Status: "runtime_config_required", Severity: "warning", Message: label + " must be supplied by Control Panel YouTube output runtime config."}
 }
 
 func googleDrivePreflight() preflightCheck {
@@ -669,7 +662,7 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 			return
 		}
 		var job lifecycle.StreamJob
-		if status, err := decodeLimitedJSON(w, r, maxControlBodyBytes, &job); err != nil {
+		if status, err := decodeLimitedStrictJSON(w, r, maxControlBodyBytes, &job); err != nil {
 			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
 			return
 		}
@@ -693,8 +686,8 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
 			return
 		}
-		if rawYouTubeStreamKeyInputDisallowed(job) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_youtube_stream_key_not_allowed"})
+		if strings.TrimSpace(job.YouTubeOutputMode) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"code": "youtube_runtime_config_required", "missing": []string{"output_mode"}})
 			return
 		}
 		relayPolicy := outputrelay.FromEnv()
@@ -715,10 +708,11 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 			if strings.TrimSpace(job.StreamKey) == "" && strings.TrimSpace(job.StreamKeySecretName) != "" {
 				job.StreamKey = "<RUNTIME_STREAM_KEY>"
 			}
-			if missing := applyYouTubeRuntimeConfigFallback(&job); len(missing) > 0 {
+			if missing := missingYouTubeRuntimeFields(job); len(missing) > 0 {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"code": "youtube_runtime_config_required", "missing": missing})
 				return
 			}
+			outputTarget = strings.TrimRight(job.RTMPURL, "/") + "/" + strings.TrimLeft(job.StreamKey, "/")
 		}
 		archiveRoot := os.Getenv("AUTOSTREAM_ARCHIVE_DIR")
 		if archiveRoot == "" {
@@ -764,7 +758,7 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			return
 		}
 		var startRequest startStreamRequest
-		if status, err := decodeLimitedJSON(w, r, maxControlBodyBytes, &startRequest); err != nil {
+		if status, err := decodeLimitedStrictJSON(w, r, maxControlBodyBytes, &startRequest); err != nil {
 			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
 			return
 		}
@@ -793,8 +787,12 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
 			return
 		}
-		if rawYouTubeStreamKeyInputDisallowed(job) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_youtube_stream_key_not_allowed"})
+		if err := resolveArchiveRuntimeSecrets(r.Context(), &job, resolver); err != nil {
+			writeRuntimeSecretResolveError(w, err)
+			return
+		}
+		if strings.TrimSpace(job.YouTubeOutputMode) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"code": "youtube_runtime_config_required", "missing": []string{"output_mode"}})
 			return
 		}
 		usesLocalRelay, err := processManager.AuthorizeOutputRelay(job)
@@ -809,14 +807,10 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 				writeRuntimeSecretResolveError(w, err)
 				return
 			}
-			if missing := applyYouTubeRuntimeConfigFallback(&job); len(missing) > 0 {
+			if missing := missingYouTubeRuntimeFields(job); len(missing) > 0 {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"code": "youtube_runtime_config_required", "missing": missing})
 				return
 			}
-		}
-		if err := resolveArchiveRuntimeSecrets(r.Context(), &job, resolver); err != nil {
-			writeRuntimeSecretResolveError(w, err)
-			return
 		}
 		audioBridgeMode := false
 		videoBridgeMode := false
@@ -1052,7 +1046,6 @@ func mergeRuntimeArchiveConfig(dst *lifecycle.ArchiveConfig, src control.Runtime
 	setStringIfEmpty(&dst.OAuthAccountID, src.OAuthAccountID())
 	setStringIfEmpty(&dst.OAuthProviderID, src.OAuthProviderID())
 	setStringIfEmpty(&dst.FolderIDSecretName, src.FolderIDSecretName())
-	setStringIfEmpty(&dst.BasePath, src.BasePath())
 	if value, ok := src.SharedDrive(); ok && value {
 		dst.SharedDrive = true
 	}
@@ -1073,26 +1066,6 @@ func setStringIfEmpty(dst *string, value string) {
 	*dst = strings.TrimSpace(value)
 }
 
-func applyYouTubeRuntimeConfigFallback(job *lifecycle.StreamJob) []string {
-	if job == nil {
-		return nil
-	}
-	missing := missingYouTubeRuntimeFields(*job)
-	if len(missing) == 0 {
-		return nil
-	}
-	if requireControlPanelRuntimeConfig() {
-		return missing
-	}
-	if job.StreamKey == "" {
-		job.StreamKey = os.Getenv("YOUTUBE_STREAM_KEY")
-	}
-	if job.RTMPURL == "" {
-		job.RTMPURL = os.Getenv("YOUTUBE_RTMP_URL")
-	}
-	return missingYouTubeRuntimeFields(*job)
-}
-
 func missingYouTubeRuntimeFields(job lifecycle.StreamJob) []string {
 	var missing []string
 	if strings.TrimSpace(job.RTMPURL) == "" {
@@ -1101,20 +1074,10 @@ func missingYouTubeRuntimeFields(job lifecycle.StreamJob) []string {
 	if strings.TrimSpace(job.StreamKey) == "" {
 		missing = append(missing, "stream_key")
 	}
-	return missing
-}
-
-func requireControlPanelRuntimeConfig() bool {
-	if envBool("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", false) {
-		return true
+	if strings.TrimSpace(job.YouTubeOutputMode) == "" {
+		missing = append([]string{"output_mode"}, missing...)
 	}
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("AUTOSTREAM_ENV")), "production")
-}
-
-func rawYouTubeStreamKeyInputDisallowed(job lifecycle.StreamJob) bool {
-	return requireControlPanelRuntimeConfig() &&
-		strings.TrimSpace(job.StreamKey) != "" &&
-		strings.TrimSpace(job.StreamKeySecretName) == ""
+	return missing
 }
 
 func resolveYouTubeRuntimeSecrets(ctx context.Context, job *lifecycle.StreamJob, resolver RuntimeSecretResolver) error {
@@ -1123,9 +1086,6 @@ func resolveYouTubeRuntimeSecrets(ctx context.Context, job *lifecycle.StreamJob,
 	}
 	if resolver == nil {
 		return errRuntimeSecretResolverNotConfigured
-	}
-	if strings.TrimSpace(job.StreamKey) != "" {
-		return errRawYouTubeSecretFieldNotAllowed
 	}
 	value, err := resolver(ctx, job.StreamID, "", job.StreamKeySecretName)
 	if err != nil {
@@ -1337,7 +1297,7 @@ func packageStream(verifier TokenVerifier, resolver RuntimeSecretResolver, runti
 			return
 		}
 		var job lifecycle.PackageJob
-		if status, err := decodeLimitedJSON(w, r, maxControlBodyBytes, &job); err != nil {
+		if status, err := decodeLimitedStrictJSON(w, r, maxControlBodyBytes, &job); err != nil {
 			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
 			return
 		}
@@ -1488,13 +1448,7 @@ func safeArchiveArtifactPath(archiveRoot, streamID, archiveRunID, name string) (
 }
 
 func safeArchiveArtifactPathForName(archiveRoot, streamID, archiveRunID, name string, requireExisting bool) (string, os.FileInfo, error) {
-	var layout archive.Layout
-	var err error
-	if strings.TrimSpace(archiveRunID) == "" {
-		layout, err = archive.NewLayout(archiveRoot, streamID)
-	} else {
-		layout, err = archive.NewRunLayout(archiveRoot, streamID, archiveRunID)
-	}
+	layout, err := archive.NewRunLayout(archiveRoot, streamID, archiveRunID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1612,10 +1566,6 @@ func writeRuntimeSecretResolveError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, errRawArchiveSecretFieldsNotAllowed) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_archive_secret_fields_not_allowed"})
-		return
-	}
-	if errors.Is(err, errRawYouTubeSecretFieldNotAllowed) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "raw_youtube_secret_field_not_allowed"})
 		return
 	}
 	if errors.Is(err, errRuntimeSecretResolverNotConfigured) {
@@ -1879,11 +1829,8 @@ func reportControlPanelArtifacts(ctx context.Context, job lifecycle.PackageJob, 
 		return
 	}
 	client := control.Client{Config: config}
-	archiveRuns := []control.ArchiveRun(nil)
-	if strings.TrimSpace(job.ArchiveRunID) != "" {
-		archiveRuns = append(archiveRuns, control.ArchiveRun{ID: job.ArchiveRunID, StartedAt: job.StartedAt})
-	}
-	if err := client.ReportArtifacts(ctx, job.StreamID, artifacts, archiveRuns...); err != nil {
+	archiveRun := control.ArchiveRun{ID: job.ArchiveRunID, StartedAt: job.StartedAt}
+	if err := client.ReportArtifacts(ctx, job.StreamID, archiveRun, artifacts); err != nil {
 		log.Printf("control panel artifact report failed: %v", err)
 	}
 }

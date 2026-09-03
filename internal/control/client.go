@@ -52,6 +52,8 @@ func (e ControlPanelError) ControlPanelCode() string {
 }
 
 type Config struct {
+	BindAddress      string
+	ConfigRevision   int64
 	ControlPanelURL  string
 	Token            string
 	ServiceID        string
@@ -105,8 +107,8 @@ type Artifact struct {
 type ArtifactReport struct {
 	ServiceID        string     `json:"service_id"`
 	StreamID         string     `json:"stream_id"`
-	ArchiveRunID     string     `json:"archive_run_id,omitempty"`
-	ArchiveStartedAt *time.Time `json:"archive_started_at,omitempty"`
+	ArchiveRunID     string     `json:"archive_run_id"`
+	ArchiveStartedAt time.Time  `json:"archive_started_at"`
 	Artifacts        []Artifact `json:"artifacts"`
 }
 
@@ -335,10 +337,6 @@ func (cfg RuntimeArchiveStreamConfig) FolderIDSecretName() string {
 	return runtimeMapString(cfg.ArchiveConfig, "folder_id_secret_name")
 }
 
-func (cfg RuntimeArchiveStreamConfig) BasePath() string {
-	return runtimeMapString(cfg.ArchiveConfig, "base_path")
-}
-
 func (cfg RuntimeArchiveStreamConfig) SharedDrive() (bool, bool) {
 	return runtimeMapBool(cfg.ArchiveConfig, "shared_drive")
 }
@@ -446,13 +444,8 @@ func runtimeMapInt(values map[string]any, key string) int {
 
 func ConfigFromEnv() Config {
 	cfg := Config{
-		ControlPanelURL:  os.Getenv("CONTROL_PANEL_URL"),
-		Token:            os.Getenv("CONTROL_PANEL_TOKEN"),
-		ServiceID:        envDefault("SERVICE_ID", "encoder-recorder-01"),
-		ServiceName:      envDefault("SERVICE_NAME", "Encoder Recorder"),
-		ServicePublicURL: os.Getenv("SERVICE_PUBLIC_URL"),
-		Version:          envDefault("SERVICE_VERSION", version.Current()),
-		HeartbeatEvery:   envDuration("CONTROL_PANEL_HEARTBEAT_INTERVAL_SEC", 30*time.Second),
+		Version:        envDefault("SERVICE_VERSION", version.Current()),
+		HeartbeatEvery: envDuration("CONTROL_PANEL_HEARTBEAT_INTERVAL_SEC", 30*time.Second),
 	}
 	applyNodeConfigFromEnv(&cfg, ServiceType)
 	return cfg
@@ -463,21 +456,21 @@ func (c Config) Validate() error {
 		return errors.New(c.ConfigError)
 	}
 	if strings.TrimSpace(c.ControlPanelURL) == "" {
-		return errors.New("CONTROL_PANEL_URL is required")
+		return errors.New("node config panel URL is required")
 	}
 	if strings.TrimSpace(c.Token) == "" {
-		return errors.New("CONTROL_PANEL_TOKEN is required")
+		return errors.New("node runtime token is required")
 	}
 	if strings.TrimSpace(c.ServiceID) == "" {
-		return errors.New("SERVICE_ID is required")
+		return errors.New("node service id is required")
 	}
 	if strings.TrimSpace(c.ServiceName) == "" {
-		return errors.New("SERVICE_NAME is required")
+		return errors.New("node service name is required")
 	}
-	if err := validateHTTPURL(c.ControlPanelURL, "CONTROL_PANEL_URL"); err != nil {
+	if err := validateHTTPURL(c.ControlPanelURL, "node config panel URL"); err != nil {
 		return err
 	}
-	if err := validateHTTPURL(c.ServicePublicURL, "SERVICE_PUBLIC_URL", "encoder-recorder"); err != nil {
+	if err := validateHTTPURL(c.ServicePublicURL, "node config public URL", "encoder-recorder"); err != nil {
 		return err
 	}
 	return nil
@@ -546,7 +539,7 @@ func serviceCapabilities() map[string]any {
 		return capabilities
 	}
 	capabilities["output_relay_mode"] = outputRelayMode
-	if outputRelayMode == outputrelay.ModeLiveAPIStatic {
+	if outputRelayMode == outputrelay.ModeManagedLiveAPI {
 		// ValidateConfiguration guarantees that static capability records carry
 		// a non-secret binding fence. Legacy fixed stream-key Relay bindings are
 		// intentionally never advertised as a Live API static capability.
@@ -713,29 +706,20 @@ func (c Client) HeartbeatWithMetrics(ctx context.Context, status, currentStreamI
 	return c.post(ctx, "/services/heartbeat", body)
 }
 
-func (c Client) ReportArtifacts(ctx context.Context, streamID string, artifacts []Artifact, archiveRuns ...ArchiveRun) error {
+func (c Client) ReportArtifacts(ctx context.Context, streamID string, archiveRun ArchiveRun, artifacts []Artifact) error {
 	if strings.TrimSpace(streamID) == "" {
 		return errors.New("stream id is required")
 	}
 	if len(artifacts) == 0 {
 		return errors.New("artifacts are required")
 	}
-	if len(archiveRuns) > 1 {
-		return errors.New("at most one archive run is allowed")
+	archiveRun.ID = strings.TrimSpace(archiveRun.ID)
+	if archiveRun.ID == "" || archiveRun.StartedAt.IsZero() {
+		return errors.New("archive run id and start time are required")
 	}
 	reportCtx, cancel := context.WithTimeout(ctx, envDuration("CONTROL_PANEL_ARTIFACT_REPORT_TIMEOUT_SEC", 5*time.Second))
 	defer cancel()
-	body := ArtifactReport{ServiceID: c.Config.ServiceID, StreamID: streamID, Artifacts: artifacts}
-	if len(archiveRuns) == 1 {
-		run := archiveRuns[0]
-		run.ID = strings.TrimSpace(run.ID)
-		if run.ID == "" || run.StartedAt.IsZero() {
-			return errors.New("archive run id and start time are required together")
-		}
-		startedAt := run.StartedAt.UTC()
-		body.ArchiveRunID = run.ID
-		body.ArchiveStartedAt = &startedAt
-	}
+	body := ArtifactReport{ServiceID: c.Config.ServiceID, StreamID: streamID, ArchiveRunID: archiveRun.ID, ArchiveStartedAt: archiveRun.StartedAt.UTC(), Artifacts: artifacts}
 	var reportErr error
 	for attempt := 1; attempt <= artifactReportMaxAttempts; attempt++ {
 		if err := reportCtx.Err(); err != nil {

@@ -68,9 +68,9 @@ Do not create or edit their release directories or marker files manually.
 
 Google Drive archive destinations use the selected folder itself as the archive
 root. The resulting hierarchy is `selected folder / stream name /
-YYYYMMDD_HHMMSS_JST_<stream-id> / final.mp4`; legacy `base_path` values are
-ignored. Re-running upload for the same stream execution updates a file with the
-same name in that run folder instead of creating another copy.
+YYYYMMDD_HHMMSS_JST_<stream-id> / final.mp4`. Re-running upload for the same
+stream execution updates a file with the same name in that run folder instead
+of creating another copy.
 
 Review the non-secret host settings in `/etc/autostream/encoder-recorder.env`.
 
@@ -84,17 +84,16 @@ between the assigned Worker and Encoder; do not place a passphrase in either
 setting. The per-job AES-256 passphrase is
 returned only in the authenticated start response and is never written to an
 SRT URL, FFmpeg arguments, service logs, or archive metadata.
-`AUTOSTREAM_BIND_ADDR` accepts an arbitrary unprivileged port from `1024`
-through `65535`; the shipped systemd env uses the standard IPv4 loopback value
-`127.0.0.1:8081`. The binary retains the legacy `127.0.0.1:8080` fallback only
-when the variable is absent, so upgrading an older installation does not move
-its port. The systemd unit does not hard-code a port. An invalid address or an
-out-of-range port makes the service fail closed during startup. Keep
-`AUTOSTREAM_CONFIG_REVISION=1` for an
-existing installation until the Control Panel applies a newer service
-configuration. The value is reported by `/updater/version` and must be an
-integer greater than or equal to `1`; an invalid value stops the service before
-it starts listening. Keep this environment file root-owned and mode `0640`.
+The panel-managed node config must select
+`listener.credential: node-listener.json`. The systemd unit loads the
+root-owned `/opt/autostream/local-executor/ports/encoder-recorder.json` source
+as that credential. Its exact schema is `schema_version`, `service_type`,
+`bind_address`, and `config_revision`; use schema version `2`, service type `encoder_recorder`, a
+positive revision, and an unprivileged bind port from `1024` through `65535`.
+The documented host endpoint is `127.0.0.1:8081`. Public `api.host` /
+`api.port` values are independent and never fall back as the local listener.
+A missing or invalid credential stops the service before it listens. Keep the
+non-listener environment file root-owned and mode `0640`.
 Do not add `SERVICE_ID`,
 `CONTROL_PANEL_TOKEN`, `SERVICE_CONTROL_TOKEN`, Worker event tokens, or Discord
 audio tokens.
@@ -123,8 +122,8 @@ sudo systemctl status autostream-encoder-recorder
 autostream-encoder-recorder --version
 ```
 
-Check `/health` and `/updater/version` on the host and port configured in
-`AUTOSTREAM_BIND_ADDR`. This guide intentionally avoids the older
+Check `/health` and `/updater/version` on the host and port from the credential
+`bind_address`. This guide intentionally avoids the older
 variable-heavy probe forms `PROBE_HOST="${PROBE_HOST:-127.0.0.1}"` and
 `PROBE_HOST='[::1]'`; for IPv6, keep the address in brackets in the URL.
 

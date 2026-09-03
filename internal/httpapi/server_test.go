@@ -34,6 +34,54 @@ const (
 	testOtherStaticRelayBindingID = "relay-22222222-2222-2222-2222-222222222222"
 )
 
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "autostream-encoder-httpapi-")
+	if err != nil {
+		panic(err)
+	}
+	configPath := filepath.Join(dir, "config.yml")
+	credentialDir := filepath.Join(dir, "credentials")
+	if err := os.Mkdir(credentialDir, 0700); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(credentialDir, "node-listener.json"), []byte(`{"schema_version":2,"service_type":"encoder_recorder","bind_address":"127.0.0.1:18081","config_revision":1}`), 0600); err != nil {
+		panic(err)
+	}
+	body := `panel:
+  url: "https://panel.example.jp"
+node:
+  id: "encoder-recorder-01"
+  name: "Encoder Recorder 01"
+  type: "encoder_recorder"
+listener:
+  credential: "node-listener.json"
+api:
+  host: "encoder.example.jp"
+  port: 8443
+  ssl_enabled: true
+auth:
+  token_id: "token-id"
+  token: "service-token"
+stream_ingest:
+  signing_key: "node-config-signing-key"
+`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("AUTOSTREAM_NODE_CONFIG", configPath); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("CREDENTIALS_DIRECTORY", credentialDir); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", outputrelay.ModeDirect); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 func testInputResolver(ctx context.Context, host string) ([]net.IP, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -41,8 +89,52 @@ func testInputResolver(ctx context.Context, host string) ([]net.IP, error) {
 	return []net.IP{net.ParseIP("93.184.216.34")}, nil
 }
 
+func testYouTubeRuntimeProvider(streamIDs ...string) RuntimeConfigProvider {
+	return func(context.Context) (control.RuntimeConfig, error) {
+		items := make([]control.RuntimeYouTubeStreamConfig, 0, len(streamIDs))
+		for _, streamID := range streamIDs {
+			items = append(items, control.RuntimeYouTubeStreamConfig{
+				StreamID:       streamID,
+				AssignmentRole: "primary",
+				Ready:          true,
+				YouTubeConfig: map[string]any{
+					"mode":                   "stream_key",
+					"rtmp_url":               "rtmps://youtube.example.com/live2",
+					"stream_key_secret_name": "youtube_stream_key:" + streamID,
+				},
+			})
+		}
+		return control.RuntimeConfig{StreamYouTubeConfigs: items}, nil
+	}
+}
+
+func testYouTubeSecretResolver(context.Context, string, string, string) (string, error) {
+	return "test-runtime-stream-key", nil
+}
+
+func newV2TestServer(t *testing.T, processManager *streamproc.Manager, streamIDs ...string) http.Handler {
+	t.Helper()
+	root := t.TempDir()
+	if processManager != nil && strings.TrimSpace(processManager.ArchiveRoot) != "" {
+		root = processManager.ArchiveRoot
+	}
+	return newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, streamIDs...)
+}
+
+func newV2TestServerWithManagers(t *testing.T, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier, streamIDs ...string) http.Handler {
+	t.Helper()
+	return NewServerWithManagersAndRuntimeConfig(
+		"encoder_recorder",
+		processManager,
+		eventManager,
+		verifier,
+		testYouTubeSecretResolver,
+		testYouTubeRuntimeProvider(streamIDs...),
+	)
+}
+
 func TestVideoCoverPUTRejectsUnknownFieldsAndDisablesStorage(t *testing.T) {
-	handler := putVideoCoverState(&streamproc.Manager{}, TokenVerifier{PlainToken: "cover-control-token"})
+	handler := putVideoCoverState(&streamproc.Manager{OutputRelayMode: outputrelay.ModeDirect}, TokenVerifier{PlainToken: "cover-control-token"})
 	body := `{"stream_id":"stream-1","job_generation":1,"expected_generation":1,"revision":2,"active":false,"idempotency_key":"hide-2","hide_confirmed":true,"secret_url":"https://must-not-be-accepted.invalid"}`
 	request := httptest.NewRequest(http.MethodPut, "/streams/stream-1/video-cover-state", strings.NewReader(body))
 	request.SetPathValue("id", "stream-1")
@@ -91,7 +183,7 @@ func TestVideoCoverHTTPAmbiguousHideRequiresGETAndExactReplayDoesNotResend(t *te
 	manager := &streamproc.Manager{
 		ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver,
 		AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}",
-		OutputRelayMode: outputrelay.ModeLiveAPIStatic, OutputRelayBindingID: testStaticRelayBindingID,
+		OutputRelayMode: outputrelay.ModeManagedLiveAPI, OutputRelayBindingID: testStaticRelayBindingID,
 		Profile: profile, CoverAssets: videocover.NewLoader(nil, 1, 1<<20), CoverWitness: witness,
 	}
 	_, err := manager.Start(lifecycle.StreamJob{
@@ -142,7 +234,7 @@ func TestVideoCoverPUTStoppedNegotiatedRuntimeReturnsCanonicalGraphRejection(t *
 	manager := &streamproc.Manager{
 		ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver,
 		AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}",
-		OutputRelayMode: outputrelay.ModeLiveAPIStatic, OutputRelayBindingID: testStaticRelayBindingID,
+		OutputRelayMode: outputrelay.ModeManagedLiveAPI, OutputRelayBindingID: testStaticRelayBindingID,
 		Profile: profile, CoverAssets: videocover.NewLoader(nil, 1, 1<<20), CoverWitness: &httpCoverWitness{},
 	}
 	_, err := manager.Start(lifecycle.StreamJob{
@@ -223,7 +315,7 @@ func TestVideoCoverPUTLegacyRuntimeReturnsNotFoundWithoutFabricatedGeneration(t 
 	manager := &streamproc.Manager{
 		ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver,
 		AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}",
-		OutputRelayMode: outputrelay.ModeLiveAPIStatic, OutputRelayBindingID: testStaticRelayBindingID,
+		OutputRelayMode: outputrelay.ModeManagedLiveAPI, OutputRelayBindingID: testStaticRelayBindingID,
 		Profile: profile, CoverAssets: videocover.NewLoader(nil, 1, 1<<20), CoverWitness: &httpCoverWitness{},
 	}
 	_, err := manager.Start(lifecycle.StreamJob{
@@ -260,7 +352,6 @@ func TestUpdaterVersionEndpointIsUnauthenticated(t *testing.T) {
 	t.Setenv("AUTOSTREAM_NODE_CONFIG", configPath)
 	t.Setenv("SERVICE_ID", "legacy-env-service-id")
 	t.Setenv("SERVICE_VERSION", "v9.9.9")
-	t.Setenv("AUTOSTREAM_CONFIG_REVISION", "7")
 
 	handler := NewServerWithManagers(
 		"encoder_recorder",
@@ -308,11 +399,14 @@ func TestUpdaterVersionEndpointIsUnauthenticated(t *testing.T) {
 	}
 }
 
-func TestNewServerFailsClosedForInvalidConfigRevision(t *testing.T) {
-	t.Setenv("AUTOSTREAM_CONFIG_REVISION", "0")
+func TestNewServerFailsClosedForInvalidListenerConfigRevision(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yml")
+	writeNodeConfigForVerifierTest(t, configPath, control.ServiceType)
+	writeNodeListenerCredentialForVerifierTest(t, configPath, control.ServiceType, "0")
+	t.Setenv("AUTOSTREAM_NODE_CONFIG", configPath)
 	defer func() {
 		if recover() == nil {
-			t.Fatal("NewServer must reject an invalid AUTOSTREAM_CONFIG_REVISION")
+			t.Fatal("NewServer must reject an invalid listener config_revision")
 		}
 	}()
 	_ = NewServerWithManagers(
@@ -339,16 +433,13 @@ func TestUpdaterVersionFailsClosedWhenIdentityDriftsAfterConstruction(t *testing
 	configPath := filepath.Join(t.TempDir(), "config.yml")
 	writeNodeConfigForVerifierTest(t, configPath, control.ServiceType)
 	t.Setenv("AUTOSTREAM_NODE_CONFIG", configPath)
-	t.Setenv("AUTOSTREAM_CONFIG_REVISION", "7")
 	handler := NewServerWithManagers(
 		control.ServiceType,
 		nil,
 		workerevents.NewManager(t.TempDir()),
 		TokenVerifier{},
 	)
-	t.Setenv("AUTOSTREAM_NODE_CONFIG", "")
-	t.Setenv("SERVICE_ID", "changed-after-start")
-	t.Setenv("AUTOSTREAM_CONFIG_REVISION", "8")
+	writeNodeListenerCredentialForVerifierTest(t, configPath, control.ServiceType, "8")
 
 	req := httptest.NewRequest(http.MethodGet, "/updater/version", nil)
 	res := httptest.NewRecorder()
@@ -376,82 +467,16 @@ func TestDryRunEndpointRequiresAuthorization(t *testing.T) {
 	}
 }
 
-func TestArchiveArtifactEndpointsRequireTokenAndSafeFinalFile(t *testing.T) {
-	root := t.TempDir()
-	layout, err := archive.NewLayout(root, "stream-01")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := archive.EnsureDirNoSymlinks(layout.RootDir, layout.FinalDir()); err != nil {
-		t.Fatal(err)
-	}
-	finalPath := filepath.Join(layout.FinalDir(), "final.mp4")
-	if err := os.WriteFile(finalPath, []byte("archive-bytes"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
-
-	unauthorizedReq := httptest.NewRequest(http.MethodGet, "/streams/stream-01/artifacts/final.mp4", nil)
-	unauthorizedRes := httptest.NewRecorder()
-	handler.ServeHTTP(unauthorizedRes, unauthorizedReq)
-	if unauthorizedRes.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthorized status = %d body = %s", unauthorizedRes.Code, unauthorizedRes.Body.String())
-	}
-
-	downloadReq := httptest.NewRequest(http.MethodGet, "/streams/stream-01/artifacts/final.mp4", nil)
-	downloadReq.Header.Set("Authorization", "Bearer service-token")
-	downloadRes := httptest.NewRecorder()
-	handler.ServeHTTP(downloadRes, downloadReq)
-	if downloadRes.Code != http.StatusOK || downloadRes.Body.String() != "archive-bytes" {
-		t.Fatalf("download status = %d body = %s", downloadRes.Code, downloadRes.Body.String())
-	}
-	if downloadRes.Header().Get("Content-Disposition") != `attachment; filename="final.mp4"` {
-		t.Fatalf("download content disposition = %q", downloadRes.Header().Get("Content-Disposition"))
-	}
-	if got := downloadRes.Header().Get("Content-Type"); got != "video/mp4" {
-		t.Fatalf("archive content type = %q, want video/mp4", got)
-	}
-
-	rangeReq := httptest.NewRequest(http.MethodGet, "/streams/stream-01/artifacts/final.mp4", nil)
-	rangeReq.Header.Set("Authorization", "Bearer service-token")
-	rangeReq.Header.Set("Range", "bytes=0-3")
-	rangeRes := httptest.NewRecorder()
-	handler.ServeHTTP(rangeRes, rangeReq)
-	if rangeRes.Code != http.StatusPartialContent || rangeRes.Body.String() != "arch" {
-		t.Fatalf("range status = %d body = %q", rangeRes.Code, rangeRes.Body.String())
-	}
-	if rangeRes.Header().Get("Content-Range") != "bytes 0-3/13" || rangeRes.Header().Get("Accept-Ranges") != "bytes" {
-		t.Fatalf("archive range headers = %#v", rangeRes.Header())
-	}
-
-	unsafeReq := httptest.NewRequest(http.MethodGet, "/streams/stream-01/artifacts/bad..mp4", nil)
-	unsafeReq.Header.Set("Authorization", "Bearer service-token")
-	unsafeRes := httptest.NewRecorder()
-	handler.ServeHTTP(unsafeRes, unsafeReq)
-	if unsafeRes.Code != http.StatusBadRequest || !strings.Contains(unsafeRes.Body.String(), "invalid_archive_artifact") {
-		t.Fatalf("unsafe status = %d body = %s", unsafeRes.Code, unsafeRes.Body.String())
-	}
-
-	renameReq := httptest.NewRequest(http.MethodPut, "/streams/stream-01/artifacts/final.mp4", strings.NewReader(`{"name":"renamed.mp4"}`))
-	renameReq.Header.Set("Authorization", "Bearer service-token")
-	renameRes := httptest.NewRecorder()
-	handler.ServeHTTP(renameRes, renameReq)
-	if renameRes.Code != http.StatusOK || !strings.Contains(renameRes.Body.String(), "renamed.mp4") {
-		t.Fatalf("rename status = %d body = %s", renameRes.Code, renameRes.Body.String())
-	}
-	if _, err := os.Stat(filepath.Join(layout.FinalDir(), "renamed.mp4")); err != nil {
-		t.Fatalf("renamed artifact missing: %v", err)
-	}
-
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/streams/stream-01/artifacts/renamed.mp4", nil)
-	deleteReq.Header.Set("Authorization", "Bearer service-token")
-	deleteRes := httptest.NewRecorder()
-	handler.ServeHTTP(deleteRes, deleteReq)
-	if deleteRes.Code != http.StatusOK {
-		t.Fatalf("delete status = %d body = %s", deleteRes.Code, deleteRes.Body.String())
-	}
-	if _, err := os.Stat(filepath.Join(layout.FinalDir(), "renamed.mp4")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("renamed artifact should be deleted, stat err=%v", err)
+func TestRunlessArchiveArtifactRoutesAreRemoved(t *testing.T) {
+	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "service-token"})
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/streams/stream-01/artifacts/final.mp4", nil)
+		req.Header.Set("Authorization", "Bearer service-token")
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != http.StatusNotFound {
+			t.Fatalf("removed runless route method=%s status=%d body=%s", method, res.Code, res.Body.String())
+		}
 	}
 }
 
@@ -467,7 +492,7 @@ func TestArchiveArtifactEndpointUsesRunScopedDirectory(t *testing.T) {
 	if err := os.WriteFile(layout.FinalMP4(), []byte("run-archive"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
+	handler := newV2TestServerWithManagers(t, nil, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, "stream-required-relay")
 	req := httptest.NewRequest(http.MethodGet, "/streams/stream-01/archive-runs/run-01/artifacts/final.mp4", nil)
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -504,7 +529,7 @@ func TestPreviewEndpointRequiresTokenAndServesHLSWithSafeHeaders(t *testing.T) {
 	}
 	server := NewServerWithManagers(
 		"encoder_recorder",
-		&streamproc.Manager{ArchiveRoot: root},
+		&streamproc.Manager{ArchiveRoot: root, OutputRelayMode: outputrelay.ModeDirect},
 		nil,
 		TokenVerifier{PlainToken: "preview-token"},
 	)
@@ -574,7 +599,7 @@ func TestPreviewEndpointUsesProcessManagerArchiveRoot(t *testing.T) {
 	}
 	handler := NewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
-		&streamproc.Manager{ArchiveRoot: processRoot},
+		&streamproc.Manager{ArchiveRoot: processRoot, OutputRelayMode: outputrelay.ModeDirect},
 		workerevents.NewManager(eventRoot),
 		TokenVerifier{PlainToken: "preview-token"},
 		nil,
@@ -644,7 +669,7 @@ func TestPreviewEndpointRejectsSymlinkFile(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(layout.PreviewDir(), "segment-000001.ts")); err != nil {
 		t.Skipf("symlink creation is not available in this environment: %v", err)
 	}
-	server := NewServerWithManagers("encoder_recorder", &streamproc.Manager{ArchiveRoot: root}, nil, TokenVerifier{PlainToken: "preview-token"})
+	server := NewServerWithManagers("encoder_recorder", &streamproc.Manager{ArchiveRoot: root, OutputRelayMode: outputrelay.ModeDirect}, nil, TokenVerifier{PlainToken: "preview-token"})
 	req := httptest.NewRequest(http.MethodGet, "/streams/stream-01/preview/segment-000001.ts", nil)
 	req.Header.Set("Authorization", "Bearer preview-token")
 	response := httptest.NewRecorder()
@@ -710,21 +735,6 @@ func TestResolveYouTubeRuntimeSecrets(t *testing.T) {
 	}
 }
 
-func TestResolveYouTubeRuntimeSecretsRejectsRawAndSecretNameTogether(t *testing.T) {
-	job := lifecycle.StreamJob{
-		StreamID:            "stream-01",
-		StreamKey:           "raw-runtime-key",
-		StreamKeySecretName: "youtube_stream_key_main",
-	}
-	err := resolveYouTubeRuntimeSecrets(context.Background(), &job, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
-		t.Fatal("resolver should not be called when raw stream key is already present")
-		return "", nil
-	})
-	if !errors.Is(err, errRawYouTubeSecretFieldNotAllowed) {
-		t.Fatalf("expected raw youtube secret error, got %v", err)
-	}
-}
-
 func TestResolvePackageArchiveRuntimeSecrets(t *testing.T) {
 	job := lifecycle.PackageJob{
 		StreamID: "stream-01",
@@ -762,12 +772,12 @@ func TestResolvePackageArchiveRuntimeSecrets(t *testing.T) {
 func TestStartStreamReturnsConflictWhenRuntimeSecretLeaseActive(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	handler := NewServerWithManagersAndSecretResolver("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
 		return "", control.ErrRuntimeSecretLeaseActive
 	})
 
-	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key":"runtime-stream-key","archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","folder_id_secret_name":"drive_destination:dest-01:folder_id"}}`
+	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","folder_id_secret_name":"drive_destination:dest-01:folder_id"}}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -790,7 +800,7 @@ func TestPackageStreamReturnsConflictWhenRuntimeSecretLeaseActive(t *testing.T) 
 		return "", control.ErrRuntimeSecretLeaseActive
 	})
 
-	body := `{"stream_id":"stream-01","name":"Morning Stream","dry_run":true,"archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","refresh_token_secret_name":"oauth_account:account-01:refresh_token"}}`
+	body := `{"stream_id":"stream-01","archive_run_id":"run-01","name":"Morning Stream","started_at":"2026-05-31T01:02:03Z","dry_run":true,"archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","refresh_token_secret_name":"oauth_account:account-01:refresh_token"}}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/package", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -809,13 +819,13 @@ func TestPackageStreamReturnsConflictWhenRuntimeSecretLeaseActive(t *testing.T) 
 func TestStartStreamRejectsRawArchiveSecretFields(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	handler := NewServerWithManagersAndSecretResolver("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
 		t.Fatalf("runtime secret resolver should not be called for raw archive secret fields")
 		return "", nil
 	})
 
-	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key":"runtime-stream-key","archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","folder_id":"raw-drive-folder-id","refresh_token_secret_name":"oauth_account:account-01:refresh_token"}}`
+	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","folder_id":"raw-drive-folder-id","refresh_token_secret_name":"oauth_account:account-01:refresh_token"}}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -834,10 +844,10 @@ func TestStartStreamRejectsRawArchiveSecretFields(t *testing.T) {
 func TestStartStreamRejectsRawArchiveSecretFieldsWithoutResolver(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	handler := NewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
 
-	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key":"runtime-stream-key","archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","refresh_token":"raw-refresh-token","folder_id_secret_name":"drive_destination:dest-01:folder_id"}}`
+	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","refresh_token":"raw-refresh-token","folder_id_secret_name":"drive_destination:dest-01:folder_id"}}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -861,7 +871,7 @@ func TestPackageStreamRejectsRawArchiveSecretFields(t *testing.T) {
 		return "", nil
 	})
 
-	body := `{"stream_id":"stream-01","name":"Morning Stream","dry_run":true,"archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","refresh_token":"raw-refresh-token","folder_id_secret_name":"drive_destination:dest-01:folder_id"}}`
+	body := `{"stream_id":"stream-01","archive_run_id":"run-01","name":"Morning Stream","started_at":"2026-05-31T01:02:03Z","dry_run":true,"archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","refresh_token":"raw-refresh-token","folder_id_secret_name":"drive_destination:dest-01:folder_id"}}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/package", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -889,7 +899,7 @@ func TestControlEndpointsFailClosedWhenTokenIsNotConfigured(t *testing.T) {
 }
 
 func TestControlEndpointsRejectInvalidToken(t *testing.T) {
-	handler := NewServerWithManagers("encoder_recorder", &streamproc.Manager{}, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "expected-token"})
+	handler := NewServerWithManagers("encoder_recorder", &streamproc.Manager{OutputRelayMode: outputrelay.ModeDirect}, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "expected-token"})
 	tests := []struct {
 		name   string
 		method string
@@ -945,7 +955,7 @@ func TestDiscordOpusAudioRejectsOversizedBodyBeforeTokenValidation(t *testing.T)
 
 func TestStreamControlEndpointsRejectOversizedJSONBodies(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
-	handler := NewServerWithManagers("encoder_recorder", &streamproc.Manager{}, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "service-token"})
+	handler := NewServerWithManagers("encoder_recorder", &streamproc.Manager{OutputRelayMode: outputrelay.ModeDirect}, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "service-token"})
 	tests := []string{"/streams/dry-run", "/streams/start", "/streams/package"}
 	for _, path := range tests {
 		t.Run(path, func(t *testing.T) {
@@ -977,8 +987,6 @@ func TestPreflightEndpointReportsReadinessWithoutLeakingSecrets(t *testing.T) {
 	}
 	t.Setenv("FFMPEG_BIN", exe)
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", filepath.Join(root, "archives"))
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
 	t.Setenv("GOOGLE_DRIVE_AUTH_MODE", "service_account")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credentialPath)
 	t.Setenv("GOOGLE_DRIVE_FOLDER_ID", "drive-folder-id")
@@ -1016,7 +1024,7 @@ func TestPreflightEndpointReportsReadinessWithoutLeakingSecrets(t *testing.T) {
 	}
 }
 
-func TestPreflightEndpointTreatsYouTubeEnvAsOptionalRuntimeConfig(t *testing.T) {
+func TestPreflightEndpointRequiresControlPanelYouTubeRuntimeConfig(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	exe, err := os.Executable()
 	if err != nil {
@@ -1049,12 +1057,12 @@ func TestPreflightEndpointTreatsYouTubeEnvAsOptionalRuntimeConfig(t *testing.T) 
 	if !hasPreflightCheck(body.Checks, "youtube_rtmp_url", "runtime_config_required") || !hasPreflightCheck(body.Checks, "youtube_stream_key", "runtime_config_required") {
 		t.Fatalf("missing YouTube runtime config checks: %#v", body.Checks)
 	}
-	if !hasPreflightCheck(body.Checks, "output_relay", "compatibility_mode") {
-		t.Fatalf("missing output relay compatibility check: %#v", body.Checks)
+	if !hasPreflightCheck(body.Checks, "output_relay", "ok") {
+		t.Fatalf("missing canonical direct output check: %#v", body.Checks)
 	}
 }
 
-func TestPreflightEndpointAcceptsDirectOutputInProductionByDefault(t *testing.T) {
+func TestPreflightEndpointAcceptsExplicitDirectOutputInProduction(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	t.Setenv("AUTOSTREAM_ENV", "production")
 	exe, err := os.Executable()
@@ -1083,10 +1091,10 @@ func TestPreflightEndpointAcceptsDirectOutputInProductionByDefault(t *testing.T)
 		t.Fatal(err)
 	}
 	if !body.Ready {
-		t.Fatalf("expected production preflight to allow direct output by default: %#v", body.Checks)
+		t.Fatalf("expected production preflight to allow explicitly configured direct output: %#v", body.Checks)
 	}
-	if !hasPreflightCheck(body.Checks, "output_relay", "compatibility_mode") {
-		t.Fatalf("missing direct output compatibility check: %#v", body.Checks)
+	if !hasPreflightCheck(body.Checks, "output_relay", "ok") {
+		t.Fatalf("missing explicit direct output check: %#v", body.Checks)
 	}
 }
 
@@ -1130,8 +1138,8 @@ func TestPreflightEndpointAcceptsLoopbackOutputRelayInProduction(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	t.Setenv("AUTOSTREAM_ENV", "production")
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://127.0.0.1/autostream/{stream_id}")
-	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "legacy_stream_key")
-	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", "")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", outputrelay.ModeManagedLiveAPI)
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", testStaticRelayBindingID)
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -1176,17 +1184,17 @@ func TestOutputRelayPreflightUsesExplicitModeContract(t *testing.T) {
 		composeRelay bool
 		wantStatus   string
 	}{
-		{name: "url only remains legacy", url: "rtmp://127.0.0.1/autostream/{stream_id}", wantStatus: "ok"},
+		{name: "url without explicit mode is invalid", url: "rtmp://127.0.0.1/autostream/{stream_id}", wantStatus: "invalid"},
 		{name: "required relay missing is not direct", mode: "direct", requireRelay: true, wantStatus: "missing"},
-		{name: "static needs binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "live_api_static", wantStatus: "invalid"},
-		{name: "static rejects generic binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "live_api_static", binding: "relay-binding-static", wantStatus: "invalid"},
-		{name: "static rejects whitespace binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "live_api_static", binding: " " + testStaticRelayBindingID, wantStatus: "invalid"},
-		{name: "static with canonical binding is ready", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "live_api_static", binding: testStaticRelayBindingID, wantStatus: "ok"},
+		{name: "static needs binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "live_api_relay_static", wantStatus: "invalid"},
+		{name: "static rejects generic binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "live_api_relay_static", binding: "relay-binding-static", wantStatus: "invalid"},
+		{name: "static rejects whitespace binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "live_api_relay_static", binding: " " + testStaticRelayBindingID, wantStatus: "invalid"},
+		{name: "static with canonical binding is ready", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "live_api_relay_static", binding: testStaticRelayBindingID, wantStatus: "ok"},
 		{name: "non-loopback relay is invalid", url: "rtmp://relay.example.com/autostream/{stream_id}", wantStatus: "invalid"},
 		{name: "compose relay without explicit identity is invalid", url: "rtmp://output-relay:1935/autostream/{stream_id}", wantStatus: "invalid"},
-		{name: "compose relay with explicit identity is ready", url: "rtmp://output-relay:1935/autostream/{stream_id}", composeRelay: true, wantStatus: "ok"},
+		{name: "compose relay with explicit identity is ready", url: "rtmp://output-relay:1935/autostream/{stream_id}", mode: "live_api_relay_static", binding: testStaticRelayBindingID, composeRelay: true, wantStatus: "ok"},
 		{name: "url with direct is invalid", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "direct", wantStatus: "invalid"},
-		{name: "url-free static is invalid", mode: "live_api_static", binding: testStaticRelayBindingID, wantStatus: "invalid"},
+		{name: "url-free static is invalid", mode: "live_api_relay_static", binding: testStaticRelayBindingID, wantStatus: "invalid"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", tt.url)
@@ -1262,9 +1270,7 @@ func TestDryRunEndpoint(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", root)
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
-	handler := NewServer("encoder_recorder")
+	handler := newV2TestServer(t, nil, "stream-01")
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","dry_run":true}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/dry-run", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
@@ -1301,7 +1307,7 @@ func TestDryRunEndpointRejectsMissingRequiredRelayWithoutRuntimeProvider(t *test
 	root := t.TempDir()
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", root)
 
-	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
+	handler := newV2TestServerWithManagers(t, nil, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, "stream-required-relay")
 	req := httptest.NewRequest(http.MethodPost, "/streams/dry-run", bytes.NewBufferString(`{"stream_id":"stream-required-relay","name":"Required Relay","input_url":"srt://input.example.com:9000","dry_run":true}`))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -1318,8 +1324,6 @@ func TestDryRunEndpointRejectsMissingRequiredRelayWithoutRuntimeProvider(t *test
 func TestDryRunEndpointRequiresRuntimeYouTubeConfigWhenFallbackDisabled(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	t.Setenv("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", "true")
-	t.Setenv("YOUTUBE_STREAM_KEY", "env-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", t.TempDir())
 
 	handler := NewServer("encoder_recorder")
@@ -1332,8 +1336,7 @@ func TestDryRunEndpointRequiresRuntimeYouTubeConfigWhenFallbackDisabled(t *testi
 		t.Fatalf("expected runtime config failure, got %d body = %s", res.Code, res.Body.String())
 	}
 	if !strings.Contains(res.Body.String(), `"code":"youtube_runtime_config_required"`) ||
-		!strings.Contains(res.Body.String(), `"rtmp_url"`) ||
-		!strings.Contains(res.Body.String(), `"stream_key"`) {
+		!strings.Contains(res.Body.String(), `"output_mode"`) {
 		t.Fatalf("expected missing YouTube runtime fields, got %s", res.Body.String())
 	}
 	if strings.Contains(res.Body.String(), "env-secret-stream-key") {
@@ -1352,7 +1355,7 @@ func TestDryRunEndpointRejectsRawStreamKeyInProduction(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
-	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "raw_youtube_stream_key_not_allowed") {
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), `"code":"bad_request"`) {
 		t.Fatalf("expected raw stream key rejection, status = %d body = %s", res.Code, res.Body.String())
 	}
 	if strings.Contains(res.Body.String(), "raw-production-stream-key") {
@@ -1365,7 +1368,7 @@ func TestPackageEndpoint(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", root)
 	tmpDir := filepath.Join(root, "tmp", "stream-01")
-	finalDir := filepath.Join(root, "final", "stream-01")
+	finalDir := filepath.Join(root, "final", "stream-01", "run-01")
 	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -1379,7 +1382,7 @@ func TestPackageEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := NewServer("encoder_recorder")
-	body := `{"stream_id":"stream-01","name":"Morning Stream","dry_run":true}`
+	body := `{"stream_id":"stream-01","archive_run_id":"run-01","name":"Morning Stream","started_at":"2026-05-31T01:02:03Z","dry_run":true}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/package", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -1438,7 +1441,6 @@ func TestPackageEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 						"oauth_account_id":          "account-01",
 						"oauth_provider_id":         "provider-01",
 						"folder_id_secret_name":     "drive_destination:dest-01:folder_id",
-						"base_path":                 "AutoStream/Archives",
 						"shared_drive":              true,
 						"retention_days":            float64(45),
 						"client_id":                 "google-client-id",
@@ -1450,7 +1452,7 @@ func TestPackageEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 		},
 	)
 
-	body := `{"stream_id":"stream-01","name":"Morning Stream","dry_run":true}`
+	body := `{"stream_id":"stream-01","archive_run_id":"run-01","name":"Morning Stream","started_at":"2026-05-31T01:02:03Z","dry_run":true}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/package", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -1484,7 +1486,7 @@ func TestPackageEndpointReturnsSafeFailureClassification(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", root)
 	handler := NewServer("encoder_recorder")
-	body := `{"stream_id":"stream-01","name":"Morning Stream","dry_run":true}`
+	body := `{"stream_id":"stream-01","archive_run_id":"run-01","name":"Morning Stream","started_at":"2026-05-31T01:02:03Z","dry_run":true}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/package", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -1505,10 +1507,8 @@ func TestPackageEndpointReturnsSafeFailureClassification(t *testing.T) {
 func TestStartStopProcessEndpoints(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServer(t, processManager, "stream-01")
 
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
@@ -1558,11 +1558,9 @@ func TestStartStopProcessEndpoints(t *testing.T) {
 
 func TestStopEndpointRejectsDifferentActiveStream(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
 	root := t.TempDir()
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServer(t, processManager, "active-stream")
 
 	startReq := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"active-stream","name":"Active Stream","input_url":"srt://input.example.com:9000"}`))
 	startReq.Header.Set("Authorization", "Bearer service-token")
@@ -1587,9 +1585,9 @@ func TestStopEndpointRejectsDifferentActiveStream(t *testing.T) {
 func TestStopEndpointRejectsStartingStream(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	starter := &httpBlockingStarter{started: make(chan struct{}), release: make(chan struct{})}
-	processManager := &streamproc.Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
-	job := lifecycle.StreamJob{StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key"}
+	processManager := &streamproc.Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServer(t, processManager, "stream-01")
+	job := lifecycle.StreamJob{StreamID: "stream-01", Name: "Morning Stream", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key", YouTubeOutputMode: "stream_key"}
 	startErr := make(chan error, 1)
 	go func() {
 		_, err := processManager.Start(job)
@@ -1616,11 +1614,9 @@ func TestStopEndpointRejectsStartingStream(t *testing.T) {
 
 func TestStopEndpointRetriesKnownStoppedTargetWithoutAffectingSuccessor(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
 	root := t.TempDir()
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServer(t, processManager, "stream-a", "stream-b")
 
 	startA := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-a","name":"Stream A","input_url":"srt://input.example.com:9000"}`))
 	startA.Header.Set("Authorization", "Bearer service-token")
@@ -1674,20 +1670,18 @@ func TestStopEndpointRetriesKnownStoppedTargetWithoutAffectingSuccessor(t *testi
 
 func TestStopEndpointUsesDurableTargetReceiptAfterRestartWithoutAffectingSuccessor(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
 	root := t.TempDir()
 
-	beforeRestart := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	if _, err := beforeRestart.Start(lifecycle.StreamJob{StreamID: "stream-a", Name: "Stream A", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key"}); err != nil {
+	beforeRestart := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	if _, err := beforeRestart.Start(lifecycle.StreamJob{StreamID: "stream-a", Name: "Stream A", InputURL: "srt://input.example.com:9000", RTMPURL: "rtmps://youtube.example.com/live2", StreamKey: "key", YouTubeOutputMode: "stream_key"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := beforeRestart.Stop("stream-a"); err != nil {
 		t.Fatal(err)
 	}
 
-	afterRestart := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", afterRestart)
+	afterRestart := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServer(t, afterRestart, "stream-a", "stream-b")
 	startB := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-b","name":"Stream B","input_url":"srt://input.example.com:9000"}`))
 	startB.Header.Set("Authorization", "Bearer service-token")
 	startBRes := httptest.NewRecorder()
@@ -1710,8 +1704,8 @@ func TestStopEndpointUsesDurableTargetReceiptAfterRestartWithoutAffectingSuccess
 
 func TestStopEndpointRejectsUnknownStreamWhenIdle(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
-	processManager := &streamproc.Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	processManager := &streamproc.Manager{ArchiveRoot: t.TempDir(), FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServer(t, processManager)
 
 	req := httptest.NewRequest(http.MethodPost, "/streams/unknown-stream/stop", nil)
 	req.Header.Set("Authorization", "Bearer service-token")
@@ -1722,14 +1716,14 @@ func TestStopEndpointRejectsUnknownStreamWhenIdle(t *testing.T) {
 	}
 }
 
-func TestStartEndpointAcceptsRuntimeStreamKeyWithoutStaticRelay(t *testing.T) {
+func TestStartEndpointAcceptsRuntimeStreamKeyReferenceWithoutStaticRelay(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServer(t, processManager, "stream-01")
 
-	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key":"runtime-secret-stream-key"}`
+	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -1737,11 +1731,11 @@ func TestStartEndpointAcceptsRuntimeStreamKeyWithoutStaticRelay(t *testing.T) {
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("start status = %d body = %s", res.Code, res.Body.String())
 	}
-	if strings.Contains(res.Body.String(), "runtime-secret-stream-key") {
+	if strings.Contains(res.Body.String(), "test-runtime-stream-key") {
 		t.Fatal("runtime stream key leaked in start response")
 	}
 	args := strings.Join(starter.args, " ")
-	if !strings.Contains(args, "rtmps://youtube.example.com/live2/runtime-secret-stream-key") {
+	if !strings.Contains(args, "rtmps://youtube.example.com/live2/test-runtime-stream-key") {
 		t.Fatalf("expected direct target without a static relay, got %#v", starter.args)
 	}
 }
@@ -1750,23 +1744,25 @@ func TestStartEndpointUsesSelectedEncoderRuntimeProfile(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	handler := NewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		processManager,
 		workerevents.NewManager(root),
 		TokenVerifier{PlainToken: "service-token"},
-		nil,
+		testYouTubeSecretResolver,
 		func(context.Context) (control.RuntimeConfig, error) {
-			return control.RuntimeConfig{Profiles: map[string][]control.RuntimeProfile{
+			cfg, _ := testYouTubeRuntimeProvider("stream-profile")(context.Background())
+			cfg.Profiles = map[string][]control.RuntimeProfile{
 				"encoder": {{ID: "encoder-720p", Kind: "encoder", Config: map[string]any{
 					"width": float64(1280), "height": float64(720), "fps": float64(30), "video_bitrate_kbps": float64(4500),
 				}}},
-			}}, nil
+			}
+			return cfg, nil
 		},
 	)
 
-	body := `{"stream_id":"stream-profile","name":"Profile Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key":"runtime-secret-stream-key","encoder_profile_id":"encoder-720p"}`
+	body := `{"stream_id":"stream-profile","name":"Profile Stream","input_url":"srt://input.example.com:9000","encoder_profile_id":"encoder-720p"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -1800,9 +1796,10 @@ func TestStartEndpointRejectsMissingRequiredRelayWithoutRuntimeProvider(t *testi
 		},
 		AllowHostnameInputs: true,
 		RequireOutputRelay:  true,
+		OutputRelayMode:     outputrelay.ModeDirect,
 	}
-	handler := NewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
-	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-required-relay","name":"Required Relay","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key":"test-key"}`))
+	handler := NewServerWithManagersAndRuntimeConfig("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, nil, testYouTubeRuntimeProvider("stream-required-relay"))
+	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-required-relay","name":"Required Relay","input_url":"srt://input.example.com:9000"}`))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
@@ -1820,15 +1817,15 @@ func TestStartEndpointRejectsRawStreamKeyInProduction(t *testing.T) {
 	t.Setenv("AUTOSTREAM_ENV", "production")
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServer(t, processManager, "stream-01")
 
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key":"raw-production-stream-key"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
-	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "raw_youtube_stream_key_not_allowed") {
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), `"code":"bad_request"`) {
 		t.Fatalf("expected raw stream key rejection, status = %d body = %s", res.Code, res.Body.String())
 	}
 	if strings.Contains(res.Body.String(), "raw-production-stream-key") {
@@ -1843,15 +1840,15 @@ func TestStartEndpointResolvesRuntimeStreamKeySecretNameWithoutStaticRelay(t *te
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	resolverCalls := 0
-	handler := NewServerWithManagersAndSecretResolver("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
+	handler := NewServerWithManagersAndRuntimeConfig("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
 		resolverCalls++
 		if streamID != "stream-01" || archiveProfileID != "" || secretName != "youtube_stream_key_main" {
 			t.Fatalf("unexpected resolve context stream=%q profile=%q secret=%q", streamID, archiveProfileID, secretName)
 		}
 		return "resolved-runtime-stream-key", nil
-	})
+	}, testYouTubeRuntimeProvider("stream-01"))
 
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key_secret_name":"youtube_stream_key_main"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
@@ -1876,11 +1873,9 @@ func TestStartEndpointResolvesRuntimeStreamKeySecretNameWithoutStaticRelay(t *te
 func TestStartEndpointAppliesControlPanelYouTubeRuntimeConfigWithoutStaticRelay(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	t.Setenv("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", "true")
-	t.Setenv("YOUTUBE_STREAM_KEY", "env-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://env.example.com/live2")
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	resolverCalls := 0
 	handler := NewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
@@ -2012,7 +2007,7 @@ func TestStartEndpointRejectsTrustedLiveAPIWithStaticRelayBeforeSecretResolution
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeLiveAPIStatic, OutputRelayBindingID: testStaticRelayBindingID}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeManagedLiveAPI, OutputRelayBindingID: testStaticRelayBindingID}
 	resolverCalls := 0
 	runtimeConfigCalls := 0
 	handler := NewServerWithManagersAndRuntimeConfig(
@@ -2055,7 +2050,7 @@ func TestStartEndpointRejectsTrustedLiveAPIWithStaticRelayBeforeSecretResolution
 }
 
 func TestStartEndpointStaticOutputRelayRejectsNonStaticYouTubeOutputModesBeforeSecretResolution(t *testing.T) {
-	for _, outputMode := range []string{"stream_key", "live_api", "live_api_dry_run", ""} {
+	for _, outputMode := range []string{"stream_key", "live_api", "live_api_dry_run"} {
 		t.Run(outputMode, func(t *testing.T) {
 			t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 			root := t.TempDir()
@@ -2067,7 +2062,7 @@ func TestStartEndpointStaticOutputRelayRejectsNonStaticYouTubeOutputModesBeforeS
 				InputResolver:        testInputResolver,
 				AllowHostnameInputs:  true,
 				OutputRelayURL:       "rtmp://127.0.0.1/autostream/{stream_id}",
-				OutputRelayMode:      outputrelay.ModeLiveAPIStatic,
+				OutputRelayMode:      outputrelay.ModeManagedLiveAPI,
 				OutputRelayBindingID: testStaticRelayBindingID,
 			}
 			resolverCalls := 0
@@ -2111,32 +2106,28 @@ func TestStartEndpointStaticOutputRelayRejectsNonStaticYouTubeOutputModesBeforeS
 	}
 }
 
-func TestStartEndpointLegacyRelayAllowsOnlyStreamKeyBeforeSecretResolution(t *testing.T) {
+func TestStartEndpointRejectsRemovedLegacyRelayModeBeforeSecretResolution(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
 		outputMode string
 		wantStatus int
 		wantStart  bool
 	}{
-		{name: "stream key starts through local relay", outputMode: "stream_key", wantStatus: http.StatusAccepted, wantStart: true},
-		{name: "live api is rejected", outputMode: "live_api", wantStatus: http.StatusConflict},
-		{name: "live api dry run is rejected", outputMode: "live_api_dry_run", wantStatus: http.StatusConflict},
-		{name: "missing mode is rejected", outputMode: "", wantStatus: http.StatusConflict},
+		{name: "removed legacy relay mode is rejected", outputMode: "stream_key", wantStatus: http.StatusBadRequest},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 			root := t.TempDir()
 			starter := &httpFakeStarter{}
 			processManager := &streamproc.Manager{
-				ArchiveRoot:         root,
-				FFmpegBin:           "ffmpeg",
-				Starter:             starter,
-				InputResolver:       testInputResolver,
-				AllowHostnameInputs: true,
-				// No mode is the compatibility bridge for existing native Relay
-				// configurations. A stale binding must not upgrade it to static.
+				ArchiveRoot:          root,
+				FFmpegBin:            "ffmpeg",
+				Starter:              starter,
+				InputResolver:        testInputResolver,
+				AllowHostnameInputs:  true,
 				OutputRelayURL:       "rtmp://127.0.0.1/autostream/{stream_id}",
 				OutputRelayBindingID: "stale-binding-must-not-matter",
+				OutputRelayMode:      "legacy_stream_key",
 			}
 			resolverCalls := 0
 			handler := NewServerWithManagersAndRuntimeConfig(
@@ -2215,7 +2206,7 @@ func TestStartEndpointStaticLiveAPIRelayRequiresTrustedBindingAndSkipsYouTubeSec
 				InputResolver:        testInputResolver,
 				AllowHostnameInputs:  true,
 				OutputRelayURL:       "rtmp://127.0.0.1/autostream/{stream_id}",
-				OutputRelayMode:      outputrelay.ModeLiveAPIStatic,
+				OutputRelayMode:      outputrelay.ModeManagedLiveAPI,
 				OutputRelayBindingID: tt.environmentBinding,
 			}
 			resolverCalls := 0
@@ -2322,14 +2313,12 @@ func TestDryRunEndpointAppliesControlPanelYouTubeRuntimeConfigWithoutResolvingSe
 	}
 }
 
-func TestDryRunEndpointLegacyRelayUsesLocalTargetWithoutResolvingYouTubeKey(t *testing.T) {
+func TestDryRunEndpointRejectsRemovedLegacyRelayMode(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	t.Setenv("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", "true")
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", t.TempDir())
-	// An existing host that has only the Relay URL must retain its fixed
-	// stream-key behavior until an operator explicitly migrates it.
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://127.0.0.1/autostream/{stream_id}")
-	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "legacy_stream_key")
 
 	handler := NewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
@@ -2355,27 +2344,22 @@ func TestDryRunEndpointLegacyRelayUsesLocalTargetWithoutResolvingYouTubeKey(t *t
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
-	if res.Code != http.StatusAccepted {
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), `"code":"dry_run_failed"`) {
 		t.Fatalf("dry-run status = %d body = %s", res.Code, res.Body.String())
 	}
-	for _, forbidden := range []string{"control.example.com", "youtube_stream_key_runtime_stream-legacy-01"} {
-		if strings.Contains(res.Body.String(), forbidden) {
-			t.Fatalf("legacy dry-run retained unused YouTube output %q: %s", forbidden, res.Body.String())
-		}
-	}
-	if !strings.Contains(res.Body.String(), "rtmp://127.0.0.1/autostream/stream-legacy-01") {
-		t.Fatalf("legacy dry-run must use the local Relay target: %s", res.Body.String())
+	if strings.Contains(res.Body.String(), "commands") {
+		t.Fatalf("removed relay mode must not run dry-run FFmpeg: %s", res.Body.String())
 	}
 }
 
-func TestDryRunEndpointLegacyRelayRejectsDynamicYouTubeModes(t *testing.T) {
-	for _, outputMode := range []string{"live_api", "live_api_dry_run", ""} {
+func TestDryRunEndpointRemovedLegacyRelayRejectsAllYouTubeModes(t *testing.T) {
+	for _, outputMode := range []string{"live_api", "live_api_dry_run"} {
 		t.Run(outputMode, func(t *testing.T) {
 			t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 			t.Setenv("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", "true")
 			t.Setenv("AUTOSTREAM_ARCHIVE_DIR", t.TempDir())
 			t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://127.0.0.1/autostream/{stream_id}")
-			t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "")
+			t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "legacy_stream_key")
 			handler := NewServerWithManagersAndRuntimeConfig(
 				"encoder_recorder",
 				nil,
@@ -2400,7 +2384,7 @@ func TestDryRunEndpointLegacyRelayRejectsDynamicYouTubeModes(t *testing.T) {
 			req.Header.Set("Authorization", "Bearer service-token")
 			res := httptest.NewRecorder()
 			handler.ServeHTTP(res, req)
-			if res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), "live_api_requires_managed_output_relay") {
+			if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), `"code":"dry_run_failed"`) {
 				t.Fatalf("mode %q status=%d body=%s", outputMode, res.Code, res.Body.String())
 			}
 			if strings.Contains(res.Body.String(), "commands") {
@@ -2415,7 +2399,7 @@ func TestDryRunEndpointStaticLiveAPIRelayUsesLocalTargetWithoutYouTubeKey(t *tes
 	t.Setenv("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", "true")
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", t.TempDir())
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://127.0.0.1/autostream/{stream_id}")
-	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "live_api_static")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "live_api_relay_static")
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", testStaticRelayBindingID)
 	handler := NewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
@@ -2457,7 +2441,7 @@ func TestStartEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeLiveAPIStatic, OutputRelayBindingID: testStaticRelayBindingID}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeManagedLiveAPI, OutputRelayBindingID: testStaticRelayBindingID}
 	resolvedSecrets := map[string]string{}
 	handler := NewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
@@ -2541,11 +2525,9 @@ func TestStartEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 func TestStartEndpointRequiresRuntimeYouTubeConfigWhenFallbackDisabled(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	t.Setenv("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", "true")
-	t.Setenv("YOUTUBE_STREAM_KEY", "env-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	handler := NewServerWithProcessManager("encoder_recorder", processManager)
 
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000"}`
@@ -2557,8 +2539,7 @@ func TestStartEndpointRequiresRuntimeYouTubeConfigWhenFallbackDisabled(t *testin
 		t.Fatalf("expected runtime config failure, got %d body = %s", res.Code, res.Body.String())
 	}
 	if !strings.Contains(res.Body.String(), `"code":"youtube_runtime_config_required"`) ||
-		!strings.Contains(res.Body.String(), `"rtmp_url"`) ||
-		!strings.Contains(res.Body.String(), `"stream_key"`) {
+		!strings.Contains(res.Body.String(), `"output_mode"`) {
 		t.Fatalf("expected missing YouTube runtime fields, got %s", res.Body.String())
 	}
 	if strings.Contains(res.Body.String(), "env-secret-stream-key") {
@@ -2580,8 +2561,9 @@ func TestStartEndpointRequiresOutputRelayBeforeFFmpegStart(t *testing.T) {
 		InputResolver:       testInputResolver,
 		AllowHostnameInputs: true,
 		RequireOutputRelay:  true,
+		OutputRelayMode:     outputrelay.ModeDirect,
 	}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", DiscordAudioPlainToken: "audio-token"}, "stream-01")
 
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key":"runtime-secret-stream-key"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
@@ -2601,9 +2583,8 @@ func TestStartEndpointRequiresOutputRelayBeforeFFmpegStart(t *testing.T) {
 
 func TestStartEndpointRejectsUnsafeRTMPTarget(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
 	root := t.TempDir()
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	handler := NewServerWithProcessManager("encoder_recorder", processManager)
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2|[f=matroska]/tmp/evil.mkv"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
@@ -2621,11 +2602,9 @@ func TestStartEndpointRejectsUnsafeRTMPTarget(t *testing.T) {
 func TestStartEndpointUsesDiscordAudioBridgeWhenInputURLIsEmpty(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServer(t, processManager, "stream-01")
 
 	body := `{"stream_id":"stream-01","name":"Discord Audio Stream"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
@@ -2648,8 +2627,6 @@ func TestStartEndpointOptInWorkerVideoReturnsOneTimeSRTCredentialWithoutLeakingI
 	t.Setenv("AUTOSTREAM_ENV", "development")
 	t.Setenv("AUTOSTREAM_WORKER_VIDEO_BIND_ADDR", "127.0.0.1:0")
 	t.Setenv("AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST", "127.0.0.1")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
 	const signingKey = "worker-video-signing-key"
 	token, err := ingesttoken.Issue(signingKey, ingesttoken.Claims{
 		StreamID:    "stream-worker-video",
@@ -2665,8 +2642,8 @@ func TestStartEndpointOptInWorkerVideoReturnsOneTimeSRTCredentialWithoutLeakingI
 
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: signingKey, RequireSignedIngest: true})
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: signingKey, RequireSignedIngest: true}, "stream-worker-video")
 
 	body, err := json.Marshal(map[string]any{
 		"stream_id":                 "stream-worker-video",
@@ -2748,12 +2725,10 @@ func TestStartEndpointOptInWorkerVideoReturnsOneTimeSRTCredentialWithoutLeakingI
 
 func TestStartEndpointRejectsInvalidWorkerVideoTokenBeforeAllocatingMediaBridges(t *testing.T) {
 	t.Setenv("AUTOSTREAM_ENV", "development")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: "expected-signing-key", RequireSignedIngest: true})
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: "expected-signing-key", RequireSignedIngest: true}, "stream-worker-video")
 
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-worker-video","name":"Worker Scene Stream","worker_video_ingest":true,"worker_video_ingest_token":"not-a-signed-token"}`))
 	req.Header.Set("Authorization", "Bearer service-token")
@@ -2773,7 +2748,7 @@ func TestStartEndpointRejectsInvalidWorkerVideoTokenBeforeAllocatingMediaBridges
 func TestStartEndpointRejectsWorkerVideoTokenWithoutExplicitOptIn(t *testing.T) {
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	handler := NewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
 
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-worker-video","name":"Worker Scene Stream","worker_video_ingest_token":"must-not-be-ignored"}`))
@@ -2792,8 +2767,6 @@ func TestStartEndpointRejectsDifferentStreamWhileEncoderVideoBridgeIsActive(t *t
 	t.Setenv("AUTOSTREAM_ENV", "development")
 	t.Setenv("AUTOSTREAM_WORKER_VIDEO_BIND_ADDR", "127.0.0.1:0")
 	t.Setenv("AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST", "127.0.0.1")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
 	const signingKey = "worker-video-signing-key"
 	issueToken := func(streamID string) string {
 		t.Helper()
@@ -2808,8 +2781,8 @@ func TestStartEndpointRejectsDifferentStreamWhileEncoderVideoBridgeIsActive(t *t
 	}
 
 	root := t.TempDir()
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: signingKey, RequireSignedIngest: true})
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: signingKey, RequireSignedIngest: true}, "stream-worker-video-01", "stream-worker-video-02")
 	start := func(streamID string) *httptest.ResponseRecorder {
 		t.Helper()
 		body, err := json.Marshal(map[string]any{
@@ -2843,11 +2816,9 @@ func TestStartEndpointRejectsDifferentStreamWhileEncoderVideoBridgeIsActive(t *t
 func TestStartEndpointRejectsClientSuppliedInternalDiscordAudioURL(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", DiscordAudioPlainToken: "audio-token"}, "stream-01")
 
 	body := `{"stream_id":"stream-01","name":"Discord Audio Stream","input_mode":"discord_opus_rtp","input_url":"internal_discord_audio:C:/tmp/attacker.sdp"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
@@ -2870,10 +2841,8 @@ func TestDiscordAudioStatusShowsBridgeBeforePacketsAndUpdatesAfterIngest(t *test
 	t.Setenv("ENCODER_DISCORD_AUDIO_TOKEN", "audio-token")
 	t.Setenv("AUTOSTREAM_REQUIRE_SIGNED_INGEST_TOKENS", "false")
 	root := t.TempDir()
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", DiscordAudioPlainToken: "audio-token"}, "stream-01")
 
 	startReq := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-01","name":"Discord Audio Stream"}`))
 	startReq.Header.Set("Authorization", "Bearer service-token")
@@ -2922,10 +2891,8 @@ func TestDiscordAudioEndpointAcceptsConfiguredLargePacketBatch(t *testing.T) {
 	t.Setenv("AUDIO_INGEST_MAX_PACKETS", "150")
 	t.Setenv("AUDIO_INGEST_MAX_BODY_BYTES", "1048576")
 	root := t.TempDir()
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", DiscordAudioPlainToken: "audio-token"}, "stream-01")
 
 	startReq := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-01","name":"Large Discord Audio Batch"}`))
 	startReq.Header.Set("Authorization", "Bearer service-token")
@@ -2971,13 +2938,11 @@ func TestDiscordAudioEndpointAcceptsConfiguredLargePacketBatch(t *testing.T) {
 
 func TestDiscordAudioEndpointUsesScopedTokenWhenConfigured(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{
 		PlainToken:             "control-token",
 		DiscordAudioPlainToken: "discord-audio-token",
-	})
+	}, "stream-01")
 
 	startReq := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-01","name":"Discord Audio Stream"}`))
 	startReq.Header.Set("Authorization", "Bearer control-token")
@@ -3010,15 +2975,13 @@ func TestDiscordAudioEndpointUsesScopedTokenWhenConfigured(t *testing.T) {
 
 func TestDiscordAudioEndpointAcceptsSignedStreamIngestToken(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
-	t.Setenv("YOUTUBE_RTMP_URL", "rtmps://youtube.example.com/live2")
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	signingKey := "test-stream-ingest-signing-key"
-	handler := NewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{
+	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{
 		PlainToken:             "control-token",
 		IngestTokenSigningKey:  signingKey,
 		DiscordAudioPlainToken: "static-audio-token",
-	})
+	}, "stream-01")
 
 	startReq := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-01","name":"Discord Audio Stream"}`))
 	startReq.Header.Set("Authorization", "Bearer control-token")
@@ -3268,12 +3231,15 @@ func writeNodeConfigForVerifierTest(t *testing.T, path, nodeType string) {
 
 func writeNodeConfigForVerifierTestWithValues(t *testing.T, path, nodeType, runtimeToken, signingKey string) {
 	t.Helper()
+	writeNodeListenerCredentialForVerifierTest(t, path, nodeType, "7")
 	body := `panel:
   url: "https://panel.example.jp"
 node:
   id: "encoder-recorder-01"
   name: "Encoder Recorder 01"
   type: "` + nodeType + `"
+listener:
+  credential: "node-listener.json"
 api:
   host: "encoder.example.jp"
   port: 8443
@@ -3285,6 +3251,19 @@ stream_ingest:
   signing_key: "` + signingKey + `"
 `
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeNodeListenerCredentialForVerifierTest(t *testing.T, configPath, serviceType, revision string) {
+	t.Helper()
+	credentialDir := filepath.Join(filepath.Dir(configPath), "credentials")
+	if err := os.MkdirAll(credentialDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CREDENTIALS_DIRECTORY", credentialDir)
+	body := `{"schema_version":2,"service_type":"` + serviceType + `","bind_address":"127.0.0.1:18081","config_revision":` + revision + `}`
+	if err := os.WriteFile(filepath.Join(credentialDir, "node-listener.json"), []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -3343,13 +3322,12 @@ func TestWorkerEventsEndpointWritesArchiveSidecars(t *testing.T) {
 	root := t.TempDir()
 	eventManager := workerevents.NewManager(root)
 	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	controlSum := sha256.Sum256([]byte("control-token"))
 	workerSum := sha256.Sum256([]byte("worker-token"))
-	handler := NewServerWithManagers("encoder_recorder", processManager, eventManager, TokenVerifier{SHA256Hex: hex.EncodeToString(controlSum[:]), WorkerEventsSHA256Hex: hex.EncodeToString(workerSum[:])})
+	handler := newV2TestServerWithManagers(t, processManager, eventManager, TokenVerifier{SHA256Hex: hex.EncodeToString(controlSum[:]), WorkerEventsSHA256Hex: hex.EncodeToString(workerSum[:])}, "stream-01")
 	startReq := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-01","name":"Worker Event Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2"}`))
 	startReq.Header.Set("Authorization", "Bearer control-token")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
 	startRes := httptest.NewRecorder()
 	handler.ServeHTTP(startRes, startReq)
 	if startRes.Code != http.StatusAccepted {
@@ -3389,14 +3367,13 @@ func TestWorkerEventsEndpointWritesArchiveSidecars(t *testing.T) {
 func TestWorkerEventsEndpointUsesScopedTokenWhenConfigured(t *testing.T) {
 	root := t.TempDir()
 	eventManager := workerevents.NewManager(root)
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
-	handler := NewServerWithManagers("encoder_recorder", processManager, eventManager, TokenVerifier{
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
+	handler := newV2TestServerWithManagers(t, processManager, eventManager, TokenVerifier{
 		PlainToken:             "control-token",
 		WorkerEventsPlainToken: "worker-events-token",
-	})
+	}, "stream-01")
 	startReq := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-01","name":"Worker Event Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2"}`))
 	startReq.Header.Set("Authorization", "Bearer control-token")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
 	startRes := httptest.NewRecorder()
 	handler.ServeHTTP(startRes, startReq)
 	if startRes.Code != http.StatusAccepted {
@@ -3424,16 +3401,15 @@ func TestWorkerEventsEndpointUsesScopedTokenWhenConfigured(t *testing.T) {
 func TestWorkerEventsEndpointAcceptsSignedStreamIngestToken(t *testing.T) {
 	root := t.TempDir()
 	eventManager := workerevents.NewManager(root)
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true}
+	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	signingKey := "test-stream-ingest-signing-key"
-	handler := NewServerWithManagers("encoder_recorder", processManager, eventManager, TokenVerifier{
+	handler := newV2TestServerWithManagers(t, processManager, eventManager, TokenVerifier{
 		PlainToken:             "control-token",
 		IngestTokenSigningKey:  signingKey,
 		WorkerEventsPlainToken: "static-worker-token",
-	})
+	}, "stream-01")
 	startReq := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-01","name":"Worker Event Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2"}`))
 	startReq.Header.Set("Authorization", "Bearer control-token")
-	t.Setenv("YOUTUBE_STREAM_KEY", "super-secret-stream-key")
 	startRes := httptest.NewRecorder()
 	handler.ServeHTTP(startRes, startReq)
 	if startRes.Code != http.StatusAccepted {

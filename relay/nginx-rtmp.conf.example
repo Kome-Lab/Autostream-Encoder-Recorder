@@ -15,7 +15,7 @@ rtmp {
 
       # Copy this file to relay/nginx-rtmp.conf and replace the placeholder.
       # relay/nginx-rtmp.conf is gitignored because it contains the YouTube stream key.
-      push rtmps://a.rtmps.youtube.com/live2/<YOUTUBE_STREAM_KEY>;
+      push rtmps://a.rtmps.youtube.com/live2/<UPSTREAM_STREAM_NAME>;
     }
   }
 }

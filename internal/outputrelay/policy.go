@@ -13,9 +13,8 @@ import (
 )
 
 const (
-	ModeDirect          = "direct"
-	ModeLegacyStreamKey = "legacy_stream_key"
-	ModeLiveAPIStatic   = "live_api_static"
+	ModeDirect         = "direct"
+	ModeManagedLiveAPI = "live_api_relay_static"
 
 	composeOutputRelayEnv  = "AUTOSTREAM_COMPOSE_OUTPUT_RELAY"
 	composeOutputRelayHost = "output-relay"
@@ -49,9 +48,7 @@ type Policy struct {
 	configuredMode string
 }
 
-// New interprets an unset mode as the pre-existing fixed stream-key Relay when
-// a Relay URL is present. A URL-free process is direct-output compatible when
-// a Relay is not required.
+// New requires one explicit canonical v2 output mode.
 func New(rawURL, rawMode, rawBindingID string) Policy {
 	return NewWithRequireRelay(rawURL, rawMode, rawBindingID, false)
 }
@@ -62,19 +59,11 @@ func New(rawURL, rawMode, rawBindingID string) Policy {
 func NewWithRequireRelay(rawURL, rawMode, rawBindingID string, requireRelay bool) Policy {
 	p := Policy{
 		URL:            strings.TrimSpace(rawURL),
+		Mode:           strings.ToLower(strings.TrimSpace(rawMode)),
 		BindingID:      rawBindingID,
 		RequireRelay:   requireRelay,
 		configuredMode: strings.ToLower(strings.TrimSpace(rawMode)),
 	}
-	if p.URL == "" {
-		p.Mode = ModeDirect
-		return p
-	}
-	if p.configuredMode == "" {
-		p.Mode = ModeLegacyStreamKey
-		return p
-	}
-	p.Mode = p.configuredMode
 	return p
 }
 
@@ -100,7 +89,7 @@ func RequireRelayFromEnv() bool {
 
 func (p Policy) ValidateConfiguration() error {
 	if p.URL == "" {
-		if p.configuredMode != "" && p.configuredMode != ModeDirect {
+		if p.configuredMode != ModeDirect {
 			return ErrInvalidConfiguration
 		}
 		if p.RequireRelay {
@@ -110,8 +99,7 @@ func (p Policy) ValidateConfiguration() error {
 	}
 
 	switch p.Mode {
-	case ModeLegacyStreamKey:
-	case ModeLiveAPIStatic:
+	case ModeManagedLiveAPI:
 		if p.BindingID == "" {
 			return ErrStaticBindingRequired
 		}
@@ -151,13 +139,12 @@ func (p Policy) AuthorizeYouTubeOutput(youtubeMode string, ready bool, bindingID
 
 	switch p.Mode {
 	case ModeDirect:
-		return false, nil
-	case ModeLegacyStreamKey:
-		if strings.ToLower(strings.TrimSpace(youtubeMode)) != "stream_key" {
-			return false, ErrLiveAPIRequiresManagedOutputRelay
+		mode := strings.ToLower(strings.TrimSpace(youtubeMode))
+		if mode != "stream_key" && mode != "live_api" && mode != "live_api_dry_run" {
+			return false, ErrInvalidConfiguration
 		}
-		return true, nil
-	case ModeLiveAPIStatic:
+		return false, nil
+	case ModeManagedLiveAPI:
 		if strings.ToLower(strings.TrimSpace(youtubeMode)) != "live_api_relay_static" {
 			return false, ErrLiveAPIRequiresManagedOutputRelay
 		}

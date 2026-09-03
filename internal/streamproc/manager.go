@@ -259,7 +259,7 @@ type Reporter interface {
 }
 
 type ArtifactReporter interface {
-	ReportArtifacts(ctx context.Context, streamID string, artifacts []control.Artifact, archiveRuns ...control.ArchiveRun) error
+	ReportArtifacts(ctx context.Context, streamID string, archiveRun control.ArchiveRun, artifacts []control.Artifact) error
 }
 
 type ArchivePackager interface {
@@ -1197,16 +1197,14 @@ func readCoverProgress(path string) ffmpeg.Progress {
 	return ffmpeg.ParseProgress(string(body))
 }
 
-// OutputRelayPolicy returns the non-secret routing configuration.  An unset
-// mode with a configured URL is deliberately interpreted as the legacy fixed
-// stream-key Relay so existing host/systemd environments keep working.
+// OutputRelayPolicy returns the explicit non-secret v2 routing configuration.
 func (m *Manager) OutputRelayPolicy() outputrelay.Policy {
 	return outputrelay.NewWithRequireRelay(m.OutputRelayURL, m.OutputRelayMode, m.OutputRelayBindingID, m.RequireOutputRelay)
 }
 
 // AuthorizeOutputRelay must be called before resolving a YouTube key, an input
 // target, or starting FFmpeg.  It is shared with the HTTP layer to keep the
-// direct, legacy, and static-Live-API acceptance rules identical.
+// direct and managed-Live-API acceptance rules identical.
 func (m *Manager) AuthorizeOutputRelay(job lifecycle.StreamJob) (bool, error) {
 	return m.OutputRelayPolicy().AuthorizeYouTubeOutput(job.YouTubeOutputMode, job.YouTubeOutputReady, job.OutputRelayBindingID)
 }
@@ -1783,7 +1781,7 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 				}
 				if finalMP4Exists {
 					reportCtx, cancelReport := context.WithTimeout(context.Background(), m.artifactReportTimeout())
-					reportErr := m.ArtifactReporter.ReportArtifacts(reportCtx, job.StreamID, artifacts, artifactReportArchiveRuns(job)...)
+					reportErr := m.ArtifactReporter.ReportArtifacts(reportCtx, job.StreamID, artifactReportArchiveRun(job), artifacts)
 					cancelReport()
 					if reportErr != nil {
 						m.report(observability.Signal{
@@ -1867,7 +1865,7 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 		artifacts := control.ArchiveArtifacts(result.Layout)
 		if len(artifacts) > 0 {
 			reportCtx, cancelReport := context.WithTimeout(context.Background(), m.artifactReportTimeout())
-			err := m.ArtifactReporter.ReportArtifacts(reportCtx, job.StreamID, artifacts, artifactReportArchiveRuns(job)...)
+			err := m.ArtifactReporter.ReportArtifacts(reportCtx, job.StreamID, artifactReportArchiveRun(job), artifacts)
 			cancelReport()
 			if err != nil {
 				m.report(observability.Signal{
@@ -1907,17 +1905,11 @@ func (m *Manager) packageArchive(job lifecycle.PackageJob) {
 }
 
 func archiveLayoutForPackage(root string, job lifecycle.PackageJob) (archive.Layout, error) {
-	if strings.TrimSpace(job.ArchiveRunID) == "" {
-		return archive.NewLayout(root, job.StreamID)
-	}
 	return archive.NewRunLayout(root, job.StreamID, job.ArchiveRunID)
 }
 
-func artifactReportArchiveRuns(job lifecycle.PackageJob) []control.ArchiveRun {
-	if strings.TrimSpace(job.ArchiveRunID) == "" {
-		return nil
-	}
-	return []control.ArchiveRun{{ID: job.ArchiveRunID, StartedAt: job.StartedAt}}
+func artifactReportArchiveRun(job lifecycle.PackageJob) control.ArchiveRun {
+	return control.ArchiveRun{ID: job.ArchiveRunID, StartedAt: job.StartedAt}
 }
 
 func scrubTrackedProcessJob(tracked *trackedProcess) {

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,27 +12,57 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/httpapi"
 )
 
-func TestEncoderRecorderBindAddrFromEnvPreservesLegacyFallbackPort8080(t *testing.T) {
-	t.Setenv("AUTOSTREAM_BIND_ADDR", "")
-
-	got, err := encoderRecorderBindAddrFromEnv()
-	if err != nil {
+func TestArchiveV2MigrationCommandRequiresPrepareBeforeApply(t *testing.T) {
+	root := t.TempDir()
+	backup := filepath.Join(t.TempDir(), "backup")
+	streamID := "11111111-1111-4111-8111-111111111111"
+	legacyDir := filepath.Join(root, "final", streamID)
+	if err := os.MkdirAll(legacyDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if got != "127.0.0.1:8080" {
-		t.Fatalf("default bind address = %q, want bridge-compatible 127.0.0.1:8080", got)
+	if err := os.WriteFile(filepath.Join(legacyDir, "final.mp4"), []byte("archive"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	common := []string{"--archive-root", root, "--backup-dir", backup}
+	if err := runArchiveV2Migration(append([]string{"--operation", "apply"}, common...), &output); err == nil {
+		t.Fatal("apply without immutable backup was accepted")
+	}
+	if err := runArchiveV2Migration(append([]string{"--operation", "prepare"}, common...), &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"operation":"prepare"`) || !strings.Contains(output.String(), `"backup_status":"PASS"`) {
+		t.Fatalf("prepare output = %s", output.String())
+	}
+
+	output.Reset()
+	if err := runArchiveV2Migration(append([]string{"--operation", "apply"}, common...), &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"physical_deletion":true`) {
+		t.Fatalf("apply output = %s", output.String())
+	}
+	want := filepath.Join(root, "final", streamID, "legacy-11111111111141118111111111111111", "final.mp4")
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("migrated artifact: %v", err)
 	}
 }
 
-func TestEncoderRecorderBindAddrFromEnvAcceptsConfigurableUnprivilegedPort(t *testing.T) {
+func TestEncoderRecorderBindAddrRequiresNodeConfigValue(t *testing.T) {
+	if _, err := encoderRecorderBindAddr(""); err == nil {
+		t.Fatal("missing node-config bind address was accepted")
+	}
+}
+
+func TestEncoderRecorderBindAddrAcceptsConfiguredUnprivilegedPort(t *testing.T) {
 	for _, value := range []string{
 		"127.0.0.1:1024",
 		"127.0.0.1:18081",
 		"127.0.0.1:65535",
 	} {
 		t.Run(value, func(t *testing.T) {
-			t.Setenv("AUTOSTREAM_BIND_ADDR", value)
-			got, err := encoderRecorderBindAddrFromEnv()
+			got, err := encoderRecorderBindAddr(value)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -40,10 +73,8 @@ func TestEncoderRecorderBindAddrFromEnvAcceptsConfigurableUnprivilegedPort(t *te
 	}
 }
 
-func TestEncoderRecorderBindAddrFromEnvAcceptsIPv6(t *testing.T) {
-	t.Setenv("AUTOSTREAM_BIND_ADDR", "[::1]:18081")
-
-	got, err := encoderRecorderBindAddrFromEnv()
+func TestEncoderRecorderBindAddrAcceptsIPv6(t *testing.T) {
+	got, err := encoderRecorderBindAddr("[::1]:18081")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +83,7 @@ func TestEncoderRecorderBindAddrFromEnvAcceptsIPv6(t *testing.T) {
 	}
 }
 
-func TestEncoderRecorderBindAddrFromEnvRejectsInvalidOrPrivilegedPort(t *testing.T) {
+func TestEncoderRecorderBindAddrRejectsInvalidOrPrivilegedPort(t *testing.T) {
 	for _, value := range []string{
 		"127.0.0.1",
 		"127.0.0.1:0",
@@ -61,27 +92,29 @@ func TestEncoderRecorderBindAddrFromEnvRejectsInvalidOrPrivilegedPort(t *testing
 		"127.0.0.1:not-a-port",
 	} {
 		t.Run(strings.ReplaceAll(value, ":", "_"), func(t *testing.T) {
-			t.Setenv("AUTOSTREAM_BIND_ADDR", value)
-			if _, err := encoderRecorderBindAddrFromEnv(); err == nil {
-				t.Fatalf("encoderRecorderBindAddrFromEnv() accepted %q", value)
+			if _, err := encoderRecorderBindAddr(value); err == nil {
+				t.Fatalf("encoderRecorderBindAddr() accepted %q", value)
 			}
 		})
 	}
 }
 
-func TestEncoderRecorderStartupAddrFromEnvRejectsInvalidConfigRevision(t *testing.T) {
-	t.Setenv("AUTOSTREAM_BIND_ADDR", "127.0.0.1:18081")
-	t.Setenv("AUTOSTREAM_CONFIG_REVISION", "0")
-
-	if _, err := encoderRecorderStartupAddrFromEnv(); err == nil ||
-		!strings.Contains(err.Error(), "AUTOSTREAM_CONFIG_REVISION") {
-		t.Fatalf("encoderRecorderStartupAddrFromEnv() error = %v, want invalid config revision", err)
-	}
-}
-
 func TestRequireMatchingUpdaterIdentityRejectsRegistrationIDDrift(t *testing.T) {
-	t.Setenv("AUTOSTREAM_NODE_CONFIG", "")
-	t.Setenv("SERVICE_ID", "encoder-authoritative")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	credentialDir := filepath.Join(dir, "credentials")
+	if err := os.Mkdir(credentialDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(credentialDir, "node-listener.json"), []byte(`{"schema_version":2,"service_type":"encoder_recorder","bind_address":"127.0.0.1:18081","config_revision":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	body := "panel:\n  url: https://panel.example.com\nnode:\n  id: encoder-authoritative\n  name: Encoder\n  type: encoder_recorder\nlistener:\n  credential: node-listener.json\napi:\n  host: encoder.example.com\n  port: 8443\n  ssl_enabled: true\nauth:\n  token: runtime-token\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUTOSTREAM_NODE_CONFIG", path)
+	t.Setenv("CREDENTIALS_DIRECTORY", credentialDir)
 	latch := httpapi.NewUpdaterIdentityLatch(control.ServiceType)
 
 	if err := requireMatchingUpdaterIdentity(latch, "encoder-authoritative"); err != nil {

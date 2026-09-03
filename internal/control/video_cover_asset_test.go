@@ -175,7 +175,7 @@ func TestVideoCoverCapabilityIsAdvertisedOnlyWithValidatedControlPlane(t *testin
 	if _, ok := serviceCapabilities()[videocover.Capability]; ok {
 		t.Fatal("incomplete asset delivery configuration must not advertise Video Cover")
 	}
-	t.Setenv("SERVICE_PUBLIC_URL", "http://encoder-recorder:8083")
+	t.Setenv("AUTOSTREAM_NODE_CONFIG", writeNodeConfigForTest(t, "encoder_recorder"))
 	if got := serviceCapabilities()[videocover.Capability]; got != true {
 		t.Fatalf("validated Video Cover capability=%#v", got)
 	}

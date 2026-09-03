@@ -920,13 +920,14 @@ Type=simple
 User=autostream
 Group=autostream
 EnvironmentFile=-/etc/autostream/encoder-recorder.env
+LoadCredential=node-listener.json:/opt/autostream/local-executor/ports/encoder-recorder.json
 ExecStart=/usr/local/bin/autostream-encoder-recorder
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 EOF
-printf '%s\n' 'AUTOSTREAM_BIND_ADDR=127.0.0.1:18081' \
+printf '%s\n' 'AUTOSTREAM_NODE_CONFIG=/etc/autostream-encoder-recorder/config.yml' \
   > "${EXTRACTED_ROOT}/.env.example"
 
 jq -n \

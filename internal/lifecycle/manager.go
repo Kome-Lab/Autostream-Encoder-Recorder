@@ -29,13 +29,13 @@ type Manager struct {
 
 type StreamJob struct {
 	StreamID             string                    `json:"stream_id"`
-	ArchiveRunID         string                    `json:"archive_run_id,omitempty"`
+	ArchiveRunID         string                    `json:"archive_run_id"`
 	Name                 string                    `json:"name"`
 	InputURL             string                    `json:"input_url"`
 	InputMode            string                    `json:"input_mode,omitempty"`
 	AudioInputURL        string                    `json:"-"`
 	RTMPURL              string                    `json:"rtmp_url"`
-	StreamKey            string                    `json:"stream_key,omitempty"`
+	StreamKey            string                    `json:"-"`
 	StreamKeySecretName  string                    `json:"stream_key_secret_name,omitempty"`
 	YouTubeOutputMode    string                    `json:"-"`
 	OutputRelayBindingID string                    `json:"-"`
@@ -55,7 +55,7 @@ type StreamJob struct {
 
 type PackageJob struct {
 	StreamID      string        `json:"stream_id"`
-	ArchiveRunID  string        `json:"archive_run_id,omitempty"`
+	ArchiveRunID  string        `json:"archive_run_id"`
 	Name          string        `json:"name"`
 	StartedAt     time.Time     `json:"started_at"`
 	DryRun        bool          `json:"dry_run"`
@@ -73,7 +73,6 @@ type ArchiveConfig struct {
 	ServiceAccountJSON                  string `json:"service_account_json,omitempty"`
 	ServiceAccountSecretName            string `json:"service_account_json_secret_name,omitempty"`
 	ServiceAccountCredentialsSecretName string `json:"service_account_credentials_secret_name,omitempty"`
-	BasePath                            string `json:"base_path,omitempty"`
 	SharedDrive                         bool   `json:"shared_drive,omitempty"`
 	SharedDriveID                       string `json:"shared_drive_id,omitempty"`
 	ArchiveFileName                     string `json:"archive_file_name,omitempty"`
@@ -101,10 +100,6 @@ type Result struct {
 	RemuxDurationMS float64        `json:"remux_duration_ms,omitempty"`
 	ArchiveSource   string         `json:"archive_source,omitempty"`
 	Partial         bool           `json:"partial,omitempty"`
-}
-
-func ArchiveArtifacts(streamID string) map[string]string {
-	return ArchiveArtifactsForRun(streamID, "")
 }
 
 func ArchiveArtifactsForRun(streamID, archiveRunID string) map[string]string {
@@ -190,13 +185,9 @@ func SafeErrorSummary(err error) string {
 	return phase + ":" + class
 }
 
-func (m Manager) DryRun(ctx context.Context, job StreamJob) (Result, error) {
-	return m.DryRunToOutputTarget(ctx, job, "")
-}
-
 // DryRunToOutputTarget keeps dry-run's command and metadata behavior aligned
-// with a live process that emits to a non-secret local Relay target.  An empty
-// outputTarget preserves the direct RTMPS compatibility path.
+// with a live process. The caller must choose the canonical output route and
+// provide the complete target explicitly.
 func (m Manager) DryRunToOutputTarget(ctx context.Context, job StreamJob, outputTarget string) (Result, error) {
 	if job.StreamID == "" || job.Name == "" {
 		return Result{}, errors.New("stream id and name are required")
@@ -219,11 +210,9 @@ func (m Manager) DryRunToOutputTarget(ctx context.Context, job StreamJob, output
 	}
 	outputTarget = strings.TrimSpace(outputTarget)
 	if outputTarget == "" {
-		if err := ffmpeg.ValidateOutputTarget(job.RTMPURL, job.StreamKey); err != nil {
-			return Result{}, err
-		}
-		outputTarget = job.RTMPURL + "/" + job.StreamKey
-	} else if err := ffmpeg.ValidateRelayOutputTarget(outputTarget); err != nil {
+		return Result{}, errors.New("explicit output target is required")
+	}
+	if err := validateExplicitOutputTarget(job, outputTarget); err != nil {
 		return Result{}, err
 	}
 	runner := m.Runner
@@ -281,9 +270,7 @@ func (m Manager) DryRunToOutputTarget(ctx context.Context, job StreamJob, output
 	extra := metadataExtra(true, remuxDurationMS, job.ArchiveConfig)
 	extra["archive_source"] = "final_mkv"
 	extra["archive_partial"] = false
-	if job.ArchiveRunID != "" {
-		extra["archive_run_id"] = job.ArchiveRunID
-	}
+	extra["archive_run_id"] = job.ArchiveRunID
 	metadata := Metadata{
 		StreamID: job.StreamID, Name: job.Name, StartedAtJST: startedAt.In(jst).Format(time.RFC3339),
 		Archive: ArchiveArtifactsForRun(job.StreamID, job.ArchiveRunID),
@@ -311,8 +298,8 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 	if job.StreamID == "" || job.Name == "" {
 		return Result{}, errors.New("stream id and name are required")
 	}
-	if job.ArchiveRunID != "" && job.StartedAt.IsZero() {
-		return Result{}, errors.New("archive run started_at is required when archive_run_id is set")
+	if strings.TrimSpace(job.ArchiveRunID) == "" || job.StartedAt.IsZero() {
+		return Result{}, errors.New("archive_run_id and started_at are required")
 	}
 	layout, err := archiveLayout(m.ArchiveRoot, job.StreamID, job.ArchiveRunID)
 	if err != nil {
@@ -402,9 +389,7 @@ func (m Manager) Package(ctx context.Context, job PackageJob) (Result, error) {
 	extra := metadataExtra(job.DryRun, remuxDurationMS, job.ArchiveConfig)
 	extra["archive_source"] = archiveSource
 	extra["archive_partial"] = archivePartial
-	if job.ArchiveRunID != "" {
-		extra["archive_run_id"] = job.ArchiveRunID
-	}
+	extra["archive_run_id"] = job.ArchiveRunID
 	metadata := Metadata{
 		StreamID: job.StreamID, Name: job.Name, StartedAtJST: startedAt.In(jst).Format(time.RFC3339),
 		Archive: ArchiveArtifactsForRun(job.StreamID, job.ArchiveRunID),
@@ -463,14 +448,9 @@ func (m Manager) uploaderForJob(job PackageJob) archive.ArchiveUploader {
 }
 
 func googleDriveConfigFromArchiveConfig(cfg ArchiveConfig) archive.GoogleDriveConfig {
-	basePath := cfg.BasePath
-	if strings.TrimSpace(basePath) == "" {
-		basePath = "AutoStream"
-	}
 	return archive.GoogleDriveConfig{
 		AuthMode:      cfg.AuthMode,
 		FolderID:      cfg.FolderID,
-		BasePath:      basePath,
 		SharedDrive:   cfg.SharedDrive,
 		SharedDriveID: cfg.SharedDriveID,
 		ClientID:      cfg.ClientID,
@@ -504,9 +484,6 @@ func archiveConfigMetadata(cfg ArchiveConfig) map[string]any {
 	if cfg.OAuthProviderID != "" {
 		out["oauth_provider_id"] = cfg.OAuthProviderID
 	}
-	if cfg.BasePath != "" {
-		out["base_path"] = cfg.BasePath
-	}
 	if cfg.SharedDrive {
 		out["shared_drive"] = true
 	}
@@ -534,8 +511,12 @@ func archiveConfigMetadata(cfg ArchiveConfig) map[string]any {
 	return out
 }
 
-func BuildLiveArgs(job StreamJob, archivePath, progressPath, audioStatsPath string, profile ffmpeg.EncoderProfile) []string {
-	return BuildLiveArgsToOutputTarget(job, job.RTMPURL+"/"+job.StreamKey, archivePath, progressPath, audioStatsPath, profile)
+func validateExplicitOutputTarget(job StreamJob, outputTarget string) error {
+	directTarget := strings.TrimRight(strings.TrimSpace(job.RTMPURL), "/") + "/" + strings.TrimLeft(job.StreamKey, "/")
+	if strings.TrimSpace(job.RTMPURL) != "" && strings.TrimSpace(job.StreamKey) != "" && outputTarget == directTarget {
+		return ffmpeg.ValidateOutputTarget(job.RTMPURL, job.StreamKey)
+	}
+	return ffmpeg.ValidateRelayOutputTarget(outputTarget)
 }
 
 func BuildLiveArgsToOutputTarget(job StreamJob, outputTarget, archivePath, progressPath, audioStatsPath string, profile ffmpeg.EncoderProfile) []string {
@@ -704,12 +685,10 @@ func cleanupExpiredLocalArchives(rootDir, currentStreamID, currentArchiveRunID s
 		if err != nil {
 			return err
 		}
-		hasRunDirectories := false
 		for _, runEntry := range runEntries {
 			if !runEntry.IsDir() {
 				continue
 			}
-			hasRunDirectories = true
 			if runEntry.Type()&os.ModeSymlink != 0 {
 				return errors.New("archive run directory must not be a symlink")
 			}
@@ -735,18 +714,9 @@ func cleanupExpiredLocalArchives(rootDir, currentStreamID, currentArchiveRunID s
 				}
 			}
 		}
-		if hasRunDirectories || streamID == currentStreamID {
-			continue
-		}
-		modifiedAt, err := archiveFinalDirLastModified(finalDir)
-		if err != nil {
-			return err
-		}
-		if modifiedAt.Before(cutoff) {
-			if err := os.RemoveAll(finalDir); err != nil {
-				return err
-			}
-		}
+		// Runless final/<stream_id> files predate archive_run_id. They are
+		// retained as migrated historical data and are no longer owned by the
+		// runtime retention path. Only explicit run directories are eligible.
 	}
 	return nil
 }

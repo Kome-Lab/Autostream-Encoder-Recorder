@@ -93,16 +93,13 @@ func TestServiceCapabilitiesAdvertiseNonSecretOutputRelayMode(t *testing.T) {
 	if capabilities["archive_runs"] != true {
 		t.Fatalf("archive run capability=%#v, want true", capabilities)
 	}
-	if got := capabilities["output_relay_mode"]; got != "legacy_stream_key" {
-		t.Fatalf("legacy output relay capability=%#v", capabilities)
-	}
-	if _, ok := capabilities["output_relay_binding_id"]; ok {
-		t.Fatalf("legacy output relay must not advertise a static binding: %#v", capabilities)
+	if _, ok := capabilities["output_relay_mode"]; ok {
+		t.Fatalf("missing v2 output mode must not be advertised: %#v", capabilities)
 	}
 
-	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "live_api_static")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "live_api_relay_static")
 	capabilities = serviceCapabilities()
-	if got := capabilities["output_relay_mode"]; got != "live_api_static" {
+	if got := capabilities["output_relay_mode"]; got != "live_api_relay_static" {
 		t.Fatalf("static output relay capability=%#v", capabilities)
 	}
 	if got := capabilities["output_relay_binding_id"]; got != testStaticRelayBindingID {
@@ -156,12 +153,17 @@ func TestServiceCapabilitiesAdvertiseNonSecretOutputRelayMode(t *testing.T) {
 		t.Fatalf("compose relay without explicit identity must omit output mode: %#v", serviceCapabilities())
 	}
 	t.Setenv("AUTOSTREAM_COMPOSE_OUTPUT_RELAY", "1")
-	if got := serviceCapabilities()["output_relay_mode"]; got != "legacy_stream_key" {
+	if _, ok := serviceCapabilities()["output_relay_mode"]; ok {
+		t.Fatalf("Compose identity must not restore an omitted output mode: %#v", serviceCapabilities())
+	}
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "live_api_relay_static")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", testStaticRelayBindingID)
+	if got := serviceCapabilities()["output_relay_mode"]; got != "live_api_relay_static" {
 		t.Fatalf("explicit Compose relay capability=%#v", serviceCapabilities())
 	}
 
 	t.Setenv("AUTOSTREAM_COMPOSE_OUTPUT_RELAY", "")
-	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "live_api_static")
+	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "live_api_relay_static")
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", "relay-binding-static")
 	if _, ok := serviceCapabilities()["output_relay_mode"]; ok {
 		t.Fatalf("invalid static binding must omit output mode: %#v", serviceCapabilities())
@@ -210,7 +212,7 @@ func TestReportArtifactsPostsLogicalPathsOnly(t *testing.T) {
 
 	client := Client{Config: Config{ControlPanelURL: server.URL, Token: "secret-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: "https://encoder.example.com"}}
 	artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
-	if err := client.ReportArtifacts(t.Context(), "stream-01", artifacts); err != nil {
+	if err := client.ReportArtifacts(t.Context(), "stream-01", testArchiveRun(), artifacts); err != nil {
 		t.Fatal(err)
 	}
 	if got.ServiceID != "enc-01" || got.StreamID != "stream-01" || len(got.Artifacts) != 1 {
@@ -240,10 +242,10 @@ func TestReportArtifactsIncludesArchiveRunMetadata(t *testing.T) {
 		ServicePublicURL: "https://encoder.example.com",
 	}}
 	artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/run-01/final.mp4", SizeBytes: 123}}
-	if err := client.ReportArtifacts(t.Context(), "stream-01", artifacts, ArchiveRun{ID: "run-01", StartedAt: startedAt}); err != nil {
+	if err := client.ReportArtifacts(t.Context(), "stream-01", ArchiveRun{ID: "run-01", StartedAt: startedAt}, artifacts); err != nil {
 		t.Fatal(err)
 	}
-	if got.ArchiveRunID != "run-01" || got.ArchiveStartedAt == nil || !got.ArchiveStartedAt.Equal(startedAt) {
+	if got.ArchiveRunID != "run-01" || !got.ArchiveStartedAt.Equal(startedAt) {
 		t.Fatalf("archive run report = %#v", got)
 	}
 }
@@ -269,7 +271,7 @@ func TestReportArtifactsRetriesTransientHTTPFailure(t *testing.T) {
 
 			client := Client{Config: Config{ControlPanelURL: server.URL, Token: "secret-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: server.URL}}
 			artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
-			if err := client.ReportArtifacts(t.Context(), "stream-01", artifacts); err != nil {
+			if err := client.ReportArtifacts(t.Context(), "stream-01", testArchiveRun(), artifacts); err != nil {
 				t.Fatalf("ReportArtifacts() error = %v", err)
 			}
 			if calls != 2 {
@@ -297,7 +299,7 @@ func TestReportArtifactsRetriesTransportFailure(t *testing.T) {
 		})},
 	}
 	artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
-	if err := client.ReportArtifacts(t.Context(), "stream-01", artifacts); err != nil {
+	if err := client.ReportArtifacts(t.Context(), "stream-01", testArchiveRun(), artifacts); err != nil {
 		t.Fatalf("ReportArtifacts() error = %v", err)
 	}
 	if calls != 2 {
@@ -317,7 +319,7 @@ func TestReportArtifactsDoesNotRetryPermanentHTTPFailure(t *testing.T) {
 
 			client := Client{Config: Config{ControlPanelURL: server.URL, Token: "secret-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: server.URL}}
 			artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
-			err := client.ReportArtifacts(t.Context(), "stream-01", artifacts)
+			err := client.ReportArtifacts(t.Context(), "stream-01", testArchiveRun(), artifacts)
 			var panelErr ControlPanelError
 			if !errors.As(err, &panelErr) || panelErr.StatusCode != statusCode {
 				t.Fatalf("ReportArtifacts() error = %v, want HTTP %d ControlPanelError", err, statusCode)
@@ -339,7 +341,7 @@ func TestReportArtifactsBoundsTransientRetries(t *testing.T) {
 
 	client := Client{Config: Config{ControlPanelURL: server.URL, Token: "secret-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: server.URL}}
 	artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
-	err := client.ReportArtifacts(t.Context(), "stream-01", artifacts)
+	err := client.ReportArtifacts(t.Context(), "stream-01", testArchiveRun(), artifacts)
 	var panelErr ControlPanelError
 	if !errors.As(err, &panelErr) || panelErr.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("ReportArtifacts() error = %v, want HTTP 503 ControlPanelError", err)
@@ -361,7 +363,7 @@ func TestReportArtifactsStopsRetryWhenContextCanceled(t *testing.T) {
 
 	client := Client{Config: Config{ControlPanelURL: server.URL, Token: "secret-token", ServiceID: "enc-01", ServiceName: "Encoder 01", ServicePublicURL: server.URL}}
 	artifacts := []Artifact{{Kind: "archive", Name: "final.mp4", RelativePath: "final/stream-01/final.mp4", SizeBytes: 123}}
-	if err := client.ReportArtifacts(ctx, "stream-01", artifacts); !errors.Is(err, context.Canceled) {
+	if err := client.ReportArtifacts(ctx, "stream-01", testArchiveRun(), artifacts); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ReportArtifacts() error = %v, want context canceled", err)
 	}
 	if calls != 1 {
@@ -370,6 +372,10 @@ func TestReportArtifactsStopsRetryWhenContextCanceled(t *testing.T) {
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func testArchiveRun() ArchiveRun {
+	return ArchiveRun{ID: "run-01", StartedAt: time.Date(2026, 8, 18, 5, 6, 29, 0, time.UTC)}
+}
 
 func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
@@ -672,7 +678,7 @@ func TestValidateRejectsRemoteHTTPControlPanelURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	if !strings.Contains(err.Error(), "CONTROL_PANEL_URL") || !strings.Contains(err.Error(), "https") {
+	if !strings.Contains(err.Error(), "node config panel URL") || !strings.Contains(err.Error(), "https") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -692,7 +698,7 @@ func TestValidateRejectsNonHTTPServicePublicURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	if !strings.Contains(err.Error(), "SERVICE_PUBLIC_URL") || !strings.Contains(err.Error(), "http or https") {
+	if !strings.Contains(err.Error(), "node config public URL") || !strings.Contains(err.Error(), "http or https") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -703,7 +709,7 @@ func TestValidateRejectsRemoteHTTPServicePublicURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	if !strings.Contains(err.Error(), "SERVICE_PUBLIC_URL") || !strings.Contains(err.Error(), "https") {
+	if !strings.Contains(err.Error(), "node config public URL") || !strings.Contains(err.Error(), "https") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -723,8 +729,8 @@ func TestValidateDoesNotAllowComposeServiceNameForControlPanelHTTP(t *testing.T)
 		ServiceName:      "Encoder 01",
 		ServicePublicURL: "http://encoder-recorder:8080",
 	}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "CONTROL_PANEL_URL") {
-		t.Fatalf("expected compose service exception to be limited to SERVICE_PUBLIC_URL, got %v", err)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "node config panel URL") {
+		t.Fatalf("expected compose service exception to be limited to node config public URL, got %v", err)
 	}
 }
 
@@ -740,11 +746,10 @@ func TestValidateRejectsControlPanelURLQueryOrFragment(t *testing.T) {
 }
 
 func TestConfigFromEnv(t *testing.T) {
-	t.Setenv("CONTROL_PANEL_URL", "https://control.example.com")
-	t.Setenv("CONTROL_PANEL_TOKEN", "<SERVICE_TOKEN>")
-	t.Setenv("SERVICE_ID", "enc-01")
-	t.Setenv("SERVICE_NAME", "Encoder 01")
-	t.Setenv("SERVICE_PUBLIC_URL", "https://encoder.example.com")
+	t.Setenv("AUTOSTREAM_NODE_CONFIG", writeNodeConfigForTest(t, "encoder_recorder"))
+	t.Setenv("CONTROL_PANEL_URL", "https://ignored.example.com")
+	t.Setenv("CONTROL_PANEL_TOKEN", "ignored-token")
+	t.Setenv("SERVICE_ID", "ignored-encoder")
 	t.Setenv("SERVICE_VERSION", "0.1.0")
 	t.Setenv("CONTROL_PANEL_HEARTBEAT_INTERVAL_SEC", "5")
 
@@ -752,7 +757,7 @@ func TestConfigFromEnv(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HeartbeatEvery != 5*time.Second || cfg.ServicePublicURL == "" {
+	if cfg.HeartbeatEvery != 5*time.Second || cfg.ServiceID != "encoder-01" || cfg.ControlPanelURL != "https://panel.example.jp" || cfg.ServicePublicURL != "https://encoder.example.jp:8443" || cfg.BindAddress != "127.0.0.1:18081" || cfg.ConfigRevision != 27 {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 }

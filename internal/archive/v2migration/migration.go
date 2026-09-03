@@ -96,12 +96,10 @@ func BuildPlan(root string, expectedNonEmpty bool) (Plan, error) {
 			continue
 		}
 		sort.Slice(legacy, func(i, j int) bool { return legacy[i].SourceRelative < legacy[j].SourceRelative })
-		runHasher := sha256.New()
-		_, _ = io.WriteString(runHasher, stream.Name()+"\n")
-		for _, entry := range legacy {
-			_, _ = io.WriteString(runHasher, filepath.Base(entry.SourceRelative)+"\x00"+entry.SHA256+"\n")
+		runID, err := legacyArchiveRunID(stream.Name())
+		if err != nil {
+			return Plan{}, err
 		}
-		runID := "legacy-" + hex.EncodeToString(runHasher.Sum(nil))[:16]
 		destinationDir := filepath.Join(streamDir, runID)
 		destinationDirectoryExisted := false
 		if info, statErr := os.Lstat(destinationDir); statErr == nil {
@@ -125,6 +123,54 @@ func BuildPlan(root string, expectedNonEmpty bool) (Plan, error) {
 		return Plan{}, ErrEmptyDenominator
 	}
 	return newPlan(entries), nil
+}
+
+// LoadBackup returns the immutable migration plan and revalidates every backup
+// object. Apply, verify, and restore therefore cannot synthesize a new plan
+// after the legacy source paths have moved.
+func LoadBackup(backupDir string) (Plan, Artifact, error) {
+	backupAbs, err := filepath.Abs(backupDir)
+	if err != nil {
+		return Plan{}, Artifact{}, err
+	}
+	body, err := os.ReadFile(filepath.Join(backupAbs, manifestName))
+	if err != nil {
+		return Plan{}, Artifact{}, err
+	}
+	var plan Plan
+	if err := json.Unmarshal(body, &plan); err != nil {
+		return Plan{}, Artifact{}, err
+	}
+	if err := validatePlan(plan); err != nil {
+		return Plan{}, Artifact{}, err
+	}
+	artifact, err := validateExistingBackup(backupAbs, plan)
+	if err != nil {
+		return Plan{}, Artifact{}, err
+	}
+	return plan, artifact, nil
+}
+
+// legacyArchiveRunID is shared by contract with Control Panel migration 081.
+// Archive stream directories are canonical UUIDs, so the resulting identity is
+// independent of file order/content and cannot diverge from retained metadata.
+func legacyArchiveRunID(streamID string) (string, error) {
+	streamID = strings.ToLower(strings.TrimSpace(streamID))
+	if len(streamID) != 36 {
+		return "", fmt.Errorf("legacy archive stream directory is not a canonical UUID: %q", streamID)
+	}
+	for index, value := range streamID {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if value != '-' {
+				return "", fmt.Errorf("legacy archive stream directory is not a canonical UUID: %q", streamID)
+			}
+			continue
+		}
+		if !((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')) {
+			return "", fmt.Errorf("legacy archive stream directory is not a canonical UUID: %q", streamID)
+		}
+	}
+	return "legacy-" + strings.ReplaceAll(streamID, "-", ""), nil
 }
 
 func newPlan(entries []Entry) Plan {
@@ -263,6 +309,7 @@ func apply(root string, plan Plan, artifact Artifact, afterMove func(int) error)
 		_ = rollback()
 		return Result{}, err
 	}
+	result.PhysicalDeletion = true
 	result.Rollback = "PASS"
 	return result, nil
 }

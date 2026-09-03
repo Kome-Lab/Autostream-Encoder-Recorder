@@ -18,22 +18,24 @@ func TestPolicyConfigurationAndCanonicalCapabilityModes(t *testing.T) {
 		wantAdvertised bool
 		wantErr        error
 	}{
-		{name: "url absent is direct", wantMode: ModeDirect, wantCapability: ModeDirect, wantAdvertised: true},
-		{name: "relay required without URL is not direct", requireRelay: true, wantMode: ModeDirect, wantErr: ErrRelayRequired},
-		{name: "url only preserves legacy stream key relay", url: "rtmp://127.0.0.1/autostream/{stream_id}", wantMode: ModeLegacyStreamKey, wantCapability: ModeLegacyStreamKey, wantAdvertised: true},
-		{name: "legacy may be explicit", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeLegacyStreamKey, wantMode: ModeLegacyStreamKey, wantCapability: ModeLegacyStreamKey, wantAdvertised: true},
-		{name: "static requires binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeLiveAPIStatic, wantMode: ModeLiveAPIStatic, wantErr: ErrStaticBindingRequired},
-		{name: "static rejects generic binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeLiveAPIStatic, binding: "relay-binding-static", wantMode: ModeLiveAPIStatic, wantErr: ErrInvalidRelayBindingID},
-		{name: "static rejects a raw stream key as binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeLiveAPIStatic, binding: "youtube-stream-key-secret", wantMode: ModeLiveAPIStatic, wantErr: ErrInvalidRelayBindingID},
-		{name: "static rejects uppercase UUID binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeLiveAPIStatic, binding: "relay-AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", wantMode: ModeLiveAPIStatic, wantErr: ErrInvalidRelayBindingID},
-		{name: "static rejects surrounding binding whitespace", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeLiveAPIStatic, binding: " relay-11111111-1111-1111-1111-111111111111", wantMode: ModeLiveAPIStatic, wantErr: ErrInvalidRelayBindingID},
-		{name: "static has canonical capability", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeLiveAPIStatic, binding: "relay-11111111-1111-1111-1111-111111111111", wantMode: ModeLiveAPIStatic, wantCapability: ModeLiveAPIStatic, wantAdvertised: true},
-		{name: "non-loopback relay is not advertised", url: "rtmp://relay.example.com/autostream/{stream_id}", wantMode: ModeLegacyStreamKey, wantErr: ErrUnsafeRelayTarget},
-		{name: "compose relay without explicit identity is not advertised", url: "rtmp://output-relay:1935/autostream/{stream_id}", wantMode: ModeLegacyStreamKey, wantErr: ErrUnsafeRelayTarget},
-		{name: "compose relay with explicit identity is advertised", url: "rtmp://output-relay:1935/autostream/{stream_id}", composeRelay: true, wantMode: ModeLegacyStreamKey, wantCapability: ModeLegacyStreamKey, wantAdvertised: true},
+		{name: "explicit direct", mode: ModeDirect, wantMode: ModeDirect, wantCapability: ModeDirect, wantAdvertised: true},
+		{name: "missing mode is invalid", wantErr: ErrInvalidConfiguration},
+		{name: "relay required without URL", mode: ModeDirect, requireRelay: true, wantMode: ModeDirect, wantErr: ErrRelayRequired},
+		{name: "URL without mode is invalid", url: "rtmp://127.0.0.1/autostream/{stream_id}", wantErr: ErrInvalidConfiguration},
+		{name: "removed legacy alias is invalid", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "legacy_stream_key", wantMode: "legacy_stream_key", wantErr: ErrInvalidConfiguration},
+		{name: "removed static alias is invalid", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "live_api_static", wantMode: "live_api_static", wantErr: ErrInvalidConfiguration},
+		{name: "static requires binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeManagedLiveAPI, wantMode: ModeManagedLiveAPI, wantErr: ErrStaticBindingRequired},
+		{name: "static rejects generic binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeManagedLiveAPI, binding: "relay-binding-static", wantMode: ModeManagedLiveAPI, wantErr: ErrInvalidRelayBindingID},
+		{name: "static rejects a raw stream key as binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeManagedLiveAPI, binding: "youtube-stream-key-secret", wantMode: ModeManagedLiveAPI, wantErr: ErrInvalidRelayBindingID},
+		{name: "static rejects uppercase UUID binding", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeManagedLiveAPI, binding: "relay-AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", wantMode: ModeManagedLiveAPI, wantErr: ErrInvalidRelayBindingID},
+		{name: "static rejects surrounding binding whitespace", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeManagedLiveAPI, binding: " relay-11111111-1111-1111-1111-111111111111", wantMode: ModeManagedLiveAPI, wantErr: ErrInvalidRelayBindingID},
+		{name: "static has canonical capability", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeManagedLiveAPI, binding: "relay-11111111-1111-1111-1111-111111111111", wantMode: ModeManagedLiveAPI, wantCapability: ModeManagedLiveAPI, wantAdvertised: true},
+		{name: "non-loopback relay is not advertised", url: "rtmp://relay.example.com/autostream/{stream_id}", mode: ModeManagedLiveAPI, binding: "relay-11111111-1111-1111-1111-111111111111", wantMode: ModeManagedLiveAPI, wantErr: ErrUnsafeRelayTarget},
+		{name: "compose relay without explicit identity is not advertised", url: "rtmp://output-relay:1935/autostream/{stream_id}", mode: ModeManagedLiveAPI, binding: "relay-11111111-1111-1111-1111-111111111111", wantMode: ModeManagedLiveAPI, wantErr: ErrUnsafeRelayTarget},
+		{name: "compose managed relay is advertised", url: "rtmp://output-relay:1935/autostream/{stream_id}", mode: ModeManagedLiveAPI, binding: "relay-11111111-1111-1111-1111-111111111111", composeRelay: true, wantMode: ModeManagedLiveAPI, wantCapability: ModeManagedLiveAPI, wantAdvertised: true},
 		{name: "url and direct mode conflict", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: ModeDirect, wantMode: ModeDirect, wantErr: ErrInvalidConfiguration},
 		{name: "unknown mode is not advertised", url: "rtmp://127.0.0.1/autostream/{stream_id}", mode: "managed", wantMode: "managed", wantErr: ErrInvalidConfiguration},
-		{name: "url-free static is invalid", mode: ModeLiveAPIStatic, wantMode: ModeDirect, wantErr: ErrInvalidConfiguration},
+		{name: "url-free managed relay is invalid", mode: ModeManagedLiveAPI, wantMode: ModeManagedLiveAPI, wantErr: ErrInvalidConfiguration},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.composeRelay {
@@ -56,21 +58,9 @@ func TestPolicyConfigurationAndCanonicalCapabilityModes(t *testing.T) {
 }
 
 func TestPolicyAuthorizesOnlySupportedOutputBeforeSecretResolution(t *testing.T) {
-	legacy := New("rtmp://127.0.0.1/autostream/{stream_id}", "", "stale-binding")
-	usesLocalRelay, err := legacy.AuthorizeYouTubeOutput("stream_key", true, "")
-	if err != nil || !usesLocalRelay {
-		t.Fatalf("legacy stream_key authorization local=%t err=%v", usesLocalRelay, err)
-	}
-	for _, mode := range []string{"live_api", "live_api_dry_run", "", "live_api_relay_static"} {
-		usesLocalRelay, err = legacy.AuthorizeYouTubeOutput(mode, true, "relay-binding-static")
-		if !errors.Is(err, ErrLiveAPIRequiresManagedOutputRelay) || usesLocalRelay {
-			t.Fatalf("legacy mode %q local=%t err=%v", mode, usesLocalRelay, err)
-		}
-	}
-
 	staticBinding := "relay-11111111-1111-1111-1111-111111111111"
-	static := New("rtmp://127.0.0.1/autostream/{stream_id}", ModeLiveAPIStatic, staticBinding)
-	usesLocalRelay, err = static.AuthorizeYouTubeOutput("live_api_relay_static", true, staticBinding)
+	static := New("rtmp://127.0.0.1/autostream/{stream_id}", ModeManagedLiveAPI, staticBinding)
+	usesLocalRelay, err := static.AuthorizeYouTubeOutput("live_api_relay_static", true, staticBinding)
 	if err != nil || !usesLocalRelay {
 		t.Fatalf("static authorization local=%t err=%v", usesLocalRelay, err)
 	}
@@ -87,10 +77,15 @@ func TestPolicyAuthorizesOnlySupportedOutputBeforeSecretResolution(t *testing.T)
 		t.Fatalf("static stream-key error=%v", err)
 	}
 
-	direct := New("", "", "stale-binding")
-	usesLocalRelay, err = direct.AuthorizeYouTubeOutput("live_api", false, "")
-	if err != nil || usesLocalRelay {
-		t.Fatalf("direct authorization local=%t err=%v", usesLocalRelay, err)
+	direct := New("", ModeDirect, "")
+	for _, mode := range []string{"stream_key", "live_api", "live_api_dry_run"} {
+		usesLocalRelay, err = direct.AuthorizeYouTubeOutput(mode, false, "")
+		if err != nil || usesLocalRelay {
+			t.Fatalf("direct mode %q authorization local=%t err=%v", mode, usesLocalRelay, err)
+		}
+	}
+	if _, err := direct.AuthorizeYouTubeOutput("", false, ""); !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("missing YouTube mode error=%v", err)
 	}
 }
 

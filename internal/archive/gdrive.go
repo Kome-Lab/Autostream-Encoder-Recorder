@@ -21,7 +21,6 @@ type GoogleDriveConfig struct {
 	ApplicationCredential string
 	ServiceAccountJSON    string
 	FolderID              string
-	BasePath              string
 	SharedDrive           bool
 	SharedDriveID         string
 	ClientID              string
@@ -49,7 +48,6 @@ func (c GoogleDriveConfig) GoString() string {
 func (c GoogleDriveConfig) SafeSummary() map[string]any {
 	out := map[string]any{
 		"auth_mode":    c.AuthMode,
-		"base_path":    c.BasePath,
 		"shared_drive": c.SharedDrive,
 		"dry_run":      c.DryRun,
 	}
@@ -77,7 +75,6 @@ func (c GoogleDriveConfig) SafeSummary() map[string]any {
 
 func GoogleDriveConfigFromEnv() GoogleDriveConfig {
 	return GoogleDriveConfig{
-		BasePath:    "",
 		SharedDrive: envBool("GOOGLE_DRIVE_SHARED_DRIVE", false),
 	}
 }

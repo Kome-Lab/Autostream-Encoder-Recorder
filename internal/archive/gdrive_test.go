@@ -19,21 +19,21 @@ import (
 )
 
 func TestGoogleDriveConfigValidate(t *testing.T) {
-	cfg := GoogleDriveConfig{AuthMode: "oauth2", ClientID: "client-id", ClientSecret: "client-secret", RefreshToken: "refresh-token", FolderID: "folder", BasePath: "AutoStream"}
+	cfg := GoogleDriveConfig{AuthMode: "oauth2", ClientID: "client-id", ClientSecret: "client-secret", RefreshToken: "refresh-token", FolderID: "folder"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestGoogleDriveConfigValidateRejectsServiceAccountJSON(t *testing.T) {
-	cfg := GoogleDriveConfig{AuthMode: "service_account", ServiceAccountJSON: `{"type":"service_account","client_email":"svc@example.com","private_key":"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"}`, FolderID: "folder", BasePath: "AutoStream"}
+	cfg := GoogleDriveConfig{AuthMode: "service_account", ServiceAccountJSON: `{"type":"service_account","client_email":"svc@example.com","private_key":"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"}`, FolderID: "folder"}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected service account JSON to be rejected")
 	}
 }
 
 func TestGoogleDriveConfigRejectsServiceAccountMode(t *testing.T) {
-	cfg := GoogleDriveConfig{AuthMode: "service_account", FolderID: "folder", BasePath: "AutoStream"}
+	cfg := GoogleDriveConfig{AuthMode: "service_account", FolderID: "folder"}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected service account mode to fail")
 	}
@@ -46,7 +46,6 @@ func TestGoogleDriveConfigAllowsOAuth2(t *testing.T) {
 		ClientSecret: "google-client-secret",
 		RefreshToken: "google-refresh-token",
 		FolderID:     "folder",
-		BasePath:     "AutoStream",
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -54,7 +53,7 @@ func TestGoogleDriveConfigAllowsOAuth2(t *testing.T) {
 }
 
 func TestGoogleDriveConfigRejectsIncompleteOAuth2(t *testing.T) {
-	cfg := GoogleDriveConfig{AuthMode: "oauth2", ClientID: "google-client-id", FolderID: "folder", BasePath: "AutoStream"}
+	cfg := GoogleDriveConfig{AuthMode: "oauth2", ClientID: "google-client-id", FolderID: "folder"}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected incomplete oauth2 config to fail")
 	}
@@ -75,7 +74,6 @@ func TestGoogleDriveConfigStringRedactsSecrets(t *testing.T) {
 		ApplicationCredential: "/etc/autostream/raw-google-credential.json",
 		ServiceAccountJSON:    `{"type":"service_account","private_key":"raw-private-key"}`,
 		FolderID:              "raw-shared-drive-folder-id",
-		BasePath:              "AutoStream",
 		SharedDrive:           true,
 		ClientID:              "raw-google-client-id",
 		ClientSecret:          "raw-google-client-secret",
@@ -109,7 +107,7 @@ func TestGoogleDriveConfigStringRedactsSecrets(t *testing.T) {
 }
 
 func TestGoogleDriveUploaderSkeleton(t *testing.T) {
-	uploader := GoogleDriveAPIUploader{Config: GoogleDriveConfig{AuthMode: "service_account", ApplicationCredential: "/etc/autostream/google.json", FolderID: "folder", BasePath: "AutoStream", DryRun: true}}
+	uploader := GoogleDriveAPIUploader{Config: GoogleDriveConfig{AuthMode: "service_account", ApplicationCredential: "/etc/autostream/google.json", FolderID: "folder", DryRun: true}}
 	result, err := uploader.Upload(context.Background(), "stream", "s1", time.Now(), []File{{LocalPath: "final.mp4", DrivePath: "final.mp4"}})
 	if err != nil {
 		t.Fatal(err)
@@ -209,7 +207,7 @@ func TestEnsureArchiveFolderUsesSelectedFolderAsRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	uploader := GoogleDriveAPIUploader{Config: GoogleDriveConfig{
-		FolderID: "selected-folder", BasePath: "AutoStream/legacy",
+		FolderID: "selected-folder",
 	}}
 	started := time.Date(2026, 8, 12, 22, 9, 10, 0, time.FixedZone("JST", 9*60*60))
 	folderID, err := uploader.ensureArchiveFolder(context.Background(), svc, "Dev", "stream-uuid", started)
@@ -344,7 +342,6 @@ func TestOAuthDriveUploadRefreshesTokenAndUsesBearer(t *testing.T) {
 		ClientSecret: "google-client-secret",
 		RefreshToken: "google-refresh-token",
 		FolderID:     "folder",
-		BasePath:     "AutoStream",
 	}}
 	svc, err := uploader.driveServiceWithOptions(context.Background(), oauth2Endpoint(tokenServer.URL), option.WithEndpoint(driveServer.URL+"/"))
 	if err != nil {

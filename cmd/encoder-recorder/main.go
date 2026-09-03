@@ -33,8 +33,16 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "archive-v2-migrate" {
+		if err := runArchiveV2Migration(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "archive v2 migration failed: %v\n", err)
+			os.Exit(2)
+		}
+		return
+	}
 
-	addr, err := encoderRecorderStartupAddrFromEnv()
+	controlConfig := control.ConfigFromEnv()
+	addr, err := encoderRecorderStartupAddr(controlConfig.BindAddress)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -47,7 +55,7 @@ func main() {
 	defer stop()
 
 	processManager := streamproc.NewManagerFromEnv()
-	controlClient := control.Client{Config: control.ConfigFromEnv()}
+	controlClient := control.Client{Config: controlConfig}
 	if err := requireMatchingUpdaterIdentity(updaterIdentity, controlClient.Config.ServiceID); err != nil && !errors.Is(err, httpapi.ErrUpdaterIdentityPending) {
 		log.Fatalf("invalid updater identity: %v", err)
 	}
@@ -83,7 +91,7 @@ func main() {
 		if strings.TrimSpace(controlClient.Config.ConfigError) != "" {
 			log.Fatalf("node config invalid: %v", controlClient.Config.ConfigError)
 		} else {
-			log.Fatal("CONTROL_PANEL_URL and CONTROL_PANEL_TOKEN are required in this environment")
+			log.Fatal("canonical node config and runtime token are required in this environment")
 		}
 	}
 	server := &http.Server{
@@ -126,23 +134,18 @@ func main() {
 	}
 }
 
-func encoderRecorderStartupAddrFromEnv() (string, error) {
-	addr, err := encoderRecorderBindAddrFromEnv()
+func encoderRecorderStartupAddr(configured string) (string, error) {
+	addr, err := encoderRecorderBindAddr(configured)
 	if err != nil {
-		return "", fmt.Errorf("invalid AUTOSTREAM_BIND_ADDR: %w", err)
-	}
-	if _, err := control.ConfigRevisionFromEnv(); err != nil {
-		return "", fmt.Errorf("invalid AUTOSTREAM_CONFIG_REVISION: %w", err)
+		return "", fmt.Errorf("invalid node listener credential bind_address: %w", err)
 	}
 	return addr, nil
 }
 
-func encoderRecorderBindAddrFromEnv() (string, error) {
-	const defaultAddr = "127.0.0.1:8080"
-
-	addr := strings.TrimSpace(os.Getenv("AUTOSTREAM_BIND_ADDR"))
+func encoderRecorderBindAddr(configured string) (string, error) {
+	addr := strings.TrimSpace(configured)
 	if addr == "" {
-		addr = defaultAddr
+		return "", errors.New("node listener credential bind_address is required")
 	}
 	_, portText, err := net.SplitHostPort(addr)
 	if err != nil {

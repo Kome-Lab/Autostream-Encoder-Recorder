@@ -16,8 +16,6 @@ func TestEnvExampleUsesPanelManagedNodeCredentials(t *testing.T) {
 	allowed := map[string]bool{
 		"AUTOSTREAM_NODE_CONFIG":                     true,
 		"AUTOSTREAM_ENV":                             true,
-		"AUTOSTREAM_CONFIG_REVISION":                 true,
-		"AUTOSTREAM_BIND_ADDR":                       true,
 		"AUTOSTREAM_OUTPUT_RELAY_URL":                true,
 		"AUTOSTREAM_OUTPUT_RELAY_MODE":               true,
 		"AUTOSTREAM_OUTPUT_RELAY_BINDING_ID":         true,
@@ -65,14 +63,20 @@ func TestBaseComposeOverridesHostOnlyBindAddress(t *testing.T) {
 	}
 	compose := strings.ReplaceAll(string(body), "\r\n", "\n")
 	for _, required := range []string{
-		"AUTOSTREAM_CONFIG_REVISION: ${AUTOSTREAM_CONFIG_REVISION:-1}",
-		"AUTOSTREAM_BIND_ADDR: 0.0.0.0:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}",
+		"CREDENTIALS_DIRECTORY: /run/autostream-credentials",
+		"source: node-listener",
+		"target: /run/autostream-credentials/node-listener.json",
+		`"service_type":"encoder_recorder"`,
+		`"config_revision":${AUTOSTREAM_CONFIG_REVISION:?AUTOSTREAM_CONFIG_REVISION is required}`,
 		`127.0.0.1:${AUTOSTREAM_ENCODER_RECORDER_PORT:-8081}:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}`,
 		"./config:/etc/autostream-encoder-recorder",
 	} {
 		if !strings.Contains(compose, required) {
 			t.Errorf("base compose is missing %q", required)
 		}
+	}
+	if strings.Count(compose, "${AUTOSTREAM_CONFIG_REVISION:") != 1 || strings.Contains(compose, "\n      AUTOSTREAM_CONFIG_REVISION:") {
+		t.Error("base compose must use the revision only as the node-listener JSON generation input")
 	}
 }
 
@@ -83,9 +87,7 @@ func TestLocalComposeDoesNotRestoreLegacyCredentialInputs(t *testing.T) {
 	}
 	local := string(body)
 	for _, required := range []string{
-		"AUTOSTREAM_CONFIG_REVISION: ${AUTOSTREAM_CONFIG_REVISION:-1}",
 		"AUTOSTREAM_ENV: development",
-		"AUTOSTREAM_BIND_ADDR: 0.0.0.0:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}",
 		`127.0.0.1:${AUTOSTREAM_ENCODER_RECORDER_PORT:-8081}:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}`,
 		`AUTOSTREAM_OUTPUT_RELAY_URL: ""`,
 		"AUTOSTREAM_OUTPUT_RELAY_MODE: direct",
@@ -95,6 +97,7 @@ func TestLocalComposeDoesNotRestoreLegacyCredentialInputs(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"AUTOSTREAM_CONFIG_REVISION",
 		"SERVICE_CONTROL_TOKEN",
 		"ENCODER_WORKER_EVENTS_TOKEN",
 		"ENCODER_DISCORD_AUDIO_TOKEN",
@@ -119,7 +122,6 @@ func TestProductionComposeDefaultsToDirectOutputAndKeepsRelayOptIn(t *testing.T)
 	}
 	compose := strings.ReplaceAll(string(body), "\r\n", "\n")
 	for _, required := range []string{
-		"AUTOSTREAM_CONFIG_REVISION: ${AUTOSTREAM_CONFIG_REVISION:-1}",
 		"ports: !override",
 		`127.0.0.1:${AUTOSTREAM_ENCODER_RECORDER_PORT:-8081}:${AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT:-8080}`,
 		"AUTOSTREAM_ENV: production",
@@ -138,11 +140,12 @@ func TestProductionComposeDefaultsToDirectOutputAndKeepsRelayOptIn(t *testing.T)
 		}
 	}
 	for _, forbidden := range []string{
+		"AUTOSTREAM_CONFIG_REVISION",
 		"network_mode:",
 		"\n    networks:",
 		"AUTOSTREAM_OUTPUT_RELAY_URL: rtmp://127.0.0.1",
 		"./config:/etc/autostream-encoder-recorder\n",
-		"AUTOSTREAM_OUTPUT_RELAY_MODE: live_api_static",
+		"AUTOSTREAM_OUTPUT_RELAY_MODE: live_api_relay_static",
 		"AUTOSTREAM_OUTPUT_RELAY_BINDING_ID: ${AUTOSTREAM_OUTPUT_RELAY_BINDING_ID:?",
 	} {
 		if strings.Contains(compose, forbidden) {
@@ -161,8 +164,7 @@ func TestStaticRelayBindingIDIsNonSecretAndMatchesControlPanelPolicy(t *testing.
 	}
 	for _, required := range []string{
 		"AUTOSTREAM_OUTPUT_RELAY_MODE=direct",
-		"legacy_stream_key",
-		"AUTOSTREAM_OUTPUT_RELAY_MODE=live_api_static",
+		"AUTOSTREAM_OUTPUT_RELAY_MODE=live_api_relay_static",
 		"relay_binding_id",
 	} {
 		if !strings.Contains(string(env), required) {
@@ -194,8 +196,13 @@ func TestHostBindContractIsConfigurableAndUnprivileged(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(env)
-	if !strings.Contains(body, "AUTOSTREAM_BIND_ADDR=127.0.0.1:8081") {
-		t.Error(".env.example must retain the host default on port 8081")
+	if strings.Contains(body, "AUTOSTREAM_BIND_ADDR") {
+		t.Error(".env.example retains the removed bind-address environment key")
+	}
+	for _, required := range []string{"listener.credential: node-listener.json", "bind_address and config_revision"} {
+		if !strings.Contains(body, required) {
+			t.Errorf(".env.example is missing listener credential guidance %q", required)
+		}
 	}
 	for _, required := range []string{
 		"AUTOSTREAM_ENCODER_RECORDER_PORT=8081",
@@ -205,17 +212,13 @@ func TestHostBindContractIsConfigurableAndUnprivileged(t *testing.T) {
 			t.Errorf(".env.example is missing Docker port default %q", required)
 		}
 	}
-	if !strings.Contains(body, "AUTOSTREAM_CONFIG_REVISION=1") {
-		t.Error(".env.example must retain configuration revision 1 as the compatibility default")
-	}
-	if !strings.Contains(strings.ToLower(body), "root-owned") {
-		t.Error(".env.example must document the root-owned updater probe config revision")
+	for _, removed := range []string{"AUTOSTREAM_CONFIG_REVISION", "api.bind_host"} {
+		if strings.Contains(body, removed) {
+			t.Errorf(".env.example retains removed listener environment contract %q", removed)
+		}
 	}
 	if !strings.Contains(body, "1024") || !strings.Contains(body, "65535") {
 		t.Error(".env.example must document the supported unprivileged port range")
-	}
-	if !strings.Contains(body, "legacy 127.0.0.1:8080 fallback") {
-		t.Error(".env.example must document the env-unset legacy port fallback")
 	}
 
 	unit, err := os.ReadFile("systemd/autostream-encoder-recorder.service.example")
@@ -224,21 +227,17 @@ func TestHostBindContractIsConfigurableAndUnprivileged(t *testing.T) {
 	}
 	unitBody := string(unit)
 	primaryEnv := "EnvironmentFile=/etc/autostream/encoder-recorder.env"
-	managedEnv := "EnvironmentFile=-/opt/autostream/local-executor/ports/encoder-recorder.env"
+	listenerCredential := "LoadCredential=node-listener.json:/opt/autostream/local-executor/ports/encoder-recorder.json"
 	if !strings.Contains(unitBody, primaryEnv) {
-		t.Error("systemd unit must load the configurable bind address from encoder-recorder.env")
+		t.Error("systemd unit must load operational settings from encoder-recorder.env")
 	}
-	if !strings.Contains(unitBody, managedEnv) {
-		t.Error("systemd unit must optionally load the Control Panel managed port sidecar")
+	if !strings.Contains(unitBody, listenerCredential) {
+		t.Error("systemd unit must load the Panel-issued listener credential")
 	}
-	if strings.Index(unitBody, managedEnv) <= strings.Index(unitBody, primaryEnv) {
-		t.Error("managed port sidecar must load after encoder-recorder.env so its bind address and revision win")
-	}
-	if !strings.Contains(unitBody, "AUTOSTREAM_CONFIG_REVISION") {
-		t.Error("systemd unit must document the required configuration revision environment value")
-	}
-	if !strings.Contains(unitBody, "root-owned") {
-		t.Error("systemd unit must document root ownership of the revision environment file")
+	for _, removed := range []string{"AUTOSTREAM_CONFIG_REVISION", "AUTOSTREAM_BIND_ADDR", "/ports/encoder-recorder.env"} {
+		if strings.Contains(unitBody, removed) {
+			t.Errorf("systemd unit retains removed listener environment contract %q", removed)
+		}
 	}
 	if strings.Contains(unitBody, "8081") {
 		t.Error("systemd unit must not hard-code the Encoder/Recorder port")
@@ -249,7 +248,10 @@ func TestHostBindContractIsConfigurableAndUnprivileged(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		"AUTOSTREAM_CONFIG_REVISION=1",
+		"node-listener.json",
+		"listener.credential",
+		"bind_address",
+		"config_revision",
 		"version, service_id, service_type, and config_revision",
 		`PROBE_HOST="${PROBE_HOST:-127.0.0.1}"`,
 		"PROBE_HOST='[::1]'",
@@ -264,8 +266,9 @@ func TestHostBindContractIsConfigurableAndUnprivileged(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		"AUTOSTREAM_CONFIG_REVISION=1",
-		"increment it after a configuration change",
+		"node-listener.json",
+		"listener.credential",
+		"bind_address",
 		"host/reverse-proxy responsibility",
 		"`1024` through `65535`",
 		"The production health authority is the host Local Executor.",

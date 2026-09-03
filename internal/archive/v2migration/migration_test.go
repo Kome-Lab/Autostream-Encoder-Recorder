@@ -7,12 +7,17 @@ import (
 	"testing"
 )
 
+const (
+	testStreamA = "11111111-1111-4111-8111-111111111111"
+	testStreamB = "22222222-2222-4222-8222-222222222222"
+)
+
 func TestArchiveMigrationBackupDryRunApplyIdempotenceRestore(t *testing.T) {
 	root := t.TempDir()
-	writeLegacy(t, root, "stream-a", "final.mp4", "video-a")
-	writeLegacy(t, root, "stream-a", "metadata.json", "metadata-a")
-	writeLegacy(t, root, "stream-b", "final.mp4", "video-b")
-	if err := os.MkdirAll(filepath.Join(root, "final", "stream-b", "existing-run"), 0o750); err != nil {
+	writeLegacy(t, root, testStreamA, "final.mp4", "video-a")
+	writeLegacy(t, root, testStreamA, "metadata.json", "metadata-a")
+	writeLegacy(t, root, testStreamB, "final.mp4", "video-b")
+	if err := os.MkdirAll(filepath.Join(root, "final", testStreamB, "existing-run"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 
@@ -22,6 +27,10 @@ func TestArchiveMigrationBackupDryRunApplyIdempotenceRestore(t *testing.T) {
 	}
 	if len(plan.Entries) != 3 || !plan.BasePathReferenceRetained {
 		t.Fatalf("plan denominator=%d retained_base_path=%v", len(plan.Entries), plan.BasePathReferenceRetained)
+	}
+	wantRunID := "legacy-11111111111141118111111111111111"
+	if got := filepath.Base(filepath.Dir(plan.Entries[0].DestinationRelative)); got != wantRunID {
+		t.Fatalf("migration run id = %q, want Control Panel identity %q", got, wantRunID)
 	}
 	backupDir := filepath.Join(t.TempDir(), "backup")
 	artifact, err := Backup(root, backupDir, plan)
@@ -81,7 +90,7 @@ func TestArchiveMigrationRejectsUnsafeEmptyMismatchAndOrphanStates(t *testing.T)
 
 	t.Run("symlink source", func(t *testing.T) {
 		root := t.TempDir()
-		streamDir := filepath.Join(root, "final", "stream-a")
+		streamDir := filepath.Join(root, "final", testStreamA)
 		if err := os.MkdirAll(streamDir, 0o750); err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +108,7 @@ func TestArchiveMigrationRejectsUnsafeEmptyMismatchAndOrphanStates(t *testing.T)
 
 	t.Run("checksum mismatch", func(t *testing.T) {
 		root := t.TempDir()
-		writeLegacy(t, root, "stream-a", "final.mp4", "before")
+		writeLegacy(t, root, testStreamA, "final.mp4", "before")
 		plan, err := BuildPlan(root, true)
 		if err != nil {
 			t.Fatal(err)
@@ -118,8 +127,8 @@ func TestArchiveMigrationRejectsUnsafeEmptyMismatchAndOrphanStates(t *testing.T)
 
 	t.Run("partial failure rolls back", func(t *testing.T) {
 		root := t.TempDir()
-		writeLegacy(t, root, "stream-a", "a.mp4", "a")
-		writeLegacy(t, root, "stream-a", "b.mp4", "b")
+		writeLegacy(t, root, testStreamA, "a.mp4", "a")
+		writeLegacy(t, root, testStreamA, "b.mp4", "b")
 		plan, err := BuildPlan(root, true)
 		if err != nil {
 			t.Fatal(err)
@@ -146,7 +155,7 @@ func TestArchiveMigrationRejectsUnsafeEmptyMismatchAndOrphanStates(t *testing.T)
 
 	t.Run("orphan mismatch rejected", func(t *testing.T) {
 		root := t.TempDir()
-		writeLegacy(t, root, "stream-a", "final.mp4", "video")
+		writeLegacy(t, root, testStreamA, "final.mp4", "video")
 		plan, err := BuildPlan(root, true)
 		if err != nil {
 			t.Fatal(err)
@@ -165,6 +174,12 @@ func TestArchiveMigrationRejectsUnsafeEmptyMismatchAndOrphanStates(t *testing.T)
 			t.Fatal("orphan source unexpectedly passed verification")
 		}
 	})
+}
+
+func TestLegacyArchiveRunIDRejectsNonCanonicalStreamDirectory(t *testing.T) {
+	if _, err := legacyArchiveRunID("stream-a"); err == nil {
+		t.Fatal("non-UUID legacy archive stream directory unexpectedly accepted")
+	}
 }
 
 func writeLegacy(t *testing.T, root, streamID, name, body string) {

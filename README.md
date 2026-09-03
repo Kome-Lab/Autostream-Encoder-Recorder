@@ -23,30 +23,24 @@ Nodeを作る前に、Control Panel envの`AUTOSTREAM_SECRET_ENCRYPTION_KEY`と`
 ```text
 AUTOSTREAM_NODE_CONFIG=/etc/autostream-encoder-recorder/config.yml
 AUTOSTREAM_ENV=production
-AUTOSTREAM_BIND_ADDR=127.0.0.1:8081
-AUTOSTREAM_CONFIG_REVISION=1
 AUTOSTREAM_OUTPUT_RELAY_URL=
 AUTOSTREAM_OUTPUT_RELAY_MODE=direct
 # Set a Relay URL and an explicit Relay mode only when a Relay is intended.
 ```
 
-`AUTOSTREAM_CONFIG_REVISION` is a root-owned positive integer used by the local
-executor to bind `/updater/version` to the applied service configuration.
-It defaults to `1`; increment it after a configuration change. Invalid, signed,
-fractional, padded, zero, or negative values stop Encoder/Recorder before it
-starts serving HTTP.
+Panel-managed `config.yml` must select `listener.credential: node-listener.json`.
+For systemd, `LoadCredential` exposes the strict four-field JSON from
+`/opt/autostream/local-executor/ports/encoder-recorder.json`; its
+`bind_address` is the only local listener authority and its positive
+`config_revision` is reported by `/updater/version`. The JSON also carries
+`schema_version: 2` and `service_type: encoder_recorder`. Missing, malformed,
+writable, or mismatched credentials fail closed. There is no bind or revision
+environment fallback.
 
-The Control Panel local executor writes managed bind/revision overrides to
-`/opt/autostream/local-executor/ports/encoder-recorder.env`. systemd loads this optional
-root-owned sidecar after `encoder-recorder.env`, so managed values win without
-breaking existing hosts where the sidecar does not exist.
-
-systemd 版の待受ポートは `/etc/autostream/encoder-recorder.env` の
-`AUTOSTREAM_BIND_ADDR` で変更できます。ポートは非特権範囲の
-`1024`～`65535` を指定してください。標準の env ファイルは IPv4
-loopback の `127.0.0.1:8081` を明示します。変数自体がない既存環境では、
-アップグレードだけでポートを移動しないようバイナリの従来値
-`127.0.0.1:8080` を維持します。
+`api.host` and `api.port` remain the public/reverse-proxy endpoint and do not
+select the local socket. The listener `bind_address` must use an unprivileged
+port from `1024` through `65535`; the standard host value is
+`127.0.0.1:8081`.
 例えば `127.0.0.1:18081` に変更した場合、`/health` と
 `/updater/version` も同じ `18081` で待ち受けます。不正な形式、範囲外、
 または特権ポートを指定した場合は Encoder/Recorder が起動時に停止します。
@@ -68,12 +62,13 @@ intentionally omit an in-container `healthcheck`: the runtime image has no
 purpose-built HTTP probe client, and the image contract does not add or repurpose `curl`, `wget`, or another unrelated executable solely for container health.
 For managed Docker changes, the Local Executor probes the loopback published port for both `/health` and `/updater/version`; the published port is the health port.
 A recreate is accepted only when health, service identity, version, and
-`AUTOSTREAM_CONFIG_REVISION` match; otherwise the executor rolls back or reports
+the listener credential's `config_revision` match; otherwise the executor rolls back or reports
 `rollback_failed`.
 
 ```powershell
 $env:AUTOSTREAM_ENCODER_RECORDER_PORT = "18081"
 $env:AUTOSTREAM_ENCODER_RECORDER_CONTAINER_PORT = "18080"
+$env:AUTOSTREAM_CONFIG_REVISION = "1" # Compose JSON generation input only
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
@@ -97,19 +92,13 @@ The non-secret `retention_days` archive config controls local final archive clea
 
 ## Production Output Relay
 
-`AUTOSTREAM_OUTPUT_RELAY_MODE` has exactly three non-secret values:
-`direct`, `legacy_stream_key`, and `live_api_static`. With no Relay URL and
-When Relay output is not explicitly required, the effective mode is `direct`.
-When Relay output is explicitly required (`AUTOSTREAM_REQUIRE_OUTPUT_RELAY=true`),
-a missing URL is
-unavailable/fail-closed and no output Relay capability is advertised. With a
-Relay URL and no mode, Encoder/Recorder
-preserves the existing `legacy_stream_key` route: it accepts only a Control
-Panel `stream_key` output, clears its upstream URL/key/reference before input
-resolution or FFmpeg, and sends FFmpeg only to the local Relay target. It
-rejects `live_api`, `live_api_dry_run`, and an absent output mode.
+`AUTOSTREAM_OUTPUT_RELAY_MODE`はcanonical v2値の`direct`または
+`live_api_relay_static`を必ず明示します。通常の直接送信ではRelay URLを空にして
+`direct`を使います。Relayを必須にする場合
+（`AUTOSTREAM_REQUIRE_OUTPUT_RELAY=true`）、URL不在はfail closedとなり、
+output Relay capabilityも広告しません。
 
-`live_api_static` is an explicit migration only. It requires a Relay URL and
+`live_api_relay_static` is an explicit migration only. It requires a Relay URL and
 the non-secret `AUTOSTREAM_OUTPUT_RELAY_BINDING_ID`, which must exactly match
 the Control Panel YouTube Output profile's `relay_binding_id`. The profile must
 be `live_api_relay_static`, ready, and binding-fenced before start or dry-run.
@@ -118,10 +107,9 @@ with lowercase hexadecimal UUID characters. The binding ID is an identity fence
 only; never put the Relay RTMPS URL,
 YouTube stream key, or watch URL in it. A Relay URL with `direct`, an unknown
 mode, or a URL-free non-direct mode is an invalid configuration. Production
-Production Compose defaults to `direct`, so a fixed Relay is not required for
-normal YouTube Live API output. Existing native/systemd hosts that already set
-only a Relay URL remain `legacy_stream_key` compatible. To select
-`live_api_static`, set both the mode and binding in `.env`; Encoder/Recorder
+Compose defaults to `direct`, so a fixed Relay is not required for
+normal YouTube Live API output. To select `live_api_relay_static`, set both the
+mode and binding in `.env`; Encoder/Recorder
 preflight rejects the configuration until the binding is supplied.
 
 本番では FFmpeg argv に YouTube stream key と upstream RTMPS URL を出しません。host配置ではFFmpegをloopback relayへ、Docker配置では通常のCompose network上の`output-relay:1935`へ出力します。
@@ -146,16 +134,7 @@ one-shot configureではbase composeの書き込み可能mountを使い、生成
 
 host 配置では、同一 host の nginx-rtmp、SRS、または同等の relay を loopback だけで待ち受けさせてください。relay 設定ファイルは Git 管理外に置き、owner/read permission を限定します。
 
-## 互換 fallback
-
-local/dev または移行期間だけ、次の env fallback を使えます。本番標準ではありません。
-
-```text
-YOUTUBE_RTMP_URL=rtmps://a.rtmps.youtube.com/live2
-YOUTUBE_STREAM_KEY=<YOUTUBE_STREAM_KEY>
-```
-
-Google Drive archive upload には env fallback を使いません。Control Panel の配信枠設定で OAuth account、folder ID、shared drive ID、archive file name を指定します。共有ドライブの folder ID を使う場合は stream archive settings で shared drive を有効化します。Uploader は Drive API に `supportsAllDrives=true` を付けて folder / file 操作を行います。保存階層は `指定folder / 配信枠名 / YYYYMMDD_HHMMSS_JST_<stream_id> / final.mp4` です。legacy `base_path` は無視し、同じ配信実行を再uploadすると同じ実行folder内の同名ファイルを更新します。
+Google Drive archive upload は Control Panel の配信枠設定で OAuth account、folder ID、shared drive ID、archive file name を指定します。共有ドライブの folder ID を使う場合は stream archive settings で shared drive を有効化します。Uploader は Drive API に `supportsAllDrives=true` を付けて folder / file 操作を行います。保存階層は `指定folder / 配信枠名 / YYYYMMDD_HHMMSS_JST_<stream_id> / final.mp4` です。同じ配信実行を再uploadすると同じ実行folder内の同名ファイルを更新します。
 
 Encoder/Recorder は Control Panel へ報告した final artifact を `AUTOSTREAM_ARCHIVE_DIR/final/<stream_id>/` 配下に一定期間保持します。Control Panel は割り当て済みの primary encoder に service token 付きで接続し、録画ファイルの download、rename、delete を行います。対象ファイル名は安全な basename と `.mp4`、`.mkv`、`.json`、`.jsonl`、`.vtt` に限定し、symlink と archive root 外への移動は拒否します。
 
