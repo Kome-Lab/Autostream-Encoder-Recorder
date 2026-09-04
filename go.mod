@@ -3,15 +3,15 @@ module github.com/example/autostream-encoder-recorder
 go 1.26.5
 
 require (
-	github.com/example/autostream-contracts v0.0.0
 	github.com/datarhei/gosrt v0.11.0
+	github.com/example/autostream-contracts v0.0.0
 	github.com/pion/opus v0.1.0
 	golang.org/x/image v0.45.0
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.293.0
 )
 
-replace github.com/example/autostream-contracts => github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260903202917-82716abd84f2
+replace github.com/example/autostream-contracts => github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260904044030-e96ac056e73e
 
 require (
 	cloud.google.com/go/auth v0.23.0 // indirect
@@ -26,6 +26,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.20 // indirect
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0 // indirect
 	go.opentelemetry.io/otel v1.45.0 // indirect
