@@ -5,9 +5,14 @@ on:
     branches: ['**']
   pull_request:
 
+concurrency:
+  group: encoder-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   go:
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -24,5 +29,30 @@ jobs:
       - name: Test installer integration scenarios
         shell: bash
         run: sudo bash release/test-install-autostream-encoder-recorder-integration.sh
+      - name: Require archive data protection regressions without skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/archive-v2-regressions.json"
+          go test -p 1 ./internal/archive/v2migration -count=1 -json | tee "${result}"
+          jq -s -e '
+            ([.[] | select(.Action=="skip" or .Action=="fail")] | length)==0 and
+            ([.[] | select(.Action=="pass" and ((.Test // "")==""))] | length)==1
+          ' "${result}" >/dev/null
+          for name in TestReviewRestorePreservesConflicts TestReviewDryRunChecksLiveStateWithoutMutation \
+            TestReviewApplyAndRestoreReplay TestReviewPreexistingFileNeverBecomesOwnedBySourceRemoval; do
+            jq -s -e --arg name "${name}" '
+              ([.[] | select(.Action=="run" and .Test==$name)] | length)==1 and
+              ([.[] | select(.Action=="pass" and .Test==$name)] | length)==1
+            ' "${result}" >/dev/null
+          done
+      - name: Upload archive migration regression evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: archive-v2-regressions-${{ github.sha }}
+          path: ${{ runner.temp }}/archive-v2-regressions.json
+          if-no-files-found: error
+          retention-days: 14
       - run: go test ./...
       - run: go build ./...

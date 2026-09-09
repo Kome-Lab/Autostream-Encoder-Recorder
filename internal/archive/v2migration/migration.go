@@ -21,6 +21,7 @@ type Entry struct {
 	SourceRelative              string `json:"source_relative"`
 	DestinationRelative         string `json:"destination_relative"`
 	DestinationDirectoryExisted bool   `json:"destination_directory_existed"`
+	DestinationFileExisted      bool   `json:"destination_file_existed,omitempty"`
 	BackupRelative              string `json:"backup_relative"`
 	SizeBytes                   int64  `json:"size_bytes"`
 	SHA256                      string `json:"sha256"`
@@ -114,6 +115,11 @@ func BuildPlan(root string, expectedNonEmpty bool) (Plan, error) {
 			name := filepath.Base(legacy[index].SourceRelative)
 			legacy[index].DestinationRelative = filepath.Join("final", stream.Name(), runID, name)
 			legacy[index].DestinationDirectoryExisted = destinationDirectoryExisted
+			if _, err := os.Lstat(filepath.Join(destinationDir, name)); err == nil {
+				legacy[index].DestinationFileExisted = true
+			} else if !os.IsNotExist(err) {
+				return Plan{}, err
+			}
 			legacy[index].BackupRelative = filepath.Join("objects", stream.Name(), runID, name)
 		}
 		entries = append(entries, legacy...)
@@ -234,7 +240,7 @@ func Backup(root, backupDir string, plan Plan) (Artifact, error) {
 }
 
 func DryRun(root string, plan Plan, artifact Artifact) (Result, error) {
-	if _, err := verifyInputs(root, plan, artifact, false); err != nil {
+	if _, err := verifyInputs(root, plan, artifact, true); err != nil {
 		return Result{}, err
 	}
 	return Result{PreCount: len(plan.Entries), PostCount: len(plan.Entries), BackupStatus: "PASS", RestoreStatus: "NOT_RUN", Idempotence: "NOT_RUN", Rollback: "NOT_RUN"}, nil
@@ -343,6 +349,11 @@ func Restore(root string, plan Plan, artifact Artifact) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	// Finish every read-only check before restoring any entry. In particular,
+	// a conflict at the end of the manifest must leave earlier entries alone.
+	if err := preflight(rootAbs, plan, true); err != nil {
+		return Result{}, err
+	}
 	for _, entry := range plan.Entries {
 		source, _ := safeJoin(rootAbs, entry.SourceRelative)
 		destination, _ := safeJoin(rootAbs, entry.DestinationRelative)
@@ -354,17 +365,21 @@ func Restore(root string, plan Plan, artifact Artifact) (Result, error) {
 			if err := ensureSafeDir(rootAbs, filepath.Dir(entry.SourceRelative)); err != nil {
 				return Result{}, err
 			}
-			if err := copyVerified(artifact.Directory, entry.BackupRelative, rootAbs, entry.SourceRelative, entry); err != nil {
+			if _, err := os.Lstat(destination); err == nil {
+				if _, _, err := hashMatches(rootAbs, entry.DestinationRelative, entry); err != nil {
+					return Result{}, fmt.Errorf("restore destination changed: %s", entry.DestinationRelative)
+				}
+				if err := os.Rename(destination, source); err != nil {
+					return Result{}, err
+				}
+			} else if os.IsNotExist(err) {
+				if err := copyVerified(artifact.Directory, entry.BackupRelative, rootAbs, entry.SourceRelative, entry); err != nil {
+					return Result{}, err
+				}
+			} else {
 				return Result{}, err
 			}
 		} else {
-			return Result{}, err
-		}
-		if _, err := os.Lstat(destination); err == nil {
-			if err := os.Remove(destination); err != nil {
-				return Result{}, err
-			}
-		} else if !os.IsNotExist(err) {
 			return Result{}, err
 		}
 	}
@@ -413,15 +428,68 @@ func verifyInputs(root string, plan Plan, artifact Artifact, requireSourcesOrDes
 		return "", errors.New("backup artifact identity mismatch")
 	}
 	if requireSourcesOrDestinations {
-		for _, entry := range plan.Entries {
-			if _, err := os.Lstat(filepath.Join(rootAbs, entry.SourceRelative)); err != nil {
-				if _, destErr := os.Lstat(filepath.Join(rootAbs, entry.DestinationRelative)); destErr != nil {
-					return "", fmt.Errorf("migration entry is missing from source and destination: %s", entry.SourceRelative)
-				}
-			}
+		if err := preflight(rootAbs, plan, false); err != nil {
+			return "", err
 		}
 	}
 	return rootAbs, nil
+}
+
+// preflight recognizes pending, applied, and restored states. A destination
+// is migration-owned only when the original source is absent, the manifest
+// did not observe that file before migration, and its bytes still match.
+// Directory existence is deliberately not an ownership decision.
+func preflight(root string, plan Plan, restoring bool) error {
+	for _, entry := range plan.Entries {
+		source, err := matchingFilePresent(root, entry.SourceRelative, entry)
+		if err != nil {
+			return fmt.Errorf("migration source conflict: %s: %w", entry.SourceRelative, err)
+		}
+		destination, err := matchingFilePresent(root, entry.DestinationRelative, entry)
+		if err != nil {
+			return fmt.Errorf("migration destination conflict: %s: %w", entry.DestinationRelative, err)
+		}
+		if destination && (source || entry.DestinationFileExisted) {
+			return fmt.Errorf("unowned migration destination: %s", entry.DestinationRelative)
+		}
+		if !source && !destination && !restoring {
+			return fmt.Errorf("migration entry is missing from source and destination: %s", entry.SourceRelative)
+		}
+	}
+	return nil
+}
+
+func matchingFilePresent(root, relative string, entry Entry) (bool, error) {
+	if err := checkParentDirectories(root, relative); err != nil {
+		return false, err
+	}
+	_, _, err := hashMatches(root, relative, entry)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// Unlike ensureSafeDir, this function never creates a path while checking it.
+func checkParentDirectories(root, relative string) error {
+	if err := validateRelative(relative); err != nil {
+		return err
+	}
+	current := root
+	for _, part := range strings.Split(filepath.Dir(filepath.Clean(relative)), string(os.PathSeparator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("migration directory contains an unsafe component")
+		}
+	}
+	return nil
 }
 
 func validateExistingBackup(backupAbs string, want Plan) (Artifact, error) {
