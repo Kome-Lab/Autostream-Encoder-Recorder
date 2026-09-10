@@ -661,9 +661,14 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 		if !requireServiceToken(w, r, verifier) {
 			return
 		}
-		var job lifecycle.StreamJob
-		if status, err := decodeLimitedStrictJSON(w, r, maxControlBodyBytes, &job); err != nil {
+		var request startStreamRequest
+		if status, err := decodeLimitedStrictJSON(w, r, maxControlBodyBytes, &request); err != nil {
 			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
+			return
+		}
+		job := request.streamJob()
+		if err := request.validateArchiveRun(); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "bad_request"})
 			return
 		}
 		if err := applyEncoderRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
@@ -678,7 +683,7 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
 			return
 		}
-		if err := applyArchiveRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+		if err := request.applyArchiveRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
 			return
 		}
@@ -737,12 +742,6 @@ func dryRunStream(verifier TokenVerifier, runtimeConfig RuntimeConfigProvider) h
 	}
 }
 
-type startStreamRequest struct {
-	lifecycle.StreamJob
-	WorkerVideoIngest      bool   `json:"worker_video_ingest,omitempty"`
-	WorkerVideoIngestToken string `json:"worker_video_ingest_token,omitempty"`
-}
-
 type startStreamResponse struct {
 	processSnapshotResponse
 	VideoIngest *videoingest.Bridge `json:"video_ingest,omitempty"`
@@ -762,7 +761,11 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
 			return
 		}
-		job := startRequest.StreamJob
+		job := startRequest.streamJob()
+		if err := startRequest.validateArchiveRun(); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "bad_request"})
+			return
+		}
 		if !startRequest.WorkerVideoIngest && strings.TrimSpace(startRequest.WorkerVideoIngestToken) != "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "worker_video_ingest_not_enabled"})
 			return
@@ -779,7 +782,7 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
 			return
 		}
-		if err := applyArchiveRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
+		if err := startRequest.applyArchiveRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
 			return
 		}
@@ -1296,11 +1299,12 @@ func packageStream(verifier TokenVerifier, resolver RuntimeSecretResolver, runti
 		if !requireServiceToken(w, r, verifier) {
 			return
 		}
-		var job lifecycle.PackageJob
-		if status, err := decodeLimitedStrictJSON(w, r, maxControlBodyBytes, &job); err != nil {
+		var request packageStreamRequest
+		if status, err := decodeLimitedStrictJSON(w, r, maxControlBodyBytes, &request); err != nil {
 			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
 			return
 		}
+		job := request.packageJob()
 		if err := applyPackageArchiveRuntimeConfig(r.Context(), &job, runtimeConfig); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"code": "runtime_config_fetch_failed"})
 			return
@@ -1692,6 +1696,9 @@ func decodeLimitedStrictJSON(w http.ResponseWriter, r *http.Request, limit int64
 	if err := decoder.Decode(&struct{}{}); errors.Is(err, io.EOF) {
 		return http.StatusOK, nil
 	} else {
+		if err == nil {
+			return http.StatusBadRequest, errors.New("unexpected trailing JSON")
+		}
 		return limitedJSONStatus(err), err
 	}
 }

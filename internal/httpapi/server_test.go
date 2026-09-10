@@ -773,15 +773,23 @@ func TestStartStreamReturnsConflictWhenRuntimeSecretLeaseActive(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
-	handler := NewServerWithManagersAndSecretResolver("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
+	resolved := 0
+	handler := archiveWireTestHandler("/streams/start", processManager, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
+		resolved++
+		if streamID != "stream-01" || archiveProfileID != "archive-profile-01" || secretName != "drive_destination:dest-01:folder_id" {
+			t.Error("lease resolve context differs from assigned archive runtime")
+		}
 		return "", control.ErrRuntimeSecretLeaseActive
-	})
+	}, archiveWireRuntimeProvider(map[string]any{"auth_mode": "oauth2", "folder_id_secret_name": "drive_destination:dest-01:folder_id"}))
 
-	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","folder_id_secret_name":"drive_destination:dest-01:folder_id"}}`
+	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","archive_profile_id":"archive-profile-01"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
+	if resolved != 1 {
+		t.Fatalf("lease resolver calls=%d, want 1", resolved)
+	}
 	if res.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d body = %s", res.Code, res.Body.String())
 	}
@@ -795,16 +803,23 @@ func TestStartStreamReturnsConflictWhenRuntimeSecretLeaseActive(t *testing.T) {
 
 func TestPackageStreamReturnsConflictWhenRuntimeSecretLeaseActive(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
-	root := t.TempDir()
-	handler := NewServerWithManagersAndSecretResolver("encoder_recorder", nil, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
+	resolved := 0
+	handler := archiveWireTestHandler("/streams/package", nil, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
+		resolved++
+		if streamID != "stream-01" || archiveProfileID != "archive-profile-01" || secretName != "oauth_account:account-01:refresh_token" {
+			t.Error("lease resolve context differs from assigned archive runtime")
+		}
 		return "", control.ErrRuntimeSecretLeaseActive
-	})
+	}, archiveWireRuntimeProvider(map[string]any{"auth_mode": "oauth2", "refresh_token_secret_name": "oauth_account:account-01:refresh_token"}))
 
-	body := `{"stream_id":"stream-01","archive_run_id":"run-01","name":"Morning Stream","started_at":"2026-05-31T01:02:03Z","dry_run":true,"archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","refresh_token_secret_name":"oauth_account:account-01:refresh_token"}}`
+	body := `{"stream_id":"stream-01","archive_run_id":"run-01","name":"Morning Stream","started_at":"2026-05-31T01:02:03Z","dry_run":true}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/package", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
+	if resolved != 1 {
+		t.Fatalf("lease resolver calls=%d, want 1", resolved)
+	}
 	if res.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d body = %s", res.Code, res.Body.String())
 	}
@@ -820,10 +835,10 @@ func TestStartStreamRejectsRawArchiveSecretFields(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
-	handler := NewServerWithManagersAndSecretResolver("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
+	handler := archiveWireTestHandler("/streams/start", processManager, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
 		t.Fatalf("runtime secret resolver should not be called for raw archive secret fields")
 		return "", nil
-	})
+	}, nil)
 
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","folder_id":"raw-drive-folder-id","refresh_token_secret_name":"oauth_account:account-01:refresh_token"}}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
@@ -833,7 +848,7 @@ func TestStartStreamRejectsRawArchiveSecretFields(t *testing.T) {
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d body = %s", res.Code, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), `"code":"raw_archive_secret_fields_not_allowed"`) {
+	if !strings.Contains(res.Body.String(), `"code":"bad_request"`) {
 		t.Fatalf("expected raw archive secret error, got %s", res.Body.String())
 	}
 	if strings.Contains(res.Body.String(), "raw-drive-folder-id") || strings.Contains(res.Body.String(), "folder_id") || strings.Contains(res.Body.String(), "refresh_token") {
@@ -845,7 +860,7 @@ func TestStartStreamRejectsRawArchiveSecretFieldsWithoutResolver(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
-	handler := NewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
+	handler := archiveWireTestHandler("/streams/start", processManager, nil, nil)
 
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","refresh_token":"raw-refresh-token","folder_id_secret_name":"drive_destination:dest-01:folder_id"}}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
@@ -855,7 +870,7 @@ func TestStartStreamRejectsRawArchiveSecretFieldsWithoutResolver(t *testing.T) {
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d body = %s", res.Code, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), `"code":"raw_archive_secret_fields_not_allowed"`) {
+	if !strings.Contains(res.Body.String(), `"code":"bad_request"`) {
 		t.Fatalf("expected raw archive secret error, got %s", res.Body.String())
 	}
 	if strings.Contains(res.Body.String(), "raw-refresh-token") || strings.Contains(res.Body.String(), "refresh_token") || strings.Contains(res.Body.String(), "folder_id") {
@@ -865,11 +880,10 @@ func TestStartStreamRejectsRawArchiveSecretFieldsWithoutResolver(t *testing.T) {
 
 func TestPackageStreamRejectsRawArchiveSecretFields(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
-	root := t.TempDir()
-	handler := NewServerWithManagersAndSecretResolver("encoder_recorder", nil, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
+	handler := archiveWireTestHandler("/streams/package", nil, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
 		t.Fatalf("runtime secret resolver should not be called for raw archive secret fields")
 		return "", nil
-	})
+	}, nil)
 
 	body := `{"stream_id":"stream-01","archive_run_id":"run-01","name":"Morning Stream","started_at":"2026-05-31T01:02:03Z","dry_run":true,"archive_config":{"archive_profile_id":"archive-profile-01","auth_mode":"oauth2","refresh_token":"raw-refresh-token","folder_id_secret_name":"drive_destination:dest-01:folder_id"}}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/package", bytes.NewBufferString(body))
@@ -879,7 +893,7 @@ func TestPackageStreamRejectsRawArchiveSecretFields(t *testing.T) {
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d body = %s", res.Code, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), `"code":"raw_archive_secret_fields_not_allowed"`) {
+	if !strings.Contains(res.Body.String(), `"code":"bad_request"`) {
 		t.Fatalf("expected raw archive secret error, got %s", res.Body.String())
 	}
 	if strings.Contains(res.Body.String(), "raw-refresh-token") || strings.Contains(res.Body.String(), "refresh_token") || strings.Contains(res.Body.String(), "folder_id") {
