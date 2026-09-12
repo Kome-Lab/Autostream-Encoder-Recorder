@@ -54,5 +54,34 @@ jobs:
           path: ${{ runner.temp }}/archive-v2-regressions.json
           if-no-files-found: error
           retention-days: 14
+      - name: Require decomposed runtime regressions with race detection
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/runtime-structural-regressions.json"
+          go test -mod=readonly -p 1 -race -count=1 -json ./internal/httpapi ./internal/lifecycle ./internal/streamproc | tee "${result}"
+          jq -s -e '
+            ([.[] | select(.Action=="skip" or .Action=="fail")] | length)==0 and
+            ([.[] | select(.Action=="pass" and ((.Test // "")==""))] | length)==3
+          ' "${result}" >/dev/null
+          for name in TestRouteCompositionPreservesMethodsAuthenticationAndSecurityHeaders \
+            TestArchiveWireRejectsLegacyBeforeSideEffects \
+            TestPackageUsesRealFFmpegRemuxWhenAvailable \
+            TestPackageFallsBackToPreviewWhenFinalMKVRemuxFails \
+            TestVideoCoverApplyIsFencedIndependentAndAmbiguousHideIsNotResent \
+            TestManagerStopAllAndDrainWaitsForArchivePackaging; do
+            jq -s -e --arg name "${name}" '
+              ([.[] | select(.Action=="run" and .Test==$name)] | length)==1 and
+              ([.[] | select(.Action=="pass" and .Test==$name)] | length)==1
+            ' "${result}" >/dev/null
+          done
+      - name: Upload runtime structural regression evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-structural-regressions-${{ github.sha }}
+          path: ${{ runner.temp }}/runtime-structural-regressions.json
+          if-no-files-found: error
+          retention-days: 14
       - run: go test ./...
       - run: go build ./...
