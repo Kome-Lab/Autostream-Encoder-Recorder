@@ -3,13 +3,16 @@ package streamproc
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/example/autostream-encoder-recorder/internal/archive"
 	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
+	"github.com/example/autostream-encoder-recorder/internal/observability"
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 )
 
@@ -80,38 +83,22 @@ func TestManagerRedactsProcessExitError(t *testing.T) {
 		t.Fatal(err)
 	}
 	starter.process.done <- errors.New("ffmpeg failed for rtsp://camera:camera-password@input.example.com/live/%70%61%74%68-token and rtmps://youtube.example.com/live2/secret-stream-key")
-	deadline := time.After(2 * time.Second)
-	for {
-		status, err := manager.Status(job.StreamID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if status.Status == "failed" {
-			if strings.Contains(status.Error, "camera-password") || strings.Contains(status.Error, "secret-stream-key") || strings.Contains(status.Error, "%70%61%74%68-token") || strings.Contains(status.Error, "path-token") {
-				t.Fatalf("secret leaked in process status error: %s", status.Error)
-			}
-			if !strings.Contains(status.Error, "rtsp://input.example.com/<REDACTED>") {
-				t.Fatalf("expected host-only input URL in process status error: %s", status.Error)
-			}
-			signal, ok := reporter.find("encoder.process.exited")
-			if !ok {
-				t.Fatalf("missing process exited signal: %#v", reporter.names())
-			}
-			attrError, _ := signal.Attributes["error"].(string)
-			if strings.Contains(attrError, "camera-password") || strings.Contains(attrError, "secret-stream-key") || strings.Contains(attrError, "%70%61%74%68-token") || strings.Contains(attrError, "path-token") {
-				t.Fatalf("secret leaked in observability error: %s", attrError)
-			}
-			if !strings.Contains(attrError, "rtsp://input.example.com/<REDACTED>") {
-				t.Fatalf("expected host-only input URL in observability error: %s", attrError)
-			}
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("process failure was not observed: %#v", status)
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	status, signal, err := waitForProcessExitObservation(func() (Snapshot, error) { return manager.Status(job.StreamID) }, reporter, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(status.Error, "camera-password") || strings.Contains(status.Error, "secret-stream-key") || strings.Contains(status.Error, "%70%61%74%68-token") || strings.Contains(status.Error, "path-token") {
+		t.Fatalf("secret leaked in process status error: %s", status.Error)
+	}
+	if !strings.Contains(status.Error, "rtsp://input.example.com/<REDACTED>") {
+		t.Fatalf("expected host-only input URL in process status error: %s", status.Error)
+	}
+	attrError, _ := signal.Attributes["error"].(string)
+	if strings.Contains(attrError, "camera-password") || strings.Contains(attrError, "secret-stream-key") || strings.Contains(attrError, "%70%61%74%68-token") || strings.Contains(attrError, "path-token") {
+		t.Fatalf("secret leaked in observability error: %s", attrError)
+	}
+	if !strings.Contains(attrError, "rtsp://input.example.com/<REDACTED>") {
+		t.Fatalf("expected host-only input URL in observability error: %s", attrError)
 	}
 }
 
@@ -131,39 +118,101 @@ func TestManagerReportsSafeProcessExitDiagnostics(t *testing.T) {
 	}
 	starter.process.stderr = "[tcp] Connection refused while opening rtmps://youtube.example.com/live2/secret-stream-key"
 	starter.process.done <- errors.New("exit status 234")
-	deadline := time.After(2 * time.Second)
+	status, signal, err := waitForProcessExitObservation(func() (Snapshot, error) { return manager.Status(job.StreamID) }, reporter, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(status.Error, "secret-stream-key") || strings.Contains(status.Error, "camera-password") {
+		t.Fatalf("process diagnostic leaked a secret: %s", status.Error)
+	}
+	if got, want := signal.Attributes["error_class"], "transport"; got != want {
+		t.Fatalf("error class = %#v, want %q", got, want)
+	}
+	stderr, _ := signal.Attributes["stderr_tail"].(string)
+	if strings.Contains(stderr, "secret-stream-key") || strings.Contains(stderr, "camera-password") {
+		t.Fatalf("stderr diagnostic leaked a secret: %s", stderr)
+	}
+	if !strings.Contains(stderr, "Connection refused") {
+		t.Fatalf("stderr diagnostic missing safe failure text: %s", stderr)
+	}
+}
+
+func waitForProcessExitObservation(readStatus func() (Snapshot, error), reporter *fakeReporter, timeout time.Duration) (Snapshot, observability.Signal, error) {
+	deadline := time.After(timeout)
 	for {
-		status, err := manager.Status(job.StreamID)
+		status, err := readStatus()
 		if err != nil {
-			t.Fatal(err)
+			return status, observability.Signal{}, err
 		}
-		if status.Status == "failed" {
-			if strings.Contains(status.Error, "secret-stream-key") || strings.Contains(status.Error, "camera-password") {
-				t.Fatalf("process diagnostic leaked a secret: %s", status.Error)
-			}
-			signal, ok := reporter.find("encoder.process.exited")
-			if !ok {
-				t.Fatalf("missing process exited signal: %#v", reporter.names())
-			}
-			if got, want := signal.Attributes["error_class"], "transport"; got != want {
-				t.Fatalf("error class = %#v, want %q", got, want)
-			}
-			stderr, _ := signal.Attributes["stderr_tail"].(string)
-			if strings.Contains(stderr, "secret-stream-key") || strings.Contains(stderr, "camera-password") {
-				t.Fatalf("stderr diagnostic leaked a secret: %s", stderr)
-			}
-			if !strings.Contains(stderr, "Connection refused") {
-				t.Fatalf("stderr diagnostic missing safe failure text: %s", stderr)
-			}
-			return
+		signal, reported := reporter.find("encoder.process.exited")
+		if status.Status == "failed" && reported {
+			return status, signal, nil
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("process failure was not observed: %#v", status)
+			return status, signal, fmt.Errorf("process failure and exit notification were not both observed: status=%#v signals=%#v", status, reporter.names())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+}
+
+func TestProcessExitObservationWaitsForRealReport(t *testing.T) {
+	manager, reporter, release := processExitObservationManager(t)
+	readStatus := func() (Snapshot, error) { return manager.Status("observation") }
+	status, _, err := waitForProcessExitObservation(readStatus, reporter, 20*time.Millisecond)
+	if err == nil || status.Status != "failed" {
+		t.Fatalf("failed state alone completed the observation: status=%#v err=%v", status, err)
+	}
+	if reporter.has("encoder.process.exited") {
+		t.Fatal("exit notification arrived while the existing hook was held")
+	}
+	release()
+	status, signal, err := waitForProcessExitObservation(readStatus, reporter, 2*time.Second)
+	if err != nil || status.Status != "failed" || signal.Name != "encoder.process.exited" || signal.StreamID != "observation" {
+		t.Fatalf("real process exit was not observed after releasing the hook: status=%#v signal=%#v err=%v", status, signal, err)
+	}
+}
+
+func TestProcessExitObservationRejectsIncompleteOrErroredStatus(t *testing.T) {
+	manager, reporter, release := processExitObservationManager(t)
+	release()
+	if _, _, err := waitForProcessExitObservation(func() (Snapshot, error) { return manager.Status("observation") }, reporter, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("status never failed despite real notification", func(t *testing.T) {
+		if _, _, err := waitForProcessExitObservation(func() (Snapshot, error) { return Snapshot{Status: "running"}, nil }, reporter, 20*time.Millisecond); err == nil {
+			t.Fatal("notification alone completed the observation")
+		}
+	})
+	t.Run("status error", func(t *testing.T) {
+		if _, _, err := waitForProcessExitObservation(func() (Snapshot, error) { return manager.Status("missing") }, reporter, 20*time.Millisecond); !errors.Is(err, ErrNotRunning) {
+			t.Fatalf("status error was not preserved: %v", err)
+		}
+	})
+}
+
+func processExitObservationManager(t *testing.T) (*Manager, *fakeReporter, func()) {
+	t.Helper()
+	reporter := &fakeReporter{}
+	process := &fakeProcess{done: make(chan error, 1)}
+	process.done <- errors.New("exit status 234")
+	held, released, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(released) }) }
+	manager := &Manager{
+		ArchiveRoot: t.TempDir(), Reporter: reporter,
+		processes:       map[string]*trackedProcess{"observation": {snapshot: Snapshot{StreamID: "observation", Status: "running"}, job: lifecycle.StreamJob{StreamID: "observation"}, process: process}},
+		ProcessExitHook: func(string) { close(held); <-released },
+	}
+	go func() { defer close(finished); manager.wait("observation", process, nil) }()
+	t.Cleanup(func() { release(); <-finished })
+	select {
+	case <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("real Manager did not reach its process exit hook")
+	}
+	return manager, reporter, release
 }
 
 func TestManagerReportsSafeStoppedProcessDiagnostics(t *testing.T) {
