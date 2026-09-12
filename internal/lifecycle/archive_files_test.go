@@ -2,9 +2,12 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -136,15 +139,32 @@ func TestPackageRejectsFinalDirSymlink(t *testing.T) {
 	if err := os.WriteFile(layout.FinalMKV(), []byte("mkv"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "final"), 0o750); err != nil {
+	parent := filepath.Dir(layout.FinalDir())
+	if err := os.MkdirAll(parent, 0o750); err != nil {
 		t.Fatal(err)
+	}
+	if info, err := os.Stat(parent); err != nil {
+		t.Fatal(err)
+	} else if !info.IsDir() {
+		t.Fatal("final directory parent is not a directory")
+	}
+	if _, err := os.Lstat(layout.FinalDir()); !os.IsNotExist(err) {
+		t.Fatalf("final directory leaf must not exist before symlink creation, lstat err=%v", err)
 	}
 	outside := filepath.Join(root, "outside-final")
 	if err := os.MkdirAll(outside, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, layout.FinalDir()); err != nil {
-		t.Skipf("directory symlink creation is not available in this environment: %v", err)
+		if runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) { // ERROR_PRIVILEGE_NOT_HELD
+			t.Skipf("Windows directory symlink privilege is unavailable: %v", err)
+		}
+		t.Fatalf("create final directory symlink: %v", err)
+	}
+	if info, err := os.Lstat(layout.FinalDir()); err != nil {
+		t.Fatal(err)
+	} else if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("final directory leaf is not a symlink")
 	}
 	manager := Manager{ArchiveRoot: root, Runner: &ffmpeg.DryRunRunner{}, Uploader: archive.DryRunUploader{}}
 	if _, err := manager.Package(context.Background(), PackageJob{StreamID: "stream-01", ArchiveRunID: "run-01", Name: "Morning Stream", StartedAt: time.Date(2026, 6, 11, 1, 2, 3, 0, time.UTC), DryRun: true}); err == nil {
