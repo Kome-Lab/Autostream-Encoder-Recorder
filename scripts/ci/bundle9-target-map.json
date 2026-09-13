@@ -1,0 +1,185 @@
+[
+  {
+    "target_id": "B9-M065",
+    "repository": "Kome-Lab/Autostream-Encoder-Recorder",
+    "original_path": "release/install-autostream-encoder-recorder",
+    "original_sha256": "86a0b6f0993b2eb3b931ffc099ed623834325c94165fdb9d0de31f713c85a45a",
+    "before_physical_lines": 2363,
+    "disposition": "generated-from-bounded-authoring",
+    "responsibility": "preamble/options;validation/identity;locks/journal;staging;account/systemd changes;activation/health;rollback/cleanup;main dispatch",
+    "destinations": [
+      {
+        "path": "authoring/install-autostream-encoder-recorder/account-rollback.sh.inc",
+        "sha256": "c9179089851ab93018470751c8e47fbd8f3e131cc82d2a9374a72c3b439ea82e",
+        "symbols": [],
+        "physical_lines": 195
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/account-state-snapshots.sh.inc",
+        "sha256": "f73f85afd535ecc8a1a3dc7e4c1862102b014a89b7e61515768231f589431cc5",
+        "symbols": [],
+        "physical_lines": 103
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/activation-cleanup.sh.inc",
+        "sha256": "2fd4d5c9fc4e9fb62410a7cae3bf2901122fa8b1ceea9e54f52a091852a8e500",
+        "symbols": [],
+        "physical_lines": 210
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/artifact-verification.sh.inc",
+        "sha256": "9a52a96c072470320baa4f3f5ac00c24f1364b7d23bd3da13b5d07a5b116743b",
+        "symbols": [],
+        "physical_lines": 163
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/directory-journal.sh.inc",
+        "sha256": "312aed34d97b5551594c99547f79df1abdde517da01579ce2883e1e4c711c38c",
+        "symbols": [],
+        "physical_lines": 122
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/directory-lock-boundaries.sh.inc",
+        "sha256": "bfe596b3e0b8e1dd03c5f87563aecaeddfe3c81a79e3b44789400c6011f4b0e2",
+        "symbols": [],
+        "physical_lines": 143
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/preflight-input.sh.inc",
+        "sha256": "a7f67031ff2c4b5c19060e62791ae164eedf44fe17ac137a2acb343a5cd54413",
+        "symbols": [],
+        "physical_lines": 247
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/public-activation.sh.inc",
+        "sha256": "1e06a36fce36045f6eac9beaebbca786835baf9eed03c1a0cbba8068fdb2be85",
+        "symbols": [],
+        "physical_lines": 261
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/public-preflight.sh.inc",
+        "sha256": "29fe35c3dcbbb94349bb89b6fc7c135943fb23e2f2b957ecc12edd2131ad51c1",
+        "symbols": [],
+        "physical_lines": 261
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/release-verification.sh.inc",
+        "sha256": "3f64f4d45343ba1552b8c9fc90f56215d462242d7ea47b94e656fb0520f0ffb1",
+        "symbols": [],
+        "physical_lines": 253
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/state-rollback.sh.inc",
+        "sha256": "78a1e37cfcf901b2aad462f9c313ea1ec9dcab6da33c5a3d037ae092f0c90b7b",
+        "symbols": [],
+        "physical_lines": 272
+      },
+      {
+        "path": "authoring/install-autostream-encoder-recorder/temporary-paths.sh.inc",
+        "sha256": "67088042f0e8a15f469086989683d5c6ca2b37c76abce840b5fd8c368a9cdf37",
+        "symbols": [],
+        "physical_lines": 133
+      },
+      {
+        "path": "release/install-autostream-encoder-recorder",
+        "sha256": "86a0b6f0993b2eb3b931ffc099ed623834325c94165fdb9d0de31f713c85a45a",
+        "symbols": [],
+        "physical_lines": 2363
+      }
+    ]
+  },
+  {
+    "target_id": "B9-M066",
+    "repository": "Kome-Lab/Autostream-Encoder-Recorder",
+    "original_path": "release/test-install-autostream-encoder-recorder-integration.sh",
+    "original_sha256": "e050a8b0d6fb68c6d904e4dd8dffcf8be9d7f3b3fbb4c736193921e3cd49f7e9",
+    "before_physical_lines": 1979,
+    "disposition": "responsibility-split",
+    "responsibility": "fixture setup/stubs;case families;assertions;cleanup;ordered entry",
+    "destinations": [
+      {
+        "path": "release/installer-tests/encoder-recorder/account-and-lock-rollback-cases.sh",
+        "sha256": "379c7443301d682461300cc7ad1114740b20c2ac5ffc452099a3ce5961544fd8",
+        "symbols": [],
+        "physical_lines": 191
+      },
+      {
+        "path": "release/installer-tests/encoder-recorder/archive-and-runtime-sentinel-fixture.sh",
+        "sha256": "ad1347114cf08b0aee952f660b16ce83dbdf3cdb36529e300b0c2ba0ab931d26",
+        "symbols": [],
+        "physical_lines": 241
+      },
+      {
+        "path": "release/installer-tests/encoder-recorder/fixture-ownership-and-runtime.sh",
+        "sha256": "7643d9e9ec9dd3e519a610b5799ba6ef2ff2a5d4a189fe592fac393776930a3f",
+        "symbols": [],
+        "physical_lines": 576
+      },
+      {
+        "path": "release/installer-tests/encoder-recorder/fresh-install-and-legacy-fixture.sh",
+        "sha256": "3add167e8f3deddd91b3a19f850aabae0122f0892b482c29cfdae4a664ad5304",
+        "symbols": [],
+        "physical_lines": 329
+      },
+      {
+        "path": "release/installer-tests/encoder-recorder/input-rejection-cases.sh",
+        "sha256": "7e27ac33d793be46ae7f6f0db771c30269591f22d9562a449a9ce3add5dcbcea",
+        "symbols": [],
+        "physical_lines": 188
+      },
+      {
+        "path": "release/installer-tests/encoder-recorder/legacy-rollback-and-recovery-cases.sh",
+        "sha256": "01bb8d9d2c698b3c212bdd7497268de4360a9f689e7b0d82063570a9939af1f5",
+        "symbols": [],
+        "physical_lines": 135
+      },
+      {
+        "path": "release/installer-tests/encoder-recorder/migration-and-runtime-race-cases.sh",
+        "sha256": "4c457a348c0366a369b5a7ddef20c7e13925500ce142a8cd0cd102be1034ec5a",
+        "symbols": [],
+        "physical_lines": 144
+      },
+      {
+        "path": "release/test-install-autostream-encoder-recorder-integration.sh",
+        "sha256": "3d0faa9593e0efdf3b53ed5901f6e1c128142bd5822805d9c9d0353cd02fd95a",
+        "symbols": [],
+        "physical_lines": 184
+      }
+    ]
+  },
+  {
+    "target_id": "B9-M067",
+    "repository": "Kome-Lab/Autostream-Encoder-Recorder",
+    "original_path": "internal/security/service_installer_test.go",
+    "original_sha256": "f64f497b445025556a70af3e095accd6574782bed680d19550e51c2a7053a9ae",
+    "before_physical_lines": 1232,
+    "disposition": "responsibility-split",
+    "responsibility": "fixture/model ownership;normal scenarios;authorization/negative cases;concurrency/failure/recovery;shared assertions",
+    "destinations": [
+      {
+        "path": "internal/security/installer_scenario_source_test.go",
+        "sha256": "2519383b0fdc0c6d735f19be91f652ea84a2498fc5d30011134b7bd90cc2eeb5",
+        "symbols": [
+          "readInstallerScenarioSource"
+        ],
+        "physical_lines": 53
+      },
+      {
+        "path": "internal/security/service_installer_host_transaction_test.go",
+        "sha256": "78e21fd4f02a58e54b30fa839c28bd2f7fa0f816cdd402978f92f8536cb10e1c",
+        "symbols": [
+          "TestEncoderRecorderInstallerTransactionsPrivilegedHostSetup"
+        ],
+        "physical_lines": 281
+      },
+      {
+        "path": "internal/security/service_installer_test.go",
+        "sha256": "6826f475397139e879057fa1e2ef68f1af700d43ef50a0da50742b9d25bcc0d6",
+        "symbols": [
+          "TestEncoderRecorderReleaseShipsManagedServiceInstaller"
+        ],
+        "physical_lines": 959
+      }
+    ]
+  }
+]

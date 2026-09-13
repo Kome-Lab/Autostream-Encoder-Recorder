@@ -1,0 +1,24 @@
+{
+  "format_version": 1,
+  "repository": "Autostream-Encoder-Recorder",
+  "artifacts": [
+    {
+      "target_id": "B9-M065",
+      "output": "release/install-autostream-encoder-recorder",
+      "fragments": [
+        "authoring/install-autostream-encoder-recorder/preflight-input.sh.inc",
+        "authoring/install-autostream-encoder-recorder/temporary-paths.sh.inc",
+        "authoring/install-autostream-encoder-recorder/directory-journal.sh.inc",
+        "authoring/install-autostream-encoder-recorder/account-rollback.sh.inc",
+        "authoring/install-autostream-encoder-recorder/state-rollback.sh.inc",
+        "authoring/install-autostream-encoder-recorder/activation-cleanup.sh.inc",
+        "authoring/install-autostream-encoder-recorder/artifact-verification.sh.inc",
+        "authoring/install-autostream-encoder-recorder/directory-lock-boundaries.sh.inc",
+        "authoring/install-autostream-encoder-recorder/account-state-snapshots.sh.inc",
+        "authoring/install-autostream-encoder-recorder/public-preflight.sh.inc",
+        "authoring/install-autostream-encoder-recorder/release-verification.sh.inc",
+        "authoring/install-autostream-encoder-recorder/public-activation.sh.inc"
+      ]
+    }
+  ]
+}
