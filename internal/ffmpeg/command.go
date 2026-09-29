@@ -340,7 +340,9 @@ func workerSceneRuntimeFilterWithSilenceAndWatermark(p EncoderProfile, audioGain
 func watermarkInputArgs(input string) []string {
 	trimmed := strings.TrimSpace(input)
 	if strings.HasPrefix(strings.ToLower(trimmed), "tcp://") {
-		return []string{"-thread_queue_size", "8", "-f", "png_pipe", "-framerate", "2", "-i", trimmed}
+		// Bound PNG parser reads and decoder buffering at the 2 fps feed cadence.
+		// frame_size is a packet read size; the PNG parser still assembles full images.
+		return []string{"-thread_queue_size", "8", "-f", "png_pipe", "-framerate", "2", "-threads:v", "1", "-probesize", "32", "-frame_size", "64", "-i", trimmed}
 	}
 	return []string{"-loop", "1", "-i", filepath.Clean(trimmed)}
 }
@@ -363,7 +365,7 @@ func buildLiveTeeOutput(outputTarget, archivePath, previewPlaylistPath string) s
 		// local recording and preview outputs.  The live output is optional;
 		// the archive is the durable source used by the Control Panel.
 		"[f=flv:onfail=ignore]" + escapeTeeSlaveURL(outputTarget),
-		"[f=matroska]" + escapeTeeSlaveURL(filepath.ToSlash(filepath.Clean(archivePath))),
+		"[f=matroska:onfail=abort]" + escapeTeeSlaveURL(filepath.ToSlash(filepath.Clean(archivePath))),
 	}
 	if strings.TrimSpace(previewPlaylistPath) == "" {
 		return strings.Join(slaves, "|")
@@ -485,6 +487,8 @@ func liveVideoCodecArgsWithTune(p EncoderProfile, tune string) []string {
 		// be allowed to infer a square coded size from an upstream stream.
 		"-s:v", itoa(p.Width) + "x" + itoa(p.Height), "-aspect", displayAspect(p.Width, p.Height),
 		"-c:v", "libx264", "-preset", liveVideoPreset,
+		// Tee cannot infer Matroska codec headers from its slave formats.
+		"-flags:v", "+global_header",
 	}
 	if tune = strings.TrimSpace(tune); tune != "" {
 		args = append(args, "-tune", tune)

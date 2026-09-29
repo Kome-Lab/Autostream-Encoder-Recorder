@@ -179,7 +179,7 @@ func TestBuildWorkerVideoRuntimeSettingsKeepStableNamedGainAndDynamicWatermarkIn
 	)
 	joined := strings.Join(args, " ")
 	for _, required := range []string{
-		"-f png_pipe -framerate 2 -i tcp://127.0.0.1:42001",
+		"-f png_pipe -framerate 2 -threads:v 1 -probesize 32 -frame_size 64 -i tcp://127.0.0.1:42001",
 		"volume@gain=4.5dB[aout]",
 		"[base][wm]overlay=0:0",
 		"-re -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000",
@@ -228,7 +228,7 @@ func TestBuildVisualLayersKeepsCoverBelowWatermarkAndSingleTee(t *testing.T) {
 				t.Fatalf("visual/tee topology changed: %s", joined)
 			}
 			tee := tt.args[len(tt.args)-1]
-			for _, parity := range []string{"[f=flv:onfail=ignore]", "[f=matroska]", "f=hls"} {
+			for _, parity := range []string{"[f=flv:onfail=ignore]", "[f=matroska:onfail=abort]", "f=hls"} {
 				if !strings.Contains(tee, parity) {
 					t.Fatalf("output parity missing %q: %s", parity, tee)
 				}
@@ -326,7 +326,7 @@ func TestBuildLiveArchiveArgsWithPreviewKeepsStartToNowDVR(t *testing.T) {
 	teeOutput := args[len(args)-1]
 	for _, want := range []string{
 		"[f=flv:onfail=ignore]",
-		"[f=matroska]",
+		"[f=matroska:onfail=abort]",
 		"f=hls",
 		"onfail=ignore",
 		"use_fifo=1",

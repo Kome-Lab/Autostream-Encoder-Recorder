@@ -6,6 +6,10 @@ cloud.google.com/go/compute/metadata v0.9.0 h1:pDUj4QMoPejqq20dK0Pg2N4yG9zIkYGdB
 cloud.google.com/go/compute/metadata v0.9.0/go.mod h1:E0bWwX5wTnLPedCKqk3pJmVgCBSM6qQI1yTBdEb3C10=
 github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260904044030-e96ac056e73e h1:RlkRkHWeN4KGSOSAzWKcvnj/fijvS8gch2x1wQouM9c=
 github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260904044030-e96ac056e73e/go.mod h1:sJPMVofBZcO4uZd1T/y/VkN6/pwN0PJNAQGzlXI+GN4=
+github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260929134834-5c4ea5642044 h1:cIZLeKJ6BywANohnpghelBY467WH9icWeH8eAMyudiQ=
+github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260929134834-5c4ea5642044/go.mod h1:sJPMVofBZcO4uZd1T/y/VkN6/pwN0PJNAQGzlXI+GN4=
+github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260929140016-7edb888d585e h1:a4bNMxN61H1Gjh0LKUB+aygQirAlCIsHYAuBl9deOxs=
+github.com/Kome-Lab/Autostream-Contracts v1.2.12-0.20260929140016-7edb888d585e/go.mod h1:sJPMVofBZcO4uZd1T/y/VkN6/pwN0PJNAQGzlXI+GN4=
 github.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c h1:8XZeJrs4+ZYhJeJ2aZxADI2tGADS15AzIF8MQ8XAhT4=
 github.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c/go.mod h1:x1vxHcL/9AVzuk5HOloOEPrtJY0MaalYr78afXZ+pWI=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

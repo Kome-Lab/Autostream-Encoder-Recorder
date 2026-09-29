@@ -50,8 +50,56 @@ func TestManagerStartUsesLiveWatermarkFeedAndAddsOverlayFilter(t *testing.T) {
 	if strings.Contains(joined, "data:image/") {
 		t.Fatalf("raw watermark data URL leaked into FFmpeg args: %#v", starter.args)
 	}
-	if !strings.Contains(joined, "-f png_pipe -framerate 2 -i tcp://127.0.0.1:") {
-		t.Fatalf("live watermark input missing from FFmpeg args: %#v", starter.args)
+	assertLivePNGInputSections(t, starter.args)
+}
+
+// Inspect each input option group up to its own -i. Output/global options or
+// flags assigned to another input cannot satisfy the PNG cadence/parser contract.
+func assertLivePNGInputSections(t *testing.T, args []string) {
+	t.Helper()
+	start, count := 0, 0
+	expected := []string{"-thread_queue_size", "8", "-f", "png_pipe", "-framerate", "2", "-threads:v", "1", "-probesize", "32", "-frame_size", "64"}
+	for i := 0; i < len(args); i++ {
+		if args[i] != "-i" {
+			continue
+		}
+		if i+1 >= len(args) {
+			t.Fatal("input missing its URL")
+		}
+		section := args[start:i]
+		png := false
+		for j := 0; j+1 < len(section); j++ {
+			if section[j] == "-f" && section[j+1] == "png_pipe" {
+				png = true
+			}
+		}
+		if png {
+			count++
+			if len(section) != len(expected) {
+				t.Fatalf("PNG input %d has wrong option group: %#v", count, section)
+			}
+			for j := range expected {
+				if section[j] != expected[j] {
+					t.Fatalf("PNG input %d option %d: got %q want %q", count, j, section[j], expected[j])
+				}
+			}
+			target := args[i+1]
+			if !strings.HasPrefix(target, "tcp://") {
+				t.Fatal("PNG input must use TCP loopback")
+			}
+			host, port, err := net.SplitHostPort(strings.TrimPrefix(target, "tcp://"))
+			if err != nil || host != "127.0.0.1" || port == "" {
+				t.Fatalf("PNG input is not an exact loopback endpoint: %q", target)
+			}
+			if _, err := net.LookupPort("tcp", port); err != nil {
+				t.Fatalf("invalid PNG input port: %v", err)
+			}
+		}
+		start = i + 2
+		i++
+	}
+	if count != 2 {
+		t.Fatalf("expected distinct Cover and Watermark PNG inputs, got %d", count)
 	}
 }
 

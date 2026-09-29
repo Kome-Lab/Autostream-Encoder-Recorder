@@ -129,6 +129,7 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	})
 	mux.HandleFunc("POST /streams/dry-run", dryRunStream(verifier, runtimeConfig))
 	mux.HandleFunc("POST /streams/start", startStream(processManager, audioManager, videoManager, verifier, resolver, runtimeConfig))
+	registerStartPreparationRoutes(mux, processManager, audioManager, videoManager, verifier, resolver, runtimeConfig)
 	mux.HandleFunc("PUT /streams/{id}/runtime-settings", updateStreamRuntimeSettings(processManager, verifier, runtimeConfig))
 	mux.HandleFunc("GET /streams/{id}/video-cover-state", getVideoCoverState(processManager, verifier))
 	mux.HandleFunc("PUT /streams/{id}/video-cover-state", putVideoCoverState(processManager, verifier))

@@ -90,6 +90,7 @@ type Bridge struct {
 	Port     int    `json:"port"`
 	SDPPath  string `json:"-"`
 	InputURL string `json:"-"`
+	owner    *bridgeRecord
 }
 
 type bridgeRecord struct {
@@ -225,12 +226,25 @@ func (m *Manager) StartBridge(streamID string) (Bridge, error) {
 	stats.StartedAt = time.Now().UTC()
 	m.stats[streamID] = stats
 	go record.run()
+	bridge.owner = record
 	return bridge, nil
 }
 
-func (m *Manager) StopBridge(streamID string) {
+// StopOwnedBridge is the staged-start lifecycle fence; mixer behavior is unchanged.
+func (m *Manager) StopOwnedBridge(bridge Bridge) {
+	if bridge.owner == nil {
+		return
+	}
+	m.stopBridge(bridge.StreamID, bridge.owner)
+}
+func (m *Manager) StopBridge(streamID string) { m.stopBridge(streamID, nil) }
+func (m *Manager) stopBridge(streamID string, expected *bridgeRecord) {
 	m.mu.Lock()
 	record := m.bridges[streamID]
+	if expected != nil && record != expected {
+		m.mu.Unlock()
+		return
+	}
 	delete(m.bridges, streamID)
 	if stats, ok := m.stats[streamID]; ok {
 		stats.BridgeActive = false

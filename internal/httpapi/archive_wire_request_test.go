@@ -526,8 +526,8 @@ func TestArchiveWireWorkerVideoTokenBoundary(t *testing.T) {
 		status       int
 		code         string
 	}{
-		{"valid_signed", "stream-01", true, http.StatusServiceUnavailable, "worker_video_ingest_unavailable"},
-		{"wrong_stream", "other", true, http.StatusUnauthorized, "missing_or_invalid_worker_video_ingest_token"},
+		{"valid_signed", "stream-01", true, http.StatusConflict, "start_preparation_required"},
+		{"wrong_stream", "other", true, http.StatusConflict, "start_preparation_required"},
 		{"missing_opt_in", "stream-01", false, http.StatusBadRequest, "worker_video_ingest_not_enabled"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -538,8 +538,8 @@ func TestArchiveWireWorkerVideoTokenBoundary(t *testing.T) {
 			root := t.TempDir()
 			starter := &httpFakeStarter{}
 			manager := &streamproc.Manager{ArchiveRoot: root, Starter: starter, OutputRelayMode: outputrelay.ModeDirect}
-			// A valid token reaches the unavailable bridge boundary; invalid tokens
-			// must fail earlier. No media listener or FFmpeg is needed for this check.
+			// Legacy managed start rejects before token/bridge side effects. The
+			// new preparation route tests retain valid/wrong-stream token checks.
 			handler := startStream(manager, nil, nil, TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: signingKey, RequireSignedIngest: true}, testYouTubeSecretResolver, archiveWireRuntimeProvider(nil))
 			body, err := json.Marshal(map[string]any{"stream_id": "stream-01", "name": "Morning", "rtmp_url": "", "encoder_profile_id": "enc-profile-01", "worker_video_ingest": tc.optIn, "worker_video_ingest_token": token})
 			if err != nil {

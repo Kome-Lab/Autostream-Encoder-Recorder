@@ -69,6 +69,8 @@ type Manager struct {
 	mu               sync.Mutex
 	processes        map[string]*trackedProcess
 	coverGenerations map[string]coverGeneration
+	preparations     map[string]*StartPreparation
+	preparationOrder []string
 }
 
 type trackedProcess struct {
@@ -88,6 +90,8 @@ type trackedProcess struct {
 	coverReplayOrder   []string
 	transparentCover   []byte
 	progressPath       string
+	preparation        *StartPreparation
+	cleaning           bool
 }
 
 type Snapshot struct {
@@ -104,6 +108,10 @@ type Snapshot struct {
 }
 
 func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
+	return m.startProcess(context.Background(), job, nil)
+}
+
+func (m *Manager) startProcess(ctx context.Context, job lifecycle.StreamJob, preparation *StartPreparation) (Snapshot, error) {
 	if job.StreamID == "" || job.Name == "" {
 		return Snapshot{}, errors.New("stream id and name are required")
 	}
@@ -125,7 +133,7 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	if job.InputURL == "" {
 		return Snapshot{}, errors.New("input_url is required")
 	}
-	validateCtx, cancelValidate := context.WithTimeout(context.Background(), 3*time.Second)
+	validateCtx, cancelValidate := context.WithTimeout(ctx, 3*time.Second)
 	defer cancelValidate()
 	if err := ffmpeg.ValidateInputTargetWithRuntimePolicy(validateCtx, job.InputURL, m.InputAllowedHosts, m.InputResolver, ffmpeg.RuntimeInputPolicy{AllowDirectHLS: m.AllowDirectHLS, AllowHostnameInputs: m.AllowHostnameInputs, RequireAllowedHosts: m.RequireInputAllowedHosts}); err != nil {
 		return Snapshot{}, err
@@ -167,22 +175,33 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	if m.processes == nil {
 		m.processes = map[string]*trackedProcess{}
 	}
-	if existing, ok := m.processes[job.StreamID]; ok {
-		switch existing.snapshot.Status {
-		case "starting", "running", "stopping", "packaging":
+	var reserved *trackedProcess
+	if preparation != nil {
+		reserved = preparation.tracked
+		if m.processes[job.StreamID] != reserved || preparation.phase != "preparing" {
 			m.mu.Unlock()
-			return Snapshot{}, ErrAlreadyRunning
+			return Snapshot{}, ErrPreparationConflict
 		}
+	} else {
+		for streamID, existing := range m.processes {
+			// Preserve independent legacy starts; managed preparation owns the
+			// one video slot exclusively against every start path.
+			if processOwnsSlot(existing) && (streamID == job.StreamID || existing.preparation != nil) {
+				m.mu.Unlock()
+				return Snapshot{}, ErrAlreadyRunning
+			}
+		}
+		reserved = &trackedProcess{snapshot: Snapshot{StreamID: job.StreamID, Name: job.Name, Status: "starting", StartedAtJST: startedAt.In(jst()).Format(time.RFC3339)}, job: job}
+		m.processes[job.StreamID] = reserved
 	}
-	m.processes[job.StreamID] = &trackedProcess{snapshot: Snapshot{StreamID: job.StreamID, Name: job.Name, Status: "starting", StartedAtJST: startedAt.In(jst()).Format(time.RFC3339)}, job: job}
 	m.mu.Unlock()
-	reservationActive := true
+	reservationActive := preparation == nil
 	defer func() {
 		if !reservationActive {
 			return
 		}
 		m.mu.Lock()
-		if tracked, ok := m.processes[job.StreamID]; ok && tracked.snapshot.Status == "starting" {
+		if m.processes[job.StreamID] == reserved {
 			delete(m.processes, job.StreamID)
 		}
 		m.mu.Unlock()
@@ -223,7 +242,7 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 			return Snapshot{}, videocover.NewError(videocover.ErrorCapabilityRequired)
 		}
 		if job.VideoCoverStart.Active {
-			fetchCtx, cancelFetch := context.WithTimeout(context.Background(), m.coverFetchTimeout())
+			fetchCtx, cancelFetch := context.WithTimeout(ctx, m.coverFetchTimeout())
 			coverFrame, err = m.CoverAssets.Load(fetchCtx, job.StreamID, *job.VideoCoverStart.CoverAsset, profile.Width, profile.Height)
 			cancelFetch()
 			if err != nil {
@@ -261,28 +280,68 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 		starter = ExecStarter{}
 	}
 
-	process, err := starter.Start(context.Background(), m.ffmpegBin(), args)
-	if err != nil {
-		return Snapshot{}, err
-	}
 	jobGeneration := uint64(0)
 	if job.VideoCoverStart != nil {
 		jobGeneration = job.VideoCoverStart.JobGeneration
 	}
 	graphGeneration, err := m.nextCoverGeneration(job.StreamID, jobGeneration)
 	if err != nil {
-		_ = process.Kill()
-		_ = coverSource.Close()
-		_ = watermarkSource.Close()
+		return Snapshot{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
+	}
+	process, err := starter.Start(context.Background(), m.ffmpegBin(), args)
+	if err != nil {
 		return Snapshot{}, err
 	}
 	coverState := initialCoverRuntimeState(job.StreamID, graphGeneration, job.VideoCoverStart, watermarkState)
+	if preparation != nil {
+		snapshot := Snapshot{StreamID: job.StreamID, Name: job.Name, Status: "starting", PID: process.PID(), Archive: lifecycle.ArchiveArtifactsForRun(job.StreamID, job.ArchiveRunID), StartedAtJST: startedAt.In(jst()).Format(time.RFC3339), EncoderAudioGainDB: job.EncoderAudioGainDB, OverlayProfileID: job.OverlayProfileID}
+		m.mu.Lock()
+		// An abort can mark this owner terminal while Start is in flight. It
+		// waits for prepareDone, so even that process must be installed and reaped.
+		cancelled := preparation.phase != "preparing" || ctx.Err() != nil
+		reserved.snapshot = snapshot
+		reserved.process = process
+		reserved.job = job
+		reserved.done = make(chan error, 1)
+		reserved.watermark = watermarkSource
+		reserved.watermarkState = watermarkState
+		reserved.cover = coverSource
+		reserved.coverState = coverState
+		reserved.coverReplay = map[string]coverReplay{}
+		reserved.transparentCover = transparentCover
+		reserved.progressPath = layout.TmpFFmpegProgress()
+		preparation.frame = coverFrame
+		if !cancelled {
+			preparation.phase = "prepared"
+		}
+		preparation.expiresAt = time.Now().UTC().Add(30 * time.Second)
+		preparation.exited = make(chan struct{})
+		m.mu.Unlock()
+		coverActive = false
+		watermarkActive = false
+		// Ownership and Wait are installed before prepare can acknowledge the caller.
+		go m.wait(job.StreamID, process, reserved.done)
+		preparationDiagnostic(preparation.identity, "ffmpeg_started", "prepared")
+		if cancelled {
+			return Snapshot{}, ErrPreparationConflict
+		}
+		if err := writeStartMetadata(layout, job, snapshot, args, m.ffmpegBin(), outputRoute); err != nil {
+			return Snapshot{}, err
+		}
+		time.AfterFunc(30*time.Second, func() { m.expirePreparation(preparation) })
+		return snapshot, nil
+	}
+
 	if job.VideoCoverStart != nil {
 		witnessCtx, cancelWitness := context.WithTimeout(context.Background(), m.coverApplyTimeout())
 		witnessErr := m.coverGraphWitness().Apply(witnessCtx, coverSource, coverFrame, true, layout.TmpFFmpegProgress())
 		cancelWitness()
 		if witnessErr != nil {
 			_ = process.Kill()
+			go func() { _ = process.Wait() }()
 			_ = coverSource.Close()
 			_ = watermarkSource.Close()
 			return Snapshot{}, videocover.NewError(videocover.ErrorCoverGraphUnavailable)
@@ -301,6 +360,7 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	}
 	if err := writeStartMetadata(layout, job, snapshot, args, m.ffmpegBin(), outputRoute); err != nil {
 		_ = process.Kill()
+		go func() { _ = process.Wait() }()
 		_ = coverSource.Close()
 		_ = watermarkSource.Close()
 		return Snapshot{}, err

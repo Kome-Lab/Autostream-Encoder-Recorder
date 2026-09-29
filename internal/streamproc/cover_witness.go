@@ -2,6 +2,8 @@ package streamproc
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -65,9 +67,14 @@ func (progressCoverWitness) Apply(ctx context.Context, source *imagefeed.Source,
 		err = source.UpdateAndWait(ctx, frame)
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("initial_feed_delivery: %w", err)
 	}
-	return waitForVisualOutputAdvance(ctx, progressPath)
+	logPreparationWitness(ctx, "feed_delivered")
+	if err := waitForVisualOutputAdvance(ctx, progressPath); err != nil {
+		return fmt.Errorf("output_advance: %w", err)
+	}
+	logPreparationWitness(ctx, "output_advanced")
+	return nil
 }
 
 type progressWatermarkWitness struct{}
@@ -105,4 +112,12 @@ func readCoverProgress(path string) ffmpeg.Progress {
 		return ffmpeg.Progress{}
 	}
 	return ffmpeg.ParseProgress(string(body))
+}
+
+func logPreparationWitness(ctx context.Context, stage string) {
+	if id, ok := ctx.Value(preparationWitnessContextKey{}).(StartPreparationIdentity); ok {
+		preparationDiagnostic(id, stage, "committing")
+	} else {
+		log.Printf("encoder visual witness: stage=%s", stage)
+	}
 }

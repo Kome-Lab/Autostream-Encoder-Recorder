@@ -38,6 +38,10 @@ func TestLiveTeePreviewWithFFmpeg(t *testing.T) {
 		archiveMKV := filepath.Join(root, "archive output.mkv")
 		args := BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(input, outputFLV, archiveMKV, playlist, "", "", profile)
 		runFFmpeg(t, ffmpegBin, args)
+		archiveAssertMedia(t, archiveMKV)
+		archiveAssertMedia(t, outputFLV)
+		archiveAssertMedia(t, playlist)
+		archiveAssertSegments(t, playlist)
 
 		body, err := os.ReadFile(playlist)
 		if err != nil {
@@ -73,6 +77,7 @@ func TestLiveTeePreviewWithFFmpeg(t *testing.T) {
 		args := BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(input, outputFLV, archiveMKV, playlist, "", "", profile)
 		runFFmpeg(t, ffmpegBin, args)
 		for _, path := range []string{outputFLV, archiveMKV} {
+			archiveAssertMedia(t, path)
 			info, err := os.Stat(path)
 			if err != nil {
 				t.Fatalf("non-preview slave did not complete after preview failure: %v", err)
@@ -96,6 +101,9 @@ func TestLiveTeePreviewWithFFmpeg(t *testing.T) {
 		args := BuildLiveArchiveArgsToOutputTargetWithTelemetryAndPreview(input, liveOutput, archiveMKV, playlist, "", "", profile)
 		runFFmpeg(t, ffmpegBin, args)
 
+		archiveAssertMedia(t, archiveMKV)
+		archiveAssertMedia(t, playlist)
+		archiveAssertSegments(t, playlist)
 		archiveInfo, err := os.Stat(archiveMKV)
 		if err != nil {
 			t.Fatalf("archive output did not survive live output failure: %v", err)

@@ -60,6 +60,7 @@ type Bridge struct {
 	Passphrase string `json:"passphrase"`
 	PBKeylen   int    `json:"pbkeylen"`
 	InputURL   string `json:"-"`
+	owner      *bridgeRecord
 }
 
 type Manager struct {
@@ -182,15 +183,28 @@ func (m *Manager) StartBridge(streamID, jobCredential string) (Bridge, error) {
 		Passphrase: passphrase,
 		PBKeylen:   pbKeylen,
 		InputURL:   inputPrefix + "tcp://" + net.JoinHostPort("127.0.0.1", fmt.Sprintf("%d", tcpAddr.Port)),
+		owner:      record,
 	}, nil
 }
 
-func (m *Manager) StopBridge(streamID string) {
+// StopOwnedBridge cannot detach a replacement that reused the same stream ID.
+func (m *Manager) StopOwnedBridge(bridge Bridge) {
+	if bridge.owner == nil {
+		return
+	}
+	m.stopBridge(bridge.owner.streamID, bridge.owner)
+}
+func (m *Manager) StopBridge(streamID string) { m.stopBridge(streamID, nil) }
+func (m *Manager) stopBridge(streamID string, expected *bridgeRecord) {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
 	record := m.bridges[strings.TrimSpace(streamID)]
+	if expected != nil && record != expected {
+		m.mu.Unlock()
+		return
+	}
 	if record != nil {
 		delete(m.bridges, strings.TrimSpace(streamID))
 	}

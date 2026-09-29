@@ -61,13 +61,22 @@ func (m *Manager) Stop(streamID string) (Snapshot, error) {
 func (m *Manager) StopAll() []error {
 	m.mu.Lock()
 	streamIDs := make([]string, 0, len(m.processes))
+	var prepared []StartPreparationIdentity
 	for streamID, tracked := range m.processes {
+		if tracked.preparation != nil && tracked.snapshot.Status == "starting" {
+			prepared = append(prepared, tracked.preparation.identity)
+		}
 		if tracked.snapshot.Status == "running" {
 			streamIDs = append(streamIDs, streamID)
 		}
 	}
 	m.mu.Unlock()
 	errs := make([]error, 0)
+	for _, id := range prepared {
+		if _, err := m.AbortStartPreparation(context.Background(), id); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	for _, streamID := range streamIDs {
 		if _, err := m.Stop(streamID); err != nil && !errors.Is(err, ErrNotRunning) {
 			errs = append(errs, err)
@@ -103,8 +112,7 @@ func (m *Manager) isDrained() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, tracked := range m.processes {
-		switch tracked.snapshot.Status {
-		case "starting", "running", "stopping", "packaging":
+		if processOwnsSlot(tracked) {
 			return false
 		}
 	}
@@ -190,17 +198,57 @@ func (m *Manager) HeartbeatMetrics() map[string]float64 {
 
 func (m *Manager) wait(streamID string, process RunningProcess, done chan<- error) {
 	err := process.Wait()
-	if done != nil {
-		done <- err
-	}
 	var signal observability.Signal
 	var shouldPackage bool
 	var packageJob lifecycle.PackageJob
 	m.mu.Lock()
 	tracked, ok := m.processes[streamID]
-	if !ok {
+	if !ok || tracked.process != process {
 		m.mu.Unlock()
+		if done != nil {
+			done <- err
+		}
 		return
+	}
+	tracked.cleaning = true
+	preparation := tracked.preparation
+	if preparation != nil {
+		close(preparation.exited)
+		if preparation.phase != "running" {
+			if preparation.phase != "aborted" && preparation.phase != "expired" {
+				preparation.phase = "failed"
+			}
+			if preparation.code == "" {
+				preparation.code = "preparation_process_exited"
+			}
+			tracked.snapshot.Status = "failed"
+			tracked.snapshot.StoppedAtJST = time.Now().In(jst()).Format(time.RFC3339)
+			preparation.cancel()
+			job := tracked.job
+			identity := preparation.identity
+			code := preparation.code
+			m.mu.Unlock()
+			m.reportPreparationExit(identity, code, job, process, err)
+			if done != nil {
+				done <- err
+			}
+			m.cleanupPreparationResources(preparation)
+			<-preparation.prepareDone
+			<-preparation.cleanupDone
+			m.mu.Lock()
+			tracked.cleaning = false
+			scrubTrackedProcessJob(tracked)
+			terminalPhase := preparation.phase
+			m.rememberPreparationTerminalLocked(preparation)
+			m.mu.Unlock()
+			preparationDiagnostic(preparation.identity, "process_exit", terminalPhase)
+			return
+		}
+		preparation.phase = "failed"
+		preparation.code = "process_exited"
+	}
+	if done != nil {
+		done <- err
 	}
 	tracked.snapshot.StoppedAtJST = time.Now().In(jst()).Format(time.RFC3339)
 	stopRequested := tracked.snapshot.Status == "stopping"
@@ -291,9 +339,18 @@ func (m *Manager) wait(streamID string, process RunningProcess, done chan<- erro
 	if watermarkSource != nil {
 		_ = watermarkSource.Close()
 	}
-	if m.ProcessExitHook != nil {
+	if preparation != nil {
+		m.cleanupPreparationResources(preparation)
+		<-preparation.cleanupDone
+	} else if m.ProcessExitHook != nil {
 		m.ProcessExitHook(streamID)
 	}
+	m.mu.Lock()
+	tracked.cleaning = false
+	if preparation != nil {
+		m.rememberPreparationTerminalLocked(preparation)
+	}
+	m.mu.Unlock()
 	logProcessDiagnostic(signal)
 	m.report(signal)
 	m.reportMetric(streamID, "encoder.process_alive", 0)

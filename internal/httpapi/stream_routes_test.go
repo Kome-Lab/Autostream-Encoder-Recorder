@@ -656,124 +656,15 @@ func TestStartEndpointUsesDiscordAudioBridgeWhenInputURLIsEmpty(t *testing.T) {
 }
 
 func TestStartEndpointOptInWorkerVideoReturnsOneTimeSRTCredentialWithoutLeakingItToFFmpegOrMetadata(t *testing.T) {
-	t.Setenv("AUTOSTREAM_ENV", "development")
-	t.Setenv("AUTOSTREAM_WORKER_VIDEO_BIND_ADDR", "127.0.0.1:0")
-	t.Setenv("AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST", "127.0.0.1")
-	const signingKey = "worker-video-signing-key"
-	token, err := ingesttoken.Issue(signingKey, ingesttoken.Claims{
-		StreamID:    "stream-worker-video",
-		ServiceID:   "worker-01",
-		ServiceType: "worker",
-		Purpose:     "worker_video",
-		Audience:    "encoder_recorder",
-		ExpiresAt:   time.Now().Add(time.Hour).Unix(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	root := t.TempDir()
-	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
-	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: signingKey, RequireSignedIngest: true}, "stream-worker-video")
-
-	body, err := json.Marshal(map[string]any{
-		"stream_id":                 "stream-worker-video",
-		"name":                      "Worker Scene Stream",
-		"worker_video_ingest":       true,
-		"worker_video_ingest_token": token,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer service-token")
-	res := httptest.NewRecorder()
-	handler.ServeHTTP(res, req)
-	if res.Code != http.StatusAccepted {
-		t.Fatalf("start status = %d body = %s", res.Code, res.Body.String())
-	}
-	t.Cleanup(func() {
-		stopReq := httptest.NewRequest(http.MethodPost, "/streams/stream-worker-video/stop", nil)
-		stopReq.SetPathValue("id", "stream-worker-video")
-		stopReq.Header.Set("Authorization", "Bearer service-token")
-		handler.ServeHTTP(httptest.NewRecorder(), stopReq)
-	})
-
-	var response struct {
-		Status      string `json:"status"`
-		VideoIngest struct {
-			URL        string `json:"url"`
-			Passphrase string `json:"passphrase"`
-			PBKeylen   int    `json:"pbkeylen"`
-		} `json:"video_ingest"`
-	}
-	if err := json.Unmarshal(res.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode start response: %v", err)
-	}
-	if response.Status != "running" || !strings.HasPrefix(response.VideoIngest.URL, "srt://127.0.0.1:") || response.VideoIngest.Passphrase == "" || response.VideoIngest.PBKeylen != 32 {
-		t.Fatalf("unexpected start response: %s", res.Body.String())
-	}
-	if got := res.Header().Get("Cache-Control"); got != "no-store" {
-		t.Fatalf("credential-bearing start response Cache-Control = %q, want no-store", got)
-	}
-	if strings.Contains(res.Body.String(), token) {
-		t.Fatalf("start response leaked the signed job token: %s", res.Body.String())
-	}
-	joinedArgs := strings.Join(starter.args, " ")
-	for _, leaked := range []string{token, response.VideoIngest.Passphrase, "passphrase"} {
-		if strings.Contains(joinedArgs, leaked) {
-			t.Fatalf("FFmpeg args leaked worker video credential %q: %s", leaked, joinedArgs)
-		}
-	}
-	for _, want := range []string{"-f mjpeg", "tcp://127.0.0.1:", "discord-opus.sdp", "-map [v] -map [aout_stats]"} {
-		if !strings.Contains(joinedArgs, want) {
-			t.Fatalf("FFmpeg args missing %q: %s", want, joinedArgs)
-		}
-	}
-	metadata, err := os.ReadFile(filepath.Join(root, "tmp", "stream-worker-video", "metadata.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, leaked := range []string{token, response.VideoIngest.Passphrase} {
-		if strings.Contains(string(metadata), leaked) {
-			t.Fatalf("metadata leaked worker video credential %q: %s", leaked, metadata)
-		}
-	}
-	statusReq := httptest.NewRequest(http.MethodGet, "/streams/stream-worker-video/process-status", nil)
-	statusReq.SetPathValue("id", "stream-worker-video")
-	statusReq.Header.Set("Authorization", "Bearer service-token")
-	statusRes := httptest.NewRecorder()
-	handler.ServeHTTP(statusRes, statusReq)
-	if statusRes.Code != http.StatusOK {
-		t.Fatalf("process status = %d body = %s", statusRes.Code, statusRes.Body.String())
-	}
-	for _, leaked := range []string{token, response.VideoIngest.Passphrase, "video_ingest"} {
-		if strings.Contains(statusRes.Body.String(), leaked) {
-			t.Fatalf("process status leaked one-time Worker video material %q: %s", leaked, statusRes.Body.String())
-		}
-	}
+	TestStartPreparationHTTPPrepareCommitAbortAndSecretBoundary(t)
 }
 
 func TestStartEndpointRejectsInvalidWorkerVideoTokenBeforeAllocatingMediaBridges(t *testing.T) {
-	t.Setenv("AUTOSTREAM_ENV", "development")
-	root := t.TempDir()
-	starter := &httpFakeStarter{}
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
-	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: "expected-signing-key", RequireSignedIngest: true}, "stream-worker-video")
-
-	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-worker-video","name":"Worker Scene Stream","worker_video_ingest":true,"worker_video_ingest_token":"not-a-signed-token"}`))
-	req.Header.Set("Authorization", "Bearer service-token")
-	res := httptest.NewRecorder()
-	handler.ServeHTTP(res, req)
-	if res.Code != http.StatusUnauthorized || !strings.Contains(res.Body.String(), "missing_or_invalid_worker_video_ingest_token") {
-		t.Fatalf("status = %d body = %s", res.Code, res.Body.String())
-	}
-	if starter.process != nil {
-		t.Fatalf("FFmpeg started with an invalid Worker video token: %#v", starter.args)
-	}
-	if _, err := os.Stat(filepath.Join(root, "tmp", "stream-worker-video", "discord-opus.sdp")); !os.IsNotExist(err) {
-		t.Fatalf("audio bridge was allocated before token verification: %v", err)
+	f := newPreparationHTTPFixture(t)
+	f.request["start_request"].(map[string]any)["worker_video_ingest_token"] = "invalid"
+	w := f.call("POST", "/streams/start-preparations", f.request, "service-token")
+	if w.Code != 401 || f.starter.count.Load() != 0 || f.resolves.Load() != 0 {
+		t.Fatal(w.Code, w.Body.String())
 	}
 }
 
@@ -796,52 +687,21 @@ func TestStartEndpointRejectsWorkerVideoTokenWithoutExplicitOptIn(t *testing.T) 
 }
 
 func TestStartEndpointRejectsDifferentStreamWhileEncoderVideoBridgeIsActive(t *testing.T) {
-	t.Setenv("AUTOSTREAM_ENV", "development")
-	t.Setenv("AUTOSTREAM_WORKER_VIDEO_BIND_ADDR", "127.0.0.1:0")
-	t.Setenv("AUTOSTREAM_WORKER_VIDEO_ADVERTISE_HOST", "127.0.0.1")
-	const signingKey = "worker-video-signing-key"
-	issueToken := func(streamID string) string {
-		t.Helper()
-		token, err := ingesttoken.Issue(signingKey, ingesttoken.Claims{
-			StreamID: streamID, ServiceID: "worker-01", ServiceType: "worker",
-			Purpose: "worker_video", Audience: "encoder_recorder", ExpiresAt: time.Now().Add(time.Hour).Unix(),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return token
+	f := newPreparationHTTPFixture(t)
+	if w := f.call("POST", "/streams/start-preparations", f.request, "service-token"); w.Code != 202 {
+		t.Fatal(w.Body.String())
 	}
-
-	root := t.TempDir()
-	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
-	handler := newV2TestServerWithManagers(t, processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: signingKey, RequireSignedIngest: true}, "stream-worker-video-01", "stream-worker-video-02")
-	start := func(streamID string) *httptest.ResponseRecorder {
-		t.Helper()
-		body, err := json.Marshal(map[string]any{
-			"stream_id": streamID, "name": streamID,
-			"worker_video_ingest": true, "worker_video_ingest_token": issueToken(streamID),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer service-token")
-		res := httptest.NewRecorder()
-		handler.ServeHTTP(res, req)
-		return res
+	f.request["start_id"] = "22222222-2222-4222-8222-222222222222"
+	nested := f.request["start_request"].(map[string]any)
+	nested["stream_id"] = "stream-02"
+	token, e := ingesttoken.Issue("node-config-signing-key", ingesttoken.Claims{StreamID: "stream-02", ServiceID: "worker-01", ServiceType: "worker", Purpose: "worker_video", Audience: "encoder_recorder", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	if e != nil {
+		t.Fatal(e)
 	}
-
-	if first := start("stream-worker-video-01"); first.Code != http.StatusAccepted {
-		t.Fatalf("first start status = %d body = %s", first.Code, first.Body.String())
-	}
-	t.Cleanup(func() {
-		stopReq := httptest.NewRequest(http.MethodPost, "/streams/stream-worker-video-01/stop", nil)
-		stopReq.SetPathValue("id", "stream-worker-video-01")
-		stopReq.Header.Set("Authorization", "Bearer service-token")
-		handler.ServeHTTP(httptest.NewRecorder(), stopReq)
-	})
-	if second := start("stream-worker-video-02"); second.Code != http.StatusConflict || !strings.Contains(second.Body.String(), "stream_already_running") {
-		t.Fatalf("second start status = %d body = %s", second.Code, second.Body.String())
+	nested["worker_video_ingest_token"] = token
+	w := f.call("POST", "/streams/start-preparations", f.request, "service-token")
+	if w.Code != 409 || f.starter.count.Load() != 1 || f.resolves.Load() != 1 {
+		t.Fatal(w.Code, w.Body.String())
 	}
 }
 

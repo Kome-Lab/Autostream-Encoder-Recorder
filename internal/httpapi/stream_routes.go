@@ -121,6 +121,11 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			writeJSON(w, status, map[string]string{"code": limitedJSONErrorCode(status)})
 			return
 		}
+		if startRequest.WorkerVideoIngest {
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "start_preparation_required"})
+			return
+		}
 		job := startRequest.streamJob()
 		if err := startRequest.validateArchiveRun(); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "bad_request"})

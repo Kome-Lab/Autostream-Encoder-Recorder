@@ -530,6 +530,7 @@ func serviceCapabilities() map[string]any {
 	}
 	if videoingest.NewManagerFromEnv().Available() {
 		capabilities["worker_frame_ingest_mjpeg_srt"] = true
+		capabilities["stream_start_prepare_commit_v2"] = true
 	}
 	coverConfig := ConfigFromEnv()
 	if coverConfig.Validate() == nil {
