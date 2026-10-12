@@ -266,48 +266,80 @@ func TestPNG079ProductionFeedsRevision(t *testing.T) {
 		_ = cmd.Wait()
 		t.Logf("real feeds PID=%d elapsed=%s exit=%d stderr=%s", pid, time.Since(start), cmd.ProcessState.ExitCode(), stderr.String())
 	}()
-	check := func(stage string, wantCover, wantBlue bool) {
+
+	expected := func(rgb []byte, blue bool) []byte {
+		out := make([]byte, 320*180*4)
+		for i := 0; i < len(out); i += 4 {
+			copy(out[i:i+4], []byte{rgb[0], rgb[1], rgb[2], 255})
+		}
+		for y := 0; y < 30; y++ {
+			for x := 0; x < 40; x++ {
+				v := []byte{0, 255, 0, 255}
+				if blue {
+					v = []byte{0, 0, 255, 255}
+				}
+				copy(out[(y*320+x)*4:], v)
+			}
+		}
+		return out
+	}
+	transition := func(stage string, before, after []byte, update func() error) {
 		t.Helper()
 		deadline := time.NewTimer(6 * time.Second)
 		defer deadline.Stop()
+		ack := make(chan error, 1)
+		go func() { ack <- update() }()
+		seen, applied, count := false, false, 0
 		for {
 			select {
-			case f, ok := <-frames:
+			case err := <-ack:
+				if err != nil {
+					t.Fatal(err)
+				}
+				applied = true
+				ack = nil
+			case frame, ok := <-frames:
 				if !ok {
 					t.Fatalf("%s process exited", stage)
 				}
-				base := f[(90*320+160)*4:][:4]
-				mark := f[(10*320+10)*4:][:4]
-				expected := []byte{0, 0, 0, 255}
-				if wantCover {
-					expected = []byte{240, 31, 17, 255}
-				}
-				wm := []byte{0, 255, 0, 255}
-				if wantBlue {
-					wm = []byte{0, 0, 255, 255}
-				}
-				if bytes.Equal(base, expected) && bytes.Equal(mark, wm) {
-					t.Logf("stage=%s PID=%d elapsed=%s centre=%v marker=%v", stage, pid, time.Since(start), base, mark)
-					return
+				if bytes.Equal(frame, after) {
+					seen = true
+					count++
+				} else if seen || !bytes.Equal(frame, before) {
+					colours := map[[4]byte]int{}
+					for i := 0; i < len(frame); i += 4 {
+						v := [4]byte{frame[i], frame[i+1], frame[i+2], frame[i+3]}
+						colours[v]++
+					}
+					t.Fatalf("%s exposed/mixed/obsolete frame sha=%x seen=%t colours=%v", stage, sha256.Sum256(frame), seen, colours)
 				}
 			case <-deadline.C:
-				t.Fatalf("%s no decoded expected revision inside unchanged six-second bound", stage)
+				t.Fatalf("%s no complete revision within six seconds", stage)
+			}
+			if applied && count >= 3 {
+				t.Logf("stage=%s PID=%d frames=%d elapsed=%s", stage, pid, count, time.Since(start))
+				return
 			}
 		}
 	}
-	check("initial-transparent", false, false)
-	if err := cover.UpdateAndWait(ctx, active); err != nil {
+	blackGreen := expected([]byte{0, 0, 0}, false)
+	redGreen := expected([]byte{240, 31, 17}, false)
+	transition("initial-transparent", blackGreen, blackGreen, func() error { return nil })
+	transition("cover-A-watermark-retained", blackGreen, redGreen, func() error { return cover.UpdateAndWait(ctx, active) })
+	imageB := image.NewNRGBA(image.Rect(0, 0, 320, 180))
+	for i := 0; i < len(imageB.Pix); i += 4 {
+		copy(imageB.Pix[i:], []byte{17, 80, 240, 255})
+	}
+	var pngB bytes.Buffer
+	if err := png.Encode(&pngB, imageB); err != nil {
 		t.Fatal(err)
 	}
-	check("cover-active-watermark-retained", true, false)
-	if err := watermark.UpdateAndWait(ctx, marker(true)); err != nil {
-		t.Fatal(err)
-	}
-	check("independent-watermark-revision", true, true)
-	if err := cover.UpdateAndWait(ctx, transparent); err != nil {
-		t.Fatal(err)
-	}
-	check("cover-hidden-watermark-retained", false, true)
+	blueGreen := expected([]byte{17, 80, 240}, false)
+	transition("cover-A-to-B-no-base-exposure", redGreen, blueGreen, func() error { return cover.UpdateAndWait(ctx, pngB.Bytes()) })
+	blueBlue := expected([]byte{17, 80, 240}, true)
+	transition("independent-watermark-revision", blueGreen, blueBlue, func() error { return watermark.UpdateAndWait(ctx, marker(true)) })
+	transition("cover-hidden-watermark-retained", blueBlue, expected([]byte{0, 0, 0}, true), func() error { return cover.UpdateAndWait(ctx, transparent) })
+
 }
 
 func TestPNG079Sequence(t *testing.T) {

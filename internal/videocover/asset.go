@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"golang.org/x/image/draw"
 	"image"
 	"image/color"
 	_ "image/jpeg"
@@ -138,8 +139,13 @@ func (l *Loader) Load(ctx context.Context, streamID string, descriptor MediaAsse
 	if !isOpaque(decoded) {
 		return nil, NewError(ErrorMediaAssetVariantFailed)
 	}
+	if outputWidth < 1 || outputHeight < 1 || int64(outputWidth)*int64(outputHeight) > 40_000_000 {
+		return nil, NewError(ErrorMediaAssetDimensionMismatch)
+	}
+	frame := image.NewNRGBA(image.Rect(0, 0, outputWidth, outputHeight))
+	draw.CatmullRom.Scale(frame, frame.Bounds(), decoded, decoded.Bounds(), draw.Src, nil)
 	var normalized bytes.Buffer
-	if err := png.Encode(&normalized, decoded); err != nil {
+	if err := png.Encode(&normalized, frame); err != nil {
 		return nil, NewError(ErrorMediaAssetDecodeFailed)
 	}
 	data := normalized.Bytes()

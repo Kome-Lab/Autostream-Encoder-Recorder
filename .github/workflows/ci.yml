@@ -92,5 +92,12 @@ jobs:
           path: ${{ runner.temp }}/runtime-structural-regressions.json
           if-no-files-found: error
           retention-days: 14
+      - name: Verify UI188 cover switch and audio on production FFmpeg tee
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/ui188-production-media.json"
+          go test -mod=readonly -p 1 -tags autostream_media_diagnostics ./internal/audioingest -run '^TestAudioTimelineProductionInput$' -count=1 -json | tee "${result}"
+          jq -s -e '([.[] | select(.Action=="skip" or .Action=="fail")]|length)==0 and ([.[]|select(.Action=="pass" and .Test=="TestAudioTimelineProductionInput")]|length)==1' "${result}" >/dev/null
       - run: go test ./...
       - run: go build ./...

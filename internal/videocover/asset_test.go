@@ -83,6 +83,37 @@ func TestLoaderValidatesAndCachesImmutableVariant(t *testing.T) {
 	}
 }
 
+func TestUI188LoaderKeepsFeedDimensionsAcrossOutputProfiles(t *testing.T) {
+	body := opaquePNG(t, 320, 180)
+	descriptor := descriptorFor(t, body, 320, 180)
+	fetcher := &countingFetcher{data: body, meta: FetchMetadata{MediaType: descriptor.MediaType, ByteSize: descriptor.ByteSize, AssetID: descriptor.AssetID, VariantID: descriptor.VariantID, Width: 320, Height: 180, SHA256: descriptor.SHA256}}
+	loader := NewLoader(fetcher, 4, 1<<20)
+	for _, size := range [][2]int{{160, 90}, {320, 180}} {
+		frame, err := loader.Load(t.Context(), "stream-geometry", descriptor, size[0], size[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := png.Decode(bytes.NewReader(frame))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Bounds().Dx() != size[0] || decoded.Bounds().Dy() != size[1] || !isOpaque(decoded) {
+			t.Fatal("normalized cover feed geometry or opacity changed")
+		}
+		transparent, err := TransparentFrame(size[0], size[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		config, err := png.DecodeConfig(bytes.NewReader(transparent))
+		if err != nil || config.Width != size[0] || config.Height != size[1] {
+			t.Fatal("show/hide geometry differs")
+		}
+	}
+	if fetcher.calls != 2 {
+		t.Fatal("geometry-specific immutable cache was not used")
+	}
+}
+
 func TestLoaderRejectsHashDimensionTransparencyAndDoesNotCacheFailures(t *testing.T) {
 	body := opaquePNG(t, 16, 9)
 	tests := []struct {

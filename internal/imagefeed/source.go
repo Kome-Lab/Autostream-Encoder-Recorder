@@ -1,8 +1,12 @@
 package imagefeed
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/draw"
+	"image/png"
 	"io"
 	"net"
 	"strings"
@@ -40,6 +44,10 @@ func New(kind string, initialFrame []byte) (*Source, error) {
 	}
 	if len(initialFrame) == 0 {
 		return nil, fmt.Errorf("%s frame is required", kind)
+	}
+	initialFrame, err := stablePNGFrame(initialFrame)
+	if err != nil {
+		return nil, fmt.Errorf("%s invalid PNG frame: %w", kind, err)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -96,6 +104,11 @@ func (s *Source) update(frame []byte) (uint64, error) {
 	if s == nil || len(frame) == 0 {
 		return 0, fmt.Errorf("%s frame is required", s.name())
 	}
+	var err error
+	frame, err = stablePNGFrame(frame)
+	if err != nil {
+		return 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -109,6 +122,29 @@ func (s *Source) update(frame []byte) (uint64, error) {
 	default:
 	}
 	return version, nil
+}
+
+// PNG's opaque optimization changes RGB/RGBA decoder format when a cover is
+// shown/hidden. That reinitializes the shared FFmpeg graph and loses buffered
+// Watermark/audio frames. Keep the loopback feed's decoded format constant.
+type rgbaPNGFrame struct{ *image.NRGBA }
+
+func (r rgbaPNGFrame) Opaque() bool { return false }
+func stablePNGFrame(frame []byte) ([]byte, error) {
+	if !bytes.HasPrefix(frame, []byte("\x89PNG\r\n\x1a\n")) {
+		return frame, nil
+	}
+	source, err := png.Decode(bytes.NewReader(frame))
+	if err != nil {
+		return nil, err
+	}
+	imageFrame := image.NewNRGBA(image.Rect(0, 0, source.Bounds().Dx(), source.Bounds().Dy()))
+	draw.Draw(imageFrame, imageFrame.Bounds(), source, source.Bounds().Min, draw.Src)
+	var out bytes.Buffer
+	if err = png.Encode(&out, rgbaPNGFrame{imageFrame}); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 func (s *Source) waitDelivered(ctx context.Context, version uint64) error {

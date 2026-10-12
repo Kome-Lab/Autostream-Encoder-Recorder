@@ -53,6 +53,11 @@ func TestAudioTimelineProductionInput(t *testing.T) {
 	root := t.TempDir()
 	if keep := os.Getenv("AUTOSTREAM_TEST_EVIDENCE_ROOT"); keep != "" {
 		root = filepath.Join(keep, "audio-timeline")
+		if entries, err := os.ReadDir(root); err == nil && len(entries) > 0 {
+			t.Fatal("evidence directory is not empty; preserve it and choose a fresh evidence root")
+		} else if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
 		if err := os.MkdirAll(root, 0750); err != nil {
 			t.Fatal(err)
 		}
@@ -156,30 +161,80 @@ func TestAudioTimelineProductionInput(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	video := timelineJPEG(t, ctx)
-	im := image.NewNRGBA(image.Rect(0, 0, 160, 90))
-	var pngBytes bytes.Buffer
-	if err := png.Encode(&pngBytes, im); err != nil {
-		t.Fatal(err)
+
+	makeLayer := func(rgb [3]byte, watermark bool) []byte {
+		im := image.NewNRGBA(image.Rect(0, 0, 160, 90))
+		for y := 0; y < 90; y++ {
+			for x := 0; x < 160; x++ {
+				if watermark && (x >= 32 || y >= 24) {
+					continue
+				}
+				i := y*im.Stride + x*4
+				copy(im.Pix[i:], []byte{rgb[0], rgb[1], rgb[2], 255})
+			}
+		}
+		var b bytes.Buffer
+		if err := png.Encode(&b, im); err != nil {
+			t.Fatal(err)
+		}
+		return b.Bytes()
 	}
-	cover, err := imagefeed.New("timeline cover", pngBytes.Bytes())
+	cover, err := imagefeed.New("timeline cover", makeLayer([3]byte{220, 40, 20}, false))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cover.Close()
-	wm, err := imagefeed.New("timeline watermark", pngBytes.Bytes())
+	wm, err := imagefeed.New("timeline watermark", makeLayer([3]byte{255, 255, 255}, true))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer wm.Close()
+	progressPath := filepath.Join(root, "progress.txt")
 	p := ffmpeg.EncoderProfile{Width: 160, Height: 90, FPS: 10, VideoBitrate: "300k", AudioBitrate: "64k", SampleRate: 48000, KeyframeSec: 2}
 	mkv, live, hls := filepath.Join(root, "final.mkv"), filepath.Join(root, "live.flv"), filepath.Join(root, "hls/index.m3u8")
-	args := ffmpeg.BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers(video, sdp, live, mkv, hls, "", "", cover.InputURL(), wm.InputURL(), 0, p)
+	args := ffmpeg.BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers(video, sdp, live, mkv, hls, progressPath, "", cover.InputURL(), wm.InputURL(), 0, p)
 	args = append(append(append([]string{}, args[:len(args)-3]...), "-t", "12"), args[len(args)-3:]...)
 	args = append([]string{"-loglevel", "debug"}, args...)
 	argv, _ := json.Marshal(args)
 	t.Logf("PRODUCTION_ARGV %s", argv)
 	timeout, stopCommand := context.WithTimeout(ctx, 35*time.Second)
-	out, runErr := exec.CommandContext(timeout, "ffmpeg", args...).CombinedOutput()
+	command := exec.CommandContext(timeout, "ffmpeg", args...)
+	var captured bytes.Buffer
+	command.Stdout = &captured
+	command.Stderr = &captured
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := command.Process.Pid
+	progressDeadline := time.Now().Add(6 * time.Second)
+	ready := false
+	for time.Now().Before(progressDeadline) {
+		raw, _ := os.ReadFile(progressPath)
+		if bytes.Contains(raw, []byte("progress=continue")) {
+			for _, line := range bytes.Split(raw, []byte("\n")) {
+				if bytes.HasPrefix(line, []byte("frame=")) {
+					n, _ := strconv.Atoi(string(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("frame=")))))
+					if n >= 20 {
+						ready = true
+					}
+				}
+			}
+		}
+		if ready {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	switchErr := fmt.Errorf("production progress did not reach frame20 within six seconds")
+	if ready {
+		switchErr = cover.UpdateAndWait(timeout, makeLayer([3]byte{20, 180, 60}, false))
+	}
+	runErr := command.Wait()
+	out := captured.Bytes()
+	t.Logf("COVER_SWITCH pid=%d ready=%t result=%v", pid, ready, switchErr)
+	if switchErr != nil {
+		t.Error(switchErr)
+	}
 	stopCommand()
 	close(stop)
 	<-inputDone
@@ -212,11 +267,12 @@ func TestAudioTimelineProductionInput(t *testing.T) {
 		t.Errorf("insufficient real clock frames: %d", len(packets))
 	}
 	for _, path := range []string{mkv, live, hls} {
-		timelineOutput(t, path)
+		switchPTS := timelineCoverFrames(t, path)
+		timelineOutput(t, path, switchPTS)
 	}
 }
 
-func timelineOutput(t *testing.T, path string) {
+func timelineOutput(t *testing.T, path string, switchPTS float64) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -231,7 +287,8 @@ func timelineOutput(t *testing.T, path string) {
 	t.Logf("OUTPUT_PACKETS path=%s\n%s", path, out)
 	var p struct {
 		Streams []struct {
-			TimeBase string `json:"time_base"`
+			TimeBase  string `json:"time_base"`
+			StartTime string `json:"start_time"`
 		} `json:"streams"`
 		Packets []struct {
 			PTS      int64 `json:"pts"`
@@ -259,13 +316,47 @@ func timelineOutput(t *testing.T, path string) {
 			maxGap = math.Max(maxGap, gap)
 		}
 	}
-	pcm, err := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-xerror", "-i", path, "-map", "0:a:0", "-c:a", "pcm_s16le", "-f", "s16le", "-").Output()
+	pcm, err := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-xerror", "-i", path, "-map", "0:a:0", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", "-f", "s16le", "-").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path+".decoded.s16le", pcm, 0600); err != nil {
 		t.Fatal(err)
 	}
+
+	audioStart, _ := strconv.ParseFloat(p.Streams[0].StartTime, 64)
+	switchOffset := switchPTS - audioStart
+	mins := [3]float64{math.Inf(1), math.Inf(1), math.Inf(1)}
+	counts := [3]int{}
+	for at := 48000 * 4; at+960*4 < len(pcm)-48000*4; at += 960 * 4 {
+		sum := 0.0
+		for j := at; j < at+960*4; j += 2 {
+			v := float64(int16(binary.LittleEndian.Uint16(pcm[j : j+2])))
+			sum += v * v
+		}
+		rms := math.Sqrt(sum / 1920)
+		sec := float64(at/4) / 48000
+		phase := 1
+		if sec < switchOffset-0.5 {
+			phase = 0
+		} else if sec > switchOffset+0.5 {
+			phase = 2
+		}
+		counts[phase]++
+		mins[phase] = math.Min(mins[phase], rms)
+		if math.IsNaN(rms) || math.IsInf(rms, 0) || rms <= 1 {
+			t.Fatalf("silent output path=%s phase=%d seconds=%.3f RMS=%f", path, phase, sec, rms)
+		}
+	}
+	for phase, count := range counts {
+		if count == 0 {
+			t.Fatalf("missing audio switch phase%d offset=%f", phase, switchOffset)
+		}
+	}
+	if mins[1] < math.Min(mins[0], mins[2])*0.25 {
+		t.Fatal("audio collapsed while switching cover")
+	}
+	t.Logf("AUDIO_SWITCH path=%s offset=%.3f minimum_RMS=%v windows=%v", path, switchOffset, mins, counts)
 	t.Logf("AUDIO_RESULT path=%s time_base=%s packets=%d decoded_samples_per_channel=%d gaps_beyond_sample_step_and_mux_rounding=%d max_excess_seconds=%s", path, p.Streams[0].TimeBase, len(p.Packets), len(pcm)/4, gaps, strconv.FormatFloat(maxGap, 'f', 9, 64))
 	if gaps > 0 {
 		t.Errorf("audio RTP-to-AAC timestamps have %d gaps exceeding one mux tick (sample step 1024/48000, not an operational SLA)", gaps)
@@ -329,4 +420,71 @@ func timelineJPEG(t *testing.T, ctx context.Context) string {
 		}
 	})
 	return "tcp://" + ln.Addr().String()
+}
+
+// Inspect every pixel of every decoded production tee frame. The independent
+// watermark is part of both expected images, so missing layers also fail.
+func timelineCoverFrames(t *testing.T, path string) float64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	frames, err := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-xerror", "-i", path, "-map", "0:v:0", "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "-").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", path).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var times struct {
+		Frames []struct {
+			PTS string `json:"best_effort_timestamp_time"`
+		} `json:"frames"`
+	}
+	if err = json.Unmarshal(probe, &times); err != nil {
+		t.Fatal(err)
+	}
+	size := 160 * 90 * 3
+	if len(frames)%size != 0 || len(frames)/size != len(times.Frames) {
+		t.Fatal("frame/PTS inventory mismatch")
+	}
+	counts := [2]int{}
+	seenB := false
+	firstB := 0.0
+	matches := func(frame []byte, base [3]byte) bool {
+		for y := 0; y < 90; y++ {
+			for x := 0; x < 160; x++ {
+				want := base
+				if x < 32 && y < 24 {
+					want = [3]byte{255, 255, 255}
+				}
+				for c := 0; c < 3; c++ {
+					delta := int(frame[(y*160+x)*3+c]) - int(want[c])
+					if delta < -32 || delta > 32 {
+						return false
+					}
+				}
+			}
+		}
+		return true
+	}
+	for at := 0; at < len(frames); at += size {
+		frame := frames[at : at+size]
+		if matches(frame, [3]byte{20, 180, 60}) {
+			counts[1]++
+			if !seenB {
+				firstB, _ = strconv.ParseFloat(times.Frames[at/size].PTS, 64)
+			}
+			seenB = true
+		} else if matches(frame, [3]byte{220, 40, 20}) && !seenB {
+			counts[0]++
+		} else {
+			t.Fatalf("base exposure, mixed image or obsolete revision path=%s frame=%d SHA=%x", path, at/size, sha256.Sum256(frame))
+		}
+	}
+	if counts[0] < 10 || counts[1] < 10 {
+		t.Fatalf("insufficient A/B frames %v", counts)
+	}
+	t.Logf("COVER_ALL_FRAMES path=%s counts=%v first_B_PTS=%.6f", path, counts, firstB)
+	return firstB
 }
