@@ -212,11 +212,14 @@ func BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSetting
 	args := []string{
 		"-hide_banner", "-y",
 		"-thread_queue_size", "512", "-f", "mjpeg", "-framerate", "60", "-i", ResolveInputTarget(videoInputURL),
-		"-thread_queue_size", "512", "-protocol_whitelist", "file,udp,rtp", "-i", filepath.Clean(ResolveInputTarget(audioSDPPath)),
 		"-re", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=" + itoa(p.SampleRate),
 	}
 	args = append(args, watermarkInputArgs(coverInput)...)
 	args = append(args, watermarkInputArgs(watermarkInput)...)
+	// Bind the local RTP receiver after the finite image metadata probes.
+	// Otherwise its initial timestamp is captured while later input opening
+	// blocks reads and overflows the kernel socket. The RTP clock is unchanged.
+	args = append(args, "-thread_queue_size", "512", "-analyzeduration", "1", "-probesize", "32", "-protocol_whitelist", "file,udp,rtp", "-i", filepath.Clean(ResolveInputTarget(audioSDPPath)))
 	filter := workerSceneRuntimeVisualLayersFilterWithSilence(p, audioGainDB)
 	audioMap := "[aout]"
 	if strings.TrimSpace(audioStatsPath) != "" {
@@ -282,7 +285,11 @@ func discordAudioRuntimeVisualLayersFilterWithSilence(p EncoderProfile, audioGai
 }
 
 func workerSceneRuntimeVisualLayersFilterWithSilence(p EncoderProfile, audioGainDB float64) string {
-	return "[1:a:0][2:a:0]amix=inputs=2:duration=longest:dropout_transition=0,volume@gain=" + formatGainDB(audioGainDB) + "dB[aout];[0:v]scale=" + itoa(p.Width) + ":" + itoa(p.Height) + ":force_original_aspect_ratio=decrease,pad=" + itoa(p.Width) + ":" + itoa(p.Height) + ":(ow-iw)/2:(oh-ih)/2:color=0x0b1020,setsar=1,format=rgba[base];" + visualLayersTail(3, 4, p)
+	// The Worker bridge emits 60 frames per second. Select the requested output
+	// cadence before scaling and compositing; dropping at the encoder boundary
+	// still spends the full graph cost on discarded frames and can starve the
+	// live RTP receiver. Audio, image feeds and tee outputs keep their clocks.
+	return "[4:a:0][1:a:0]amix=inputs=2:duration=longest:dropout_transition=0,volume@gain=" + formatGainDB(audioGainDB) + "dB[aout];[0:v]fps=" + itoa(p.FPS) + ",scale=" + itoa(p.Width) + ":" + itoa(p.Height) + ":force_original_aspect_ratio=decrease,pad=" + itoa(p.Width) + ":" + itoa(p.Height) + ":(ow-iw)/2:(oh-ih)/2:color=0x0b1020,setsar=1,format=rgba[base];" + visualLayersTail(2, 3, p)
 }
 
 func visualLayersTail(coverIndex, watermarkIndex int, p EncoderProfile) string {
@@ -342,7 +349,10 @@ func watermarkInputArgs(input string) []string {
 	if strings.HasPrefix(strings.ToLower(trimmed), "tcp://") {
 		// Bound PNG parser reads and decoder buffering at the 2 fps feed cadence.
 		// frame_size is a packet read size; the PNG parser still assembles full images.
-		return []string{"-thread_queue_size", "8", "-f", "png_pipe", "-framerate", "2", "-threads:v", "1", "-probesize", "32", "-frame_size", "64", "-i", trimmed}
+		// Format and frame rate are explicit. End metadata probing after the
+		// first decoded PNG instead of waiting for later two-fps repeats while
+		// an already-open RTP receiver accumulates its startup backlog.
+		return []string{"-thread_queue_size", "8", "-f", "png_pipe", "-framerate", "2", "-threads:v", "1", "-probesize", "32", "-analyzeduration", "1", "-frame_size", "64", "-i", trimmed}
 	}
 	return []string{"-loop", "1", "-i", filepath.Clean(trimmed)}
 }

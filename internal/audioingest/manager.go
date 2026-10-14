@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -506,25 +507,56 @@ func openRTPSender() (*net.UDPConn, error) {
 func (r *bridgeRecord) run() {
 	defer close(r.done)
 	defer r.conn.Close()
-	ticker := time.NewTicker(audioRTPFrameInterval)
-	defer ticker.Stop()
+	started := time.Now()
+	timer := time.NewTimer(audioRTPFrameInterval)
+	defer timer.Stop()
 	speakers := make(map[uint32]*speakerDecoder)
 	var sequence uint16
 	var timestamp uint32
+	var emitted uint64
 	for {
 		select {
 		case <-r.stop:
 			return
 		case packet := <-r.packets:
 			r.queueSpeakerPacket(speakers, packet, time.Now())
-		case <-ticker.C:
-			r.drainPackets(speakers)
-			payload := r.mixFrame(speakers, time.Now())
-			_, _ = r.conn.WriteToUDP(buildRTPPacket(sequence, timestamp, payload), r.target)
-			sequence++
-			timestamp += audioRTPClockStep
+		case <-timer.C:
+			// Ticker drops notifications when work is delayed. Consume every due
+			// sample frame instead; do not skip decoded audio or alter RTP steps.
+			// Bound each burst so Stop and queued input remain responsive.
+			due := min(audioFramesDue(started, time.Now(), emitted), uint64(8))
+			for range due {
+				select {
+				case <-r.stop:
+					return
+				default:
+				}
+				r.drainPackets(speakers)
+				payload := r.mixFrame(speakers, time.Now())
+				_, _ = r.conn.WriteToUDP(buildRTPPacket(sequence, timestamp, payload), r.target)
+				sequence++
+				timestamp += audioRTPClockStep
+				emitted++
+			}
+			next := started.Add(time.Duration(emitted+1) * audioRTPFrameInterval)
+			delay := max(time.Until(next), time.Duration(0))
+			if delay == 0 {
+				runtime.Gosched()
+			}
+			timer.Reset(delay)
 		}
 	}
+}
+
+func audioFramesDue(started, now time.Time, emitted uint64) uint64 {
+	if !now.After(started) {
+		return 0
+	}
+	planned := uint64(now.Sub(started) / audioRTPFrameInterval)
+	if planned <= emitted {
+		return 0
+	}
+	return planned - emitted
 }
 
 func (r *bridgeRecord) enqueue(packet queuedOpusPacket) bool {

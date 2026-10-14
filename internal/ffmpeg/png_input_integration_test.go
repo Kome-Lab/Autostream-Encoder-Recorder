@@ -19,7 +19,7 @@ import (
 )
 
 func TestPNGInputOptionScope(t *testing.T) {
-	want := []string{"-thread_queue_size", "8", "-f", "png_pipe", "-framerate", "2", "-threads:v", "1", "-probesize", "32", "-frame_size", "64", "-i", "tcp://127.0.0.1:1234"}
+	want := []string{"-thread_queue_size", "8", "-f", "png_pipe", "-framerate", "2", "-threads:v", "1", "-probesize", "32", "-analyzeduration", "1", "-frame_size", "64", "-i", "tcp://127.0.0.1:1234"}
 	if got := watermarkInputArgs(want[len(want)-1]); !reflect.DeepEqual(got, want) {
 		t.Fatalf("PNG input scope: %v", got)
 	}
@@ -28,7 +28,7 @@ func TestPNGInputOptionScope(t *testing.T) {
 	}
 	p := DefaultProfile()
 	args := BuildLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers("fixture.mp4", "rtmp://localhost/synthetic", "/tmp/archive.mkv", "/tmp/preview.m3u8", "/tmp/progress", "", "tcp://127.0.0.1:1234", "tcp://127.0.0.1:1235", 0, p)
-	for _, key := range []string{"-probesize", "-frame_size"} {
+	for _, key := range []string{"-probesize", "-analyzeduration", "-frame_size"} {
 		count := 0
 		for i, v := range args {
 			if v == key {

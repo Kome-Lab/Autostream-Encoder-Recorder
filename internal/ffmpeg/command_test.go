@@ -179,7 +179,7 @@ func TestBuildWorkerVideoRuntimeSettingsKeepStableNamedGainAndDynamicWatermarkIn
 	)
 	joined := strings.Join(args, " ")
 	for _, required := range []string{
-		"-f png_pipe -framerate 2 -threads:v 1 -probesize 32 -frame_size 64 -i tcp://127.0.0.1:42001",
+		"-f png_pipe -framerate 2 -threads:v 1 -probesize 32 -analyzeduration 1 -frame_size 64 -i tcp://127.0.0.1:42001",
 		"volume@gain=4.5dB[aout]",
 		"[base][wm]overlay=0:0",
 		"-re -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000",
@@ -211,7 +211,7 @@ func TestBuildVisualLayersKeepsCoverBelowWatermarkAndSingleTee(t *testing.T) {
 		{
 			name:       "worker",
 			args:       BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers("internal_worker_video:tcp://127.0.0.1:41001", "internal_discord_audio:C:/tmp/audio.sdp", "rtmp://127.0.0.1/autostream/stream-01", "C:/tmp/final.mkv", "C:/tmp/preview/index.m3u8", "C:/tmp/progress.txt", "C:/tmp/audio.txt", "tcp://127.0.0.1:42000", "tcp://127.0.0.1:42001", 1.5, DefaultProfile()),
-			coverIndex: "[3:v]", watermarkIndex: "[4:v]",
+			coverIndex: "[2:v]", watermarkIndex: "[3:v]",
 		},
 	}
 	for _, tt := range tests {
@@ -269,7 +269,7 @@ func TestBuildVisualLayersPreservesAudioClockCodecAndSequenceTopology(t *testing
 				t.Fatalf("audio codec/map topology changed:\nbefore=%s\nafter=%s", before, after)
 			}
 			if tt.complexAudio {
-				before, after := complexAudioPrefix(tt.before), complexAudioPrefix(tt.after)
+				before, after := canonicalComplexAudioPrefix(tt.before), canonicalComplexAudioPrefix(tt.after)
 				if before == "" || before != after {
 					t.Fatalf("continuous audio clock graph changed:\nbefore=%s\nafter=%s", before, after)
 				}
@@ -281,6 +281,44 @@ func TestBuildVisualLayersPreservesAudioClockCodecAndSequenceTopology(t *testing
 				}
 			}
 		})
+	}
+}
+
+// Compare the same audio graph by independently identified input roles. Input
+// opening order may change; the SDP source, silence source, gain and mix cannot.
+func canonicalComplexAudioPrefix(args []string) string {
+	filter := complexAudioPrefix(args)
+	input := 0
+	for index, arg := range args {
+		if arg != "-i" || index+1 >= len(args) {
+			continue
+		}
+		target := args[index+1]
+		role := ""
+		if target == "C:/tmp/audio.sdp" {
+			role = "discord"
+		}
+		if strings.HasPrefix(target, "anullsrc=channel_layout=stereo:sample_rate=") {
+			role = "silence"
+		}
+		if role != "" {
+			filter = strings.ReplaceAll(filter, "["+itoa(input)+":a:0]", "["+role+":a:0]")
+		}
+		input++
+	}
+	return filter
+}
+
+func TestWorkerVisualInputOrderKeepsRTPReceiverLast(t *testing.T) {
+	args := BuildWorkerVideoDiscordAudioLiveArchiveArgsToOutputTargetWithRuntimeSettingsAndVisualLayers("tcp://127.0.0.1:41001", "C:/tmp/audio.sdp", "out", "a.mkv", "p.m3u8", "progress", "", "tcp://127.0.0.1:42000", "tcp://127.0.0.1:42001", 0, DefaultProfile())
+	var inputs []string
+	for i, arg := range args {
+		if arg == "-i" && i+1 < len(args) {
+			inputs = append(inputs, args[i+1])
+		}
+	}
+	if len(inputs) != 5 || inputs[2] != "tcp://127.0.0.1:42000" || inputs[3] != "tcp://127.0.0.1:42001" || inputs[4] != "C:/tmp/audio.sdp" {
+		t.Fatalf("receiver opened before finite image setup: %v", inputs)
 	}
 }
 

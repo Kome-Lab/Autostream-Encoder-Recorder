@@ -97,7 +97,8 @@ jobs:
         run: |
           set -euo pipefail
           result="${RUNNER_TEMP}/ui188-production-media.json"
-          go test -mod=readonly -p 1 -tags autostream_media_diagnostics ./internal/audioingest -run '^TestAudioTimelineProductionInput$' -count=1 -json | tee "${result}"
+          go test -mod=readonly -p 1 -parallel 2 -timeout 15m -tags autostream_media_diagnostics ./internal/audioingest -run '^(TestAudioTimelineProductionInput|TestUI188R6ReceiverConsumption)$' -count=1 -json | tee "${result}"
           jq -s -e '([.[] | select(.Action=="skip" or .Action=="fail")]|length)==0 and ([.[]|select(.Action=="pass" and .Test=="TestAudioTimelineProductionInput")]|length)==1' "${result}" >/dev/null
+          jq -s -e '([.[]|select(.Action=="pass" and .Test=="TestUI188R6ReceiverConsumption")]|length)==1 and ([.[]|select(.Action=="pass" and (.Test // "" | startswith("TestUI188R6ReceiverConsumption/stream-")))]|length)==2' "${result}" >/dev/null
       - run: go test ./...
       - run: go build ./...
