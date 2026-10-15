@@ -58,7 +58,7 @@ func TestManagerStartUsesLiveWatermarkFeedAndAddsOverlayFilter(t *testing.T) {
 func assertLivePNGInputSections(t *testing.T, args []string) {
 	t.Helper()
 	start, count := 0, 0
-	expected := []string{"-thread_queue_size", "8", "-f", "png_pipe", "-framerate", "2", "-threads:v", "1", "-probesize", "32", "-frame_size", "64"}
+	expected := []string{"-thread_queue_size", "8", "-f", "png_pipe", "-framerate", "2", "-threads:v", "1", "-probesize", "32", "-analyzeduration", "1", "-frame_size", "64"}
 	for i := 0; i < len(args); i++ {
 		if args[i] != "-i" {
 			continue
