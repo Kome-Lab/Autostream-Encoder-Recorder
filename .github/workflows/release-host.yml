@@ -476,7 +476,7 @@ jobs:
         id: create-draft
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_ACCESS_TOKEN_RELEASES }}
           RELEASE_VERSION: ${{ needs.release-host.outputs.version }}
           DRAFT_TAG: ${{ steps.preflight.outputs.draft_tag }}
         run: |
@@ -632,7 +632,7 @@ jobs:
         id: publish
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_ACCESS_TOKEN_RELEASES }}
           RELEASE_VERSION: ${{ needs.release-host.outputs.version }}
           DRAFT_TAG: ${{ steps.preflight.outputs.draft_tag }}
           DRAFT_RELEASE_ID: ${{ steps.create-draft.outputs.release_id }}
