@@ -102,3 +102,36 @@ jobs:
           jq -s -e '([.[]|select(.Action=="pass" and .Test=="TestUI188R6ReceiverConsumption")]|length)==1 and ([.[]|select(.Action=="pass" and (.Test // "" | startswith("TestUI188R6ReceiverConsumption/stream-")))]|length)==2' "${result}" >/dev/null
       - run: go test ./...
       - run: go build ./...
+
+  v3-product-integration-checks:
+    name: v3-product-integration-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+      GOFLAGS: '-mod=readonly'
+      GOTELEMETRY: 'off'
+      GOMAXPROCS: '2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+          check-latest: false
+          cache: false
+      - name: Required HTTP, raw writer, generation and Drain inventory
+        run: bash scripts/ci/iu-checks.sh
+      - name: Preserve exact root execution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: iu-encoder-root-events-${{ github.sha }}
+          path: ${{ runner.temp }}/iu-*.json
+          if-no-files-found: error
+          retention-days: 14

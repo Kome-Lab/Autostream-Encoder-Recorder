@@ -84,6 +84,7 @@ type Manager struct {
 	stats       map[string]Stats
 	seen        map[string]time.Time
 	maxSeen     int
+	v3          *v3State
 }
 
 type Bridge struct {

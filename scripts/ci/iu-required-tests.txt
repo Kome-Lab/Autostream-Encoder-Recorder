@@ -1,0 +1,9 @@
+# Reviewed WS3 Encoder product HTTP/raw/queue roots, independent of real codecs.
+github.com/example/autostream-encoder-recorder/internal/httpapi TestIUWS3ActualHTTPIngress
+github.com/example/autostream-encoder-recorder/internal/audioingest TestIUWS3RawFaultBoundaries
+github.com/example/autostream-encoder-recorder/internal/lifecycleparticipant TestIUWS3AdmissionCutAndRestart
+github.com/example/autostream-encoder-recorder/internal/lifecycleparticipant TestIUWS3CurrentGenerationAndCallback
+github.com/example/autostream-encoder-recorder/internal/lifecycleparticipant TestIUWS3QueueTerminalCAS
+github.com/example/autostream-encoder-recorder/internal/lifecycleparticipant TestIUWS3CancellationAndMalformedMetadata
+github.com/example/autostream-encoder-recorder/internal/lifecycleparticipant TestIUWS3IndependentProcess
+github.com/example/autostream-encoder-recorder/internal/lifecycleparticipant TestIUWS3ProcessSharedOwnerGuard

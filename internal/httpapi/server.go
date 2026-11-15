@@ -144,5 +144,6 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	mux.HandleFunc("POST /worker-events", workerEvents(eventManager, processManager, verifier))
 	mux.HandleFunc("GET /streams/{id}/worker-events", recentWorkerEvents(eventManager, verifier))
 	mux.HandleFunc("POST /streams/{id}/audio/opus", discordOpusAudio(audioManager, processManager, verifier))
+	registerV3AudioIngressRoutes(mux, audioManager, nil, verifier, 0)
 	return securityHeaders(mux)
 }

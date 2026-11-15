@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "baseline": "8c17e7389ccdb3429f1e59a1a6147b27fe3c3793",
+  "new": {
+    "docs/iu-ws3-01-ingress.md": "b1a978a837afde50a834f11c4a6f11d9837826e4d3a0239c77257af468522f64",
+    "internal/audioingest/lifecycle_v3.go": "000f39691a38541b680475f93373648dbbc3fdc3e71795482f58280c19f9a037",
+    "internal/audioingest/lifecycle_v3_test.go": "55a64aa3321a9a6b81146aa0333928e10851faa3a800a4d1a9157d22e2cf3ca9",
+    "internal/httpapi/lifecycle_crossrepo_test.go": "4be57754db43b03681f07a3167217041f0603934662ee5be5d9016088f20d1b6",
+    "internal/httpapi/lifecycle_v3.go": "0a782b19938a04f313e45128c5779add2e288de29a4afd11c4e1a17ba49be118",
+    "internal/httpapi/lifecycle_v3_test.go": "5c4416901ed34dd6e186238d8b80eb558aad02a742f6219a7a712b6972d30eea",
+    "internal/lifecycleparticipant/completion.go": "003515368b6b8b399b5ca10b816499af91024842087d1367817ae8bd22e3386f",
+    "internal/lifecycleparticipant/lifecycle_test.go": "f8b8c52adfcfb82b4c1de55690cd197ad0effe1f896e5466cae3a390028c4ad7",
+    "internal/lifecycleparticipant/owner_generation.go": "2e87008810b6bb7642f57b68df3521be017ae5513b6f422a63ae17ca3c907a52",
+    "internal/lifecycleparticipant/owner_guard.go": "3a4f73eb097cdbe3246b0c15c7a10fb79a963a08a23750d1e5cdddd9273bc276",
+    "internal/lifecycleparticipant/participant.go": "ecb9228fc8ccb817cfc74577cb75facea121b7157c923ea08adb16df52be2f72",
+    "internal/lifecycleparticipant/participant_test.go": "8bbdb4c4365032f89cfd0455f68d36a915d4535b4d3eda089f20b8c8e67d8ecb",
+    "internal/lifecycleparticipant/process_test.go": "fa0b48da6646e7ac31ec828b73a3b87a761859c5ec3c86c0f1bc351cd39a532f",
+    "internal/lifecycleparticipant/testdata/owner.json": "a1d4412c4cea20adfbd6a4b4e33a1e932b885e089a4a8ff43d49180fc2d9ea26",
+    "internal/lifecycleparticipant/testdata/request.json": "9b4cf4d5d2f2c9c89dc9c35f33a0d7a2b73dcf63c0e6b001cbba9b6c86e860ca",
+    "scripts/ci/iu-checks.sh": "0295d6b7e4b3868594a42b7c122f62523077e1574596be0f27694d282efb219f",
+    "scripts/ci/iu-json-events.py": "bd8fce46868353156b77c9ec0f8fdfa1908fa27121460227e0951559fe12fadc",
+    "scripts/ci/iu-module-pin.py": "73149fa31efa702ad80579a901ed77d6d67f2d9b8d29184c95e46e595b5ccc32",
+    "scripts/ci/iu-required-tests.txt": "31618bd67455eb89152dcea77e9d11ad50efc8928b2f7cd314c7605b269abcc4",
+    "scripts/ci/iu-secret-scan.py": "e684ff48169e29687e9b41f0aa219c0efe05291dfb51bdbfd71edc1d768eb8a6",
+    "scripts/ci/iu-source-boundary.py": "af255bd460a4d71f2659b710aeae53aa495649fd074c5a3f2a1c9c0cd024705f",
+    "scripts/ci/iu-workflow-preserve.py": "2cb9c350c0c2763ed31b4a9e015c4f6a24573f399b68e86f77d63b962755cb0e",
+    "scripts/ci/test_iu_json_events.py": "f11ec9ce8cb0ebfcbfe30814c06db35798e107a90f43383a75a266ad329a4a01",
+    "scripts/ci/test_iu_workflow_preserve.py": "b35bf15473a55f8c3fc3b2be80c2ed1915a270b009b122ec689f2130044cc96a"
+  },
+  "patches": {
+    ".github/workflows/ci.yml": {
+      "before_sha256": "c37a9b461128bb1d777440aa8755bebaaa1b2703d2a34bba8c5294d8849ddf54",
+      "after_sha256": "4b2d17fd9fb5c78d72a6ebe16704f9002d518b16bb38695e7b589732eefd7254",
+      "edits": [
+        {
+          "old": "      - run: go build ./...\n",
+          "new": "      - run: go build ./...\n\n  v3-product-integration-checks:\n    name: v3-product-integration-checks\n    runs-on: ubuntu-24.04\n    timeout-minutes: 25\n    permissions:\n      contents: read\n    env:\n      GOTOOLCHAIN: local\n      GOWORK: 'off'\n      GOFLAGS: '-mod=readonly'\n      GOTELEMETRY: 'off'\n      GOMAXPROCS: '2'\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:\n          go-version: '1.26.5'\n          check-latest: false\n          cache: false\n      - name: Required HTTP, raw writer, generation and Drain inventory\n        run: bash scripts/ci/iu-checks.sh\n      - name: Preserve exact root execution evidence\n        if: always()\n        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n        with:\n          name: iu-encoder-root-events-${{ github.sha }}\n          path: ${{ runner.temp }}/iu-*.json\n          if-no-files-found: error\n          retention-days: 14\n"
+        }
+      ]
+    },
+    "go.mod": {
+      "before_sha256": "1743c47a1041da37f96dd69aeb98b8e130f3dde54aaa89e92f5fe3fef24a9680",
+      "after_sha256": "897ca9979542786b829d2f5f36837b8a3d6e19b295d9bc6a33f768a90a369b83",
+      "edits": [
+        {
+          "old": "\tgithub.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c // indirect\n",
+          "new": "\tgithub.com/Kome-Lab/Autostream-Contracts/v3lifecycle v0.0.0-20261115145906-d32ea3514b1c\n\tgithub.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c // indirect\n"
+        }
+      ]
+    },
+    "go.sum": {
+      "before_sha256": "6cc92e55f35f0ce69af4a748c4fc63f5e1942cbfd9918516bc59f7fba1bb300d",
+      "after_sha256": "e73000d771ecf63c49a2e208932cbf92228fc4931af6647c0cfdef9ddd9b7fac",
+      "edits": [
+        {
+          "old": "github.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c h1:8XZeJrs4+ZYhJeJ2aZxADI2tGADS15AzIF8MQ8XAhT4=\n",
+          "new": "github.com/Kome-Lab/Autostream-Contracts/v3lifecycle v0.0.0-20261115145906-d32ea3514b1c h1:HfswOPIR7VcFoko8a5LL0YqtRP1UGc6wfuFyggBOIXo=\ngithub.com/Kome-Lab/Autostream-Contracts/v3lifecycle v0.0.0-20261115145906-d32ea3514b1c/go.mod h1:4mdtG844J5jWEQgB78LBHQEjzbhK+qc0ACLS7+Vlmzw=\ngithub.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c h1:8XZeJrs4+ZYhJeJ2aZxADI2tGADS15AzIF8MQ8XAhT4=\n"
+        }
+      ]
+    },
+    "internal/audioingest/manager.go": {
+      "before_sha256": "eb7a02efec6448090786bcb842a15d724f62eb6ff33cc27eec024da9f0783bf8",
+      "after_sha256": "b03dd6db28adbe1c7e3898d180871786d2ececa6de26f1849fb3de27290f4761",
+      "edits": [
+        {
+          "old": "\tmaxSeen     int\n}\n",
+          "new": "\tmaxSeen     int\n\tv3          *v3State\n}\n"
+        }
+      ]
+    },
+    "internal/httpapi/server.go": {
+      "before_sha256": "3a901bbd072aa79857a37f9d2f7b6b3224298b8ce39db8a97b21c67410bf5fa9",
+      "after_sha256": "2bca6f97a6b9f3f0f024f9c54779fa497b12c90a39ef0c9fc9c400e34b673070",
+      "edits": [
+        {
+          "old": "\treturn securityHeaders(mux)\n",
+          "new": "\tregisterV3AudioIngressRoutes(mux, audioManager, nil, verifier, 0)\n\treturn securityHeaders(mux)\n"
+        }
+      ]
+    }
+  }
+}
