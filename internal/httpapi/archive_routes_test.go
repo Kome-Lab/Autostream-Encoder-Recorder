@@ -23,7 +23,7 @@ import (
 )
 
 func TestRunlessArchiveArtifactRoutesAreRemoved(t *testing.T) {
-	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "service-token"})
+	handler := legacyNewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "service-token"})
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		req := httptest.NewRequest(method, "/streams/stream-01/artifacts/final.mp4", nil)
 		req.Header.Set("Authorization", "Bearer service-token")
@@ -82,7 +82,7 @@ func TestPreviewEndpointRequiresTokenAndServesHLSWithSafeHeaders(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(layout.PreviewDir(), "segment-000001.ts"), segment, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	server := NewServerWithManagers(
+	server := legacyNewServerWithManagers(
 		"encoder_recorder",
 		&streamproc.Manager{ArchiveRoot: root, OutputRelayMode: outputrelay.ModeDirect},
 		nil,
@@ -152,7 +152,7 @@ func TestPreviewEndpointUsesProcessManagerArchiveRoot(t *testing.T) {
 	if err := os.WriteFile(layout.PreviewPlaylist(), playlist, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewServerWithManagersAndRuntimeConfig(
+	handler := legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		&streamproc.Manager{ArchiveRoot: processRoot, OutputRelayMode: outputrelay.ModeDirect},
 		workerevents.NewManager(eventRoot),
@@ -224,7 +224,7 @@ func TestPreviewEndpointRejectsSymlinkFile(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(layout.PreviewDir(), "segment-000001.ts")); err != nil {
 		t.Skipf("symlink creation is not available in this environment: %v", err)
 	}
-	server := NewServerWithManagers("encoder_recorder", &streamproc.Manager{ArchiveRoot: root, OutputRelayMode: outputrelay.ModeDirect}, nil, TokenVerifier{PlainToken: "preview-token"})
+	server := legacyNewServerWithManagers("encoder_recorder", &streamproc.Manager{ArchiveRoot: root, OutputRelayMode: outputrelay.ModeDirect}, nil, TokenVerifier{PlainToken: "preview-token"})
 	req := httptest.NewRequest(http.MethodGet, "/streams/stream-01/preview/segment-000001.ts", nil)
 	req.Header.Set("Authorization", "Bearer preview-token")
 	response := httptest.NewRecorder()
@@ -308,7 +308,7 @@ func TestPackageEndpoint(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(finalDir, "final.mp4"), []byte("mp4"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewServer("encoder_recorder")
+	handler := legacyNewServer("encoder_recorder")
 	body := `{"stream_id":"stream-01","archive_run_id":"run-01","name":"Morning Stream","started_at":"2026-05-31T01:02:03Z","dry_run":true}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/package", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
@@ -334,7 +334,7 @@ func TestPackageEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolvedSecrets := map[string]string{}
-	handler := NewServerWithManagersAndRuntimeConfig(
+	handler := legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		nil,
 		workerevents.NewManager(root),
@@ -412,7 +412,7 @@ func TestPackageEndpointReturnsSafeFailureClassification(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", root)
-	handler := NewServer("encoder_recorder")
+	handler := legacyNewServer("encoder_recorder")
 	body := `{"stream_id":"stream-01","archive_run_id":"run-01","name":"Morning Stream","started_at":"2026-05-31T01:02:03Z","dry_run":true}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/package", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")

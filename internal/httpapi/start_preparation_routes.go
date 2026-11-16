@@ -11,6 +11,7 @@ import (
 	"github.com/example/autostream-contracts/pkg/contracts"
 	"github.com/example/autostream-encoder-recorder/internal/audioingest"
 	"github.com/example/autostream-encoder-recorder/internal/control"
+	"github.com/example/autostream-encoder-recorder/internal/manualhold"
 	"github.com/example/autostream-encoder-recorder/internal/streamproc"
 	"github.com/example/autostream-encoder-recorder/internal/videoingest"
 )
@@ -32,6 +33,10 @@ func preparationBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	return b, true
 }
 func preparationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, manualhold.ErrRefused) || errors.Is(err, manualhold.ErrUnknown) {
+		writeStartAdmissionError(w, err)
+		return
+	}
 	status, code := http.StatusBadGateway, "start_preparation_runtime_failed"
 	if errors.Is(err, streamproc.ErrAlreadyRunning) || errors.Is(err, streamproc.ErrPreparationConflict) {
 		status, code = http.StatusConflict, "start_preparation_conflict"
@@ -75,6 +80,29 @@ func prepareStreamStart(pm *streamproc.Manager, am *audioingest.Manager, vm *vid
 			writeJSON(w, 401, map[string]string{"code": "missing_or_invalid_worker_video_ingest_token"})
 			return
 		}
+		admissionCtx, admissionErr := manualhold.RequestContext(r)
+		if admissionErr != nil {
+			writeStartAdmissionError(w, admissionErr)
+			return
+		}
+		if err := manualhold.ValidateStart(admissionCtx, request.StreamID, request.ArchiveRunID); err != nil {
+			writeStartAdmissionError(w, err)
+			return
+		}
+		admissionCtx, lease, admissionErr := pm.StartAdmission.Enter(admissionCtx, request.StreamID)
+		if admissionErr != nil {
+			writeStartAdmissionError(w, admissionErr)
+			return
+		}
+		lease.MarkEffectsPossible()
+		if lease != nil {
+			defer func() {
+				if !lease.Done() {
+					_ = lease.Finish(manualhold.ErrUnknown)
+				}
+			}()
+		}
+		r = r.WithContext(admissionCtx)
 		id := streamproc.StartPreparationIdentity{StreamID: request.StreamID, StartID: wire.StartID, EncoderServiceID: wire.EncoderServiceID, JobGeneration: request.VideoCoverStart.JobGeneration, ArchiveRunID: request.ArchiveRunID}
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()

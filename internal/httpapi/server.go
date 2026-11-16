@@ -96,7 +96,15 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	if processManager != nil && videoManager != nil && videoManager.Reporter == nil {
 		videoManager.Reporter = processManager.Reporter
 	}
+	if processManager != nil {
+		if err := processManager.ConfigureStartAdmission(); err != nil {
+			panic(err)
+		}
+	}
 	mux := http.NewServeMux()
+	if processManager != nil {
+		registerManualStartAdmissionRoutes(mux, processManager.StartAdmission, func(r *http.Request) bool { return verifier.Verify(r.Header.Get("Authorization")) })
+	}
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -144,5 +152,6 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	mux.HandleFunc("POST /worker-events", workerEvents(eventManager, processManager, verifier))
 	mux.HandleFunc("GET /streams/{id}/worker-events", recentWorkerEvents(eventManager, verifier))
 	mux.HandleFunc("POST /streams/{id}/audio/opus", discordOpusAudio(audioManager, processManager, verifier))
+	registerV3AudioIngressRoutes(mux, audioManager, nil, verifier, 0)
 	return securityHeaders(mux)
 }

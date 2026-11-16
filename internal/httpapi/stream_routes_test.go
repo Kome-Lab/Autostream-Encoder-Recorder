@@ -23,7 +23,7 @@ import (
 
 func TestDryRunEndpointRequiresAuthorization(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
-	handler := NewServer("encoder_recorder")
+	handler := legacyNewServer("encoder_recorder")
 	req := httptest.NewRequest(http.MethodPost, "/streams/dry-run", bytes.NewBufferString(`{}`))
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
@@ -149,7 +149,7 @@ func TestDryRunEndpointRequiresRuntimeYouTubeConfigWhenFallbackDisabled(t *testi
 	t.Setenv("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", "true")
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", t.TempDir())
 
-	handler := NewServer("encoder_recorder")
+	handler := legacyNewServer("encoder_recorder")
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","dry_run":true}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/dry-run", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
@@ -172,7 +172,7 @@ func TestDryRunEndpointRejectsRawStreamKeyInProduction(t *testing.T) {
 	t.Setenv("AUTOSTREAM_ENV", "production")
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", t.TempDir())
 
-	handler := NewServer("encoder_recorder")
+	handler := legacyNewServer("encoder_recorder")
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2","stream_key":"raw-production-stream-key","dry_run":true}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/dry-run", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
@@ -403,7 +403,7 @@ func TestStartEndpointUsesSelectedEncoderRuntimeProfile(t *testing.T) {
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
-	handler := NewServerWithManagersAndRuntimeConfig(
+	handler := legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		processManager,
 		workerevents.NewManager(root),
@@ -464,7 +464,7 @@ func TestDryRunEndpointAppliesControlPanelYouTubeRuntimeConfigWithoutResolvingSe
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	t.Setenv("AUTOSTREAM_REQUIRE_CONTROL_PANEL_RUNTIME_CONFIG", "true")
 	t.Setenv("AUTOSTREAM_ARCHIVE_DIR", t.TempDir())
-	handler := NewServerWithManagersAndRuntimeConfig(
+	handler := legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		nil,
 		workerevents.NewManager(t.TempDir()),
@@ -506,7 +506,7 @@ func TestStartEndpointAppliesControlPanelArchiveRuntimeConfig(t *testing.T) {
 	starter := &httpFakeStarter{}
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeManagedLiveAPI, OutputRelayBindingID: testStaticRelayBindingID}
 	resolvedSecrets := map[string]string{}
-	handler := NewServerWithManagersAndRuntimeConfig(
+	handler := legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		processManager,
 		workerevents.NewManager(root),
@@ -591,7 +591,7 @@ func TestStartEndpointRequiresRuntimeYouTubeConfigWhenFallbackDisabled(t *testin
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	handler := legacyNewServerWithProcessManager("encoder_recorder", processManager)
 
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
@@ -617,7 +617,7 @@ func TestStartEndpointRejectsUnsafeRTMPTarget(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
 	root := t.TempDir()
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: &httpFakeStarter{}, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
-	handler := NewServerWithProcessManager("encoder_recorder", processManager)
+	handler := legacyNewServerWithProcessManager("encoder_recorder", processManager)
 	body := `{"stream_id":"stream-01","name":"Morning Stream","input_url":"srt://input.example.com:9000","rtmp_url":"rtmps://youtube.example.com/live2|[f=matroska]/tmp/evil.mkv"}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer service-token")
@@ -672,7 +672,7 @@ func TestStartEndpointRejectsWorkerVideoTokenWithoutExplicitOptIn(t *testing.T) 
 	root := t.TempDir()
 	starter := &httpFakeStarter{}
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
-	handler := NewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
+	handler := legacyNewServerWithManagers("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"})
 
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-worker-video","name":"Worker Scene Stream","worker_video_ingest_token":"must-not-be-ignored"}`))
 	req.Header.Set("Authorization", "Bearer service-token")

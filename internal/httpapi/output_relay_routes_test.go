@@ -84,7 +84,7 @@ func TestStartEndpointRejectsMissingRequiredRelayWithoutRuntimeProvider(t *testi
 		RequireOutputRelay:  true,
 		OutputRelayMode:     outputrelay.ModeDirect,
 	}
-	handler := NewServerWithManagersAndRuntimeConfig("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, nil, testYouTubeRuntimeProvider("stream-required-relay"))
+	handler := legacyNewServerWithManagersAndRuntimeConfig("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, nil, testYouTubeRuntimeProvider("stream-required-relay"))
 	req := httptest.NewRequest(http.MethodPost, "/streams/start", bytes.NewBufferString(`{"stream_id":"stream-required-relay","name":"Required Relay","input_url":"srt://input.example.com:9000"}`))
 	req.Header.Set("Authorization", "Bearer service-token")
 	res := httptest.NewRecorder()
@@ -104,7 +104,7 @@ func TestStartEndpointResolvesRuntimeStreamKeySecretNameWithoutStaticRelay(t *te
 	starter := &httpFakeStarter{}
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	resolverCalls := 0
-	handler := NewServerWithManagersAndRuntimeConfig("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
+	handler := legacyNewServerWithManagersAndRuntimeConfig("encoder_recorder", processManager, workerevents.NewManager(root), TokenVerifier{PlainToken: "service-token"}, func(ctx context.Context, streamID, archiveProfileID, secretName string) (string, error) {
 		resolverCalls++
 		if streamID != "stream-01" || archiveProfileID != "" || secretName != "youtube_stream_key_main" {
 			t.Fatalf("unexpected resolve context stream=%q profile=%q secret=%q", streamID, archiveProfileID, secretName)
@@ -139,7 +139,7 @@ func TestStartEndpointAppliesControlPanelYouTubeRuntimeConfigWithoutStaticRelay(
 	starter := &httpFakeStarter{}
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayMode: outputrelay.ModeDirect}
 	resolverCalls := 0
-	handler := NewServerWithManagersAndRuntimeConfig(
+	handler := legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		processManager,
 		workerevents.NewManager(root),
@@ -202,7 +202,7 @@ func TestStartEndpointRejectsTrustedLiveAPIWithStaticRelayBeforeSecretResolution
 	processManager := &streamproc.Manager{ArchiveRoot: root, FFmpegBin: "ffmpeg", Starter: starter, InputResolver: testInputResolver, AllowHostnameInputs: true, OutputRelayURL: "rtmp://127.0.0.1/autostream/{stream_id}", OutputRelayMode: outputrelay.ModeManagedLiveAPI, OutputRelayBindingID: testStaticRelayBindingID}
 	resolverCalls := 0
 	runtimeConfigCalls := 0
-	handler := NewServerWithManagersAndRuntimeConfig(
+	handler := legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		processManager,
 		workerevents.NewManager(root),
@@ -258,7 +258,7 @@ func TestStartEndpointStaticOutputRelayRejectsNonStaticYouTubeOutputModesBeforeS
 				OutputRelayBindingID: testStaticRelayBindingID,
 			}
 			resolverCalls := 0
-			handler := NewServerWithManagersAndRuntimeConfig(
+			handler := legacyNewServerWithManagersAndRuntimeConfig(
 				"encoder_recorder",
 				processManager,
 				workerevents.NewManager(root),
@@ -322,7 +322,7 @@ func TestStartEndpointRejectsRemovedLegacyRelayModeBeforeSecretResolution(t *tes
 				OutputRelayMode:      "legacy_stream_key",
 			}
 			resolverCalls := 0
-			handler := NewServerWithManagersAndRuntimeConfig(
+			handler := legacyNewServerWithManagersAndRuntimeConfig(
 				"encoder_recorder",
 				processManager,
 				workerevents.NewManager(root),
@@ -402,7 +402,7 @@ func TestStartEndpointStaticLiveAPIRelayRequiresTrustedBindingAndSkipsYouTubeSec
 				OutputRelayBindingID: tt.environmentBinding,
 			}
 			resolverCalls := 0
-			handler := NewServerWithManagersAndRuntimeConfig(
+			handler := legacyNewServerWithManagersAndRuntimeConfig(
 				"encoder_recorder",
 				processManager,
 				workerevents.NewManager(root),
@@ -472,7 +472,7 @@ func TestDryRunEndpointRejectsRemovedLegacyRelayMode(t *testing.T) {
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://127.0.0.1/autostream/{stream_id}")
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "legacy_stream_key")
 
-	handler := NewServerWithManagersAndRuntimeConfig(
+	handler := legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		nil,
 		workerevents.NewManager(t.TempDir()),
@@ -512,7 +512,7 @@ func TestDryRunEndpointRemovedLegacyRelayRejectsAllYouTubeModes(t *testing.T) {
 			t.Setenv("AUTOSTREAM_ARCHIVE_DIR", t.TempDir())
 			t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://127.0.0.1/autostream/{stream_id}")
 			t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "legacy_stream_key")
-			handler := NewServerWithManagersAndRuntimeConfig(
+			handler := legacyNewServerWithManagersAndRuntimeConfig(
 				"encoder_recorder",
 				nil,
 				workerevents.NewManager(t.TempDir()),
@@ -553,7 +553,7 @@ func TestDryRunEndpointStaticLiveAPIRelayUsesLocalTargetWithoutYouTubeKey(t *tes
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_URL", "rtmp://127.0.0.1/autostream/{stream_id}")
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_MODE", "live_api_relay_static")
 	t.Setenv("AUTOSTREAM_OUTPUT_RELAY_BINDING_ID", testStaticRelayBindingID)
-	handler := NewServerWithManagersAndRuntimeConfig(
+	handler := legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		nil,
 		workerevents.NewManager(t.TempDir()),

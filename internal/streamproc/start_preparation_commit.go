@@ -6,9 +6,38 @@ import (
 	"time"
 
 	"github.com/example/autostream-encoder-recorder/internal/archive"
+	"github.com/example/autostream-encoder-recorder/internal/manualhold"
 )
 
 func (m *Manager) CommitStartPreparation(ctx context.Context, id StartPreparationIdentity) (StartPreparationState, error) {
+	m.mu.Lock()
+	preparation, err := m.findPreparationLocked(id)
+	if err != nil {
+		m.mu.Unlock()
+		return StartPreparationState{}, err
+	}
+	original := preparation.admission
+	m.mu.Unlock()
+	if original == nil {
+		managed, err := m.StartAdmission.Managed(id.StreamID)
+		if err != nil {
+			return StartPreparationState{}, err
+		}
+		if managed || (m.StartAdmission != nil && m.StartAdmission.Require != nil && m.StartAdmission.Require()) {
+			return StartPreparationState{}, manualhold.ErrRefused
+		}
+		return m.commitStartPreparation(ctx, id)
+	}
+	var result StartPreparationState
+	err = m.StartAdmission.WithCurrent(ctx, id.StreamID, *original, func() error {
+		var commitErr error
+		result, commitErr = m.commitStartPreparation(ctx, id)
+		return commitErr
+	})
+	return result, err
+}
+
+func (m *Manager) commitStartPreparation(ctx context.Context, id StartPreparationIdentity) (StartPreparationState, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	m.mu.Lock()

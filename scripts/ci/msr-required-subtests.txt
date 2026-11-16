@@ -1,0 +1,5 @@
+# Required independent-process Stop/Start and Hold closure children.
+github.com/example/autostream-encoder-recorder/internal/manualhold TestMSRTargetHoldWaitsForLaunchExclusionAcrossGuards/stop_joins_owned_lease
+github.com/example/autostream-encoder-recorder/internal/manualhold TestMSRTargetProcessBarrier/stop_exclusion
+github.com/example/autostream-encoder-recorder/internal/manualhold TestMSRTargetProcessBarrier/hold_close
+github.com/example/autostream-encoder-recorder/internal/httpapi TestMSREncoderActualHTTPFence/stop_waits_for_accepted_start

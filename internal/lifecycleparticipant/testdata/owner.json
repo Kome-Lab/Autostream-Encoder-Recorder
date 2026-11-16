@@ -1,0 +1,1337 @@
+{
+  "OwnerRevision": 1,
+  "IngressProfile": {
+    "Ref": {
+      "ProfileID": "G0-P-MEDIA-INGRESS",
+      "Revision": 1
+    },
+    "AxisRules": [
+      {
+        "Key": {
+          "Axis": "MEMBERSHIP",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_UINT64",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "ADMISSION",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "BOOT",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "HOST",
+            "OwnerID": "encoder-1",
+            "ResourceID": "host-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "PROCESS",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "HOST",
+            "OwnerID": "encoder-1",
+            "ResourceID": "host-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "RUN",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "JOB",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_UINT64",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "CONNECTION",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_UINT64",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "WRITER",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_UINT64",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "COVER",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_UINT64",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "POLICY",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "TRUST",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "RELEASE",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "CONFIG",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      }
+    ],
+    "ResourceKinds": [
+      "RUN",
+      "PARTITION",
+      "HOST"
+    ],
+    "Purposes": [
+      "MEDIA_INGRESS"
+    ],
+    "RequiredBoundaries": [
+      {
+        "Kind": "LOCAL_PERSISTENCE",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        },
+        "SubBoundary": "RAW_WRITE"
+      },
+      {
+        "Kind": "LOCAL_PERSISTENCE",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        },
+        "SubBoundary": "DURABILITY"
+      },
+      {
+        "Kind": "LOCAL_PERSISTENCE",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "PARTITION",
+          "OwnerID": "encoder-1",
+          "ResourceID": "audio-queue-1"
+        },
+        "SubBoundary": "QUEUE_ADMISSION"
+      },
+      {
+        "Kind": "LOCAL_PERSISTENCE",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "PARTITION",
+          "OwnerID": "encoder-1",
+          "ResourceID": "audio-queue-1"
+        },
+        "SubBoundary": "QUEUE_TERMINAL"
+      }
+    ],
+    "TerminalPolicyRef": "terminal-policy-1",
+    "LimitsRef": "fixture-limits-1",
+    "Limits": {
+      "MaxIDBytes": 192,
+      "MaxMembers": 32,
+      "MaxAxes": 32,
+      "MaxRefs": 128,
+      "MaxObligations": 32,
+      "MaxPartitions": 16,
+      "MaxRanges": 32,
+      "MaxDepth": 32
+    }
+  },
+  "ClosureProfile": {
+    "Ref": {
+      "ProfileID": "G0-P-CLOSURE-ASSESS",
+      "Revision": 1
+    },
+    "AxisRules": [
+      {
+        "Key": {
+          "Axis": "MEMBERSHIP",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_UINT64",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "ADMISSION",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "BOOT",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "HOST",
+            "OwnerID": "encoder-1",
+            "ResourceID": "host-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "PROCESS",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "HOST",
+            "OwnerID": "encoder-1",
+            "ResourceID": "host-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "RUN",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "JOB",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_UINT64",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "CONNECTION",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_UINT64",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "WRITER",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_UINT64",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "COVER",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_UINT64",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "POLICY",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "TRUST",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "RELEASE",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      },
+      {
+        "Key": {
+          "Axis": "CONFIG",
+          "OwnerID": "encoder-1",
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          }
+        },
+        "OwnerRole": "C04",
+        "ValueKind": "PRESENT_LITERAL",
+        "Required": true,
+        "Comparison": "EXACT"
+      }
+    ],
+    "ResourceKinds": [
+      "RUN",
+      "PARTITION",
+      "HOST"
+    ],
+    "Purposes": [
+      "CLOSURE_ASSESS"
+    ],
+    "RequiredBoundaries": [
+      {
+        "Kind": "LOCAL_PERSISTENCE",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        },
+        "SubBoundary": "RAW_WRITE"
+      },
+      {
+        "Kind": "LOCAL_PERSISTENCE",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        },
+        "SubBoundary": "DURABILITY"
+      },
+      {
+        "Kind": "LOCAL_PERSISTENCE",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "PARTITION",
+          "OwnerID": "encoder-1",
+          "ResourceID": "audio-queue-1"
+        },
+        "SubBoundary": "QUEUE_ADMISSION"
+      },
+      {
+        "Kind": "LOCAL_PERSISTENCE",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "PARTITION",
+          "OwnerID": "encoder-1",
+          "ResourceID": "audio-queue-1"
+        },
+        "SubBoundary": "QUEUE_TERMINAL"
+      }
+    ],
+    "TerminalPolicyRef": "terminal-policy-1",
+    "LimitsRef": "fixture-limits-1",
+    "Limits": {
+      "MaxIDBytes": 192,
+      "MaxMembers": 32,
+      "MaxAxes": 32,
+      "MaxRefs": 128,
+      "MaxObligations": 32,
+      "MaxPartitions": 16,
+      "MaxRanges": 32,
+      "MaxDepth": 32
+    }
+  },
+  "Membership": {
+    "Header": {
+      "ContractRef": {
+        "ContractID": "CC01",
+        "LogicalRevision": 1,
+        "SpecRef": "G0-LOGICAL-20261115-R1",
+        "ModuleCommitRef": "d32ea3514b1c1010391caae0348b0ff9e751f447"
+      },
+      "RecordKey": {
+        "ContractRef": {
+          "ContractID": "CC01",
+          "LogicalRevision": 1,
+          "SpecRef": "G0-LOGICAL-20261115-R1",
+          "ModuleCommitRef": "d32ea3514b1c1010391caae0348b0ff9e751f447"
+        },
+        "OwnerID": "cp-1",
+        "RecordID": "membership-record-1"
+      },
+      "Correlation": {
+        "RequestID": "request-1",
+        "OperationID": "operation-1",
+        "AttemptID": "attempt-1",
+        "StepID": "step-1",
+        "ExecutionKey": "execution-1"
+      },
+      "DomainRef": {
+        "DeploymentID": "fixture-deployment-1",
+        "Realm": "isolated-test",
+        "DomainID": "domain-1",
+        "MembershipRevision": 1,
+        "SnapshotRef": "membership-1",
+        "Resources": [
+          {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          },
+          {
+            "Kind": "PARTITION",
+            "OwnerID": "encoder-1",
+            "ResourceID": "audio-queue-1"
+          },
+          {
+            "Kind": "HOST",
+            "OwnerID": "encoder-1",
+            "ResourceID": "host-1"
+          }
+        ]
+      },
+      "ProducerRef": {
+        "ComponentID": "C01",
+        "ServiceID": "cp-1",
+        "HostID": "cp-host-1",
+        "BootID": "cp-boot-1",
+        "ProcessIncarnation": "cp-process-1",
+        "WriterID": "cp-writer-1"
+      },
+      "RecordRevision": 1,
+      "ProfileRef": {
+        "ProfileID": "G0-P-CLOSURE-ASSESS",
+        "Revision": 1
+      }
+    },
+    "Membership": {
+      "DomainKind": "MEDIA_RUN",
+      "OwnerID": "cp-1",
+      "Revision": 1,
+      "PreviousSnapshot": {
+        "State": "ABSENT",
+        "AbsenceFactRef": "explicit-absence-1",
+        "Observation": {
+          "FrameRef": "cp-frame-1",
+          "OwnerID": "cp-1",
+          "Scope": "domain-1",
+          "SourceRevision": 1
+        }
+      },
+      "CoverageKind": "COMPLETE_ROSTER",
+      "Members": [
+        {
+          "Producer": {
+            "ComponentID": "C04",
+            "ServiceID": "encoder-1",
+            "HostID": "host-1",
+            "BootID": "encoder-boot-1",
+            "ProcessIncarnation": "encoder-process-1",
+            "WriterID": "encoder-writer-1"
+          },
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          },
+          "SourceFrameRef": "encoder-frame-1"
+        },
+        {
+          "Producer": {
+            "ComponentID": "C04",
+            "ServiceID": "encoder-1",
+            "HostID": "host-1",
+            "BootID": "encoder-boot-1",
+            "ProcessIncarnation": "encoder-process-1",
+            "WriterID": "encoder-writer-1"
+          },
+          "Resource": {
+            "Kind": "PARTITION",
+            "OwnerID": "encoder-1",
+            "ResourceID": "audio-queue-1"
+          },
+          "SourceFrameRef": "encoder-frame-1"
+        },
+        {
+          "Producer": {
+            "ComponentID": "C04",
+            "ServiceID": "encoder-1",
+            "HostID": "host-1",
+            "BootID": "encoder-boot-1",
+            "ProcessIncarnation": "encoder-process-1",
+            "WriterID": "encoder-writer-1"
+          },
+          "Resource": {
+            "Kind": "HOST",
+            "OwnerID": "encoder-1",
+            "ResourceID": "host-1"
+          },
+          "SourceFrameRef": "encoder-frame-1"
+        },
+        {
+          "Producer": {
+            "ComponentID": "C07",
+            "ServiceID": "bot-1",
+            "HostID": "host-bot-1",
+            "BootID": "bot-boot-1",
+            "ProcessIncarnation": "bot-process-1",
+            "WriterID": "bot-writer-1"
+          },
+          "Resource": {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          },
+          "SourceFrameRef": "encoder-frame-1"
+        }
+      ],
+      "Coverage": {
+        "State": "OBSERVED",
+        "Value": "complete-roster-1",
+        "Observation": {
+          "FrameRef": "cp-frame-1",
+          "OwnerID": "cp-1",
+          "Scope": "domain-1",
+          "SourceRevision": 1
+        }
+      },
+      "SourceFrames": [
+        {
+          "FrameRef": "encoder-frame-1",
+          "OwnerID": "encoder-1",
+          "Scope": "domain-1",
+          "SourceRevision": 1
+        },
+        {
+          "FrameRef": "cp-frame-1",
+          "OwnerID": "cp-1",
+          "Scope": "domain-1",
+          "SourceRevision": 1
+        }
+      ],
+      "AffectedRuns": [
+        {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      ]
+    }
+  },
+  "Admission": {
+    "Header": {
+      "ContractRef": {
+        "ContractID": "CC03",
+        "LogicalRevision": 1,
+        "SpecRef": "G0-LOGICAL-20261115-R1",
+        "ModuleCommitRef": "d32ea3514b1c1010391caae0348b0ff9e751f447"
+      },
+      "RecordKey": {
+        "ContractRef": {
+          "ContractID": "CC03",
+          "LogicalRevision": 1,
+          "SpecRef": "G0-LOGICAL-20261115-R1",
+          "ModuleCommitRef": "d32ea3514b1c1010391caae0348b0ff9e751f447"
+        },
+        "OwnerID": "encoder-1",
+        "RecordID": "admission-record-1"
+      },
+      "Correlation": {
+        "RequestID": "request-1",
+        "OperationID": "operation-1",
+        "AttemptID": "attempt-1",
+        "StepID": "step-1",
+        "ExecutionKey": "execution-1"
+      },
+      "DomainRef": {
+        "DeploymentID": "fixture-deployment-1",
+        "Realm": "isolated-test",
+        "DomainID": "domain-1",
+        "MembershipRevision": 1,
+        "SnapshotRef": "membership-1",
+        "Resources": [
+          {
+            "Kind": "RUN",
+            "OwnerID": "encoder-1",
+            "ResourceID": "stream-1"
+          },
+          {
+            "Kind": "PARTITION",
+            "OwnerID": "encoder-1",
+            "ResourceID": "audio-queue-1"
+          },
+          {
+            "Kind": "HOST",
+            "OwnerID": "encoder-1",
+            "ResourceID": "host-1"
+          }
+        ]
+      },
+      "ProducerRef": {
+        "ComponentID": "C04",
+        "ServiceID": "encoder-1",
+        "HostID": "host-1",
+        "BootID": "encoder-boot-1",
+        "ProcessIncarnation": "encoder-process-1",
+        "WriterID": "encoder-writer-1"
+      },
+      "RecordRevision": 1,
+      "ProfileRef": {
+        "ProfileID": "G0-P-CLOSURE-ASSESS",
+        "Revision": 1
+      }
+    },
+    "Admission": {
+      "ReservationRefs": {
+        "DomainClosureRef": "domain-closure-1",
+        "CPReservation": {
+          "State": "ABSENT",
+          "AbsenceFactRef": "explicit-absence-1",
+          "Observation": {
+            "FrameRef": "encoder-frame-1",
+            "OwnerID": "encoder-1",
+            "Scope": "domain-1",
+            "SourceRevision": 1
+          }
+        }
+      },
+      "MembershipSnapshot": "membership-1",
+      "AdmissionEpoch": "admission-1",
+      "ActorGuardRefs": [
+        "local-guard-1"
+      ],
+      "Cut": [
+        {
+          "Kind": "EMPTY",
+          "Namespace": {
+            "OwnerID": "encoder-1",
+            "Resource": {
+              "Kind": "PARTITION",
+              "OwnerID": "encoder-1",
+              "ResourceID": "audio-queue-1"
+            },
+            "WorkKind": "MEDIA",
+            "ProducerIncarnation": "encoder-process-1",
+            "SequenceEpoch": "queue-epoch-1"
+          },
+          "EmptyFactRef": "initial-empty-1"
+        }
+      ],
+      "TerminalPolicyRef": "terminal-policy-1"
+    }
+  },
+  "CurrentVector": [
+    {
+      "Key": {
+        "Axis": "MEMBERSHIP",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_UINT64",
+        "Uint64": 1
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "ADMISSION",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "admission-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "BOOT",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "HOST",
+          "OwnerID": "encoder-1",
+          "ResourceID": "host-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "bot-boot-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "PROCESS",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "HOST",
+          "OwnerID": "encoder-1",
+          "ResourceID": "host-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "bot-process-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "RUN",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "run-a"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "JOB",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_UINT64",
+        "Uint64": 1
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "CONNECTION",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_UINT64",
+        "Uint64": 1
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "WRITER",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_UINT64",
+        "Uint64": 1
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "COVER",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_UINT64",
+        "Uint64": 1
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "POLICY",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "policy-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "TRUST",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "trust-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "RELEASE",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "release-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "CONFIG",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "config-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    }
+  ],
+  "ClosureVector": [
+    {
+      "Key": {
+        "Axis": "MEMBERSHIP",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_UINT64",
+        "Uint64": 1
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "ADMISSION",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "admission-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "BOOT",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "HOST",
+          "OwnerID": "encoder-1",
+          "ResourceID": "host-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "bot-boot-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "PROCESS",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "HOST",
+          "OwnerID": "encoder-1",
+          "ResourceID": "host-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "bot-process-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "RUN",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "run-a"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "JOB",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_UINT64",
+        "Uint64": 1
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "CONNECTION",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_UINT64",
+        "Uint64": 1
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "WRITER",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_UINT64",
+        "Uint64": 1
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "COVER",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_UINT64",
+        "Uint64": 1
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "POLICY",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "policy-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "TRUST",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "trust-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "RELEASE",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "release-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    },
+    {
+      "Key": {
+        "Axis": "CONFIG",
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "RUN",
+          "OwnerID": "encoder-1",
+          "ResourceID": "stream-1"
+        }
+      },
+      "Incarnation": "axis-incarnation-1",
+      "Value": {
+        "Kind": "PRESENT_LITERAL",
+        "Literal": "config-1"
+      },
+      "SourceFrameRef": "encoder-frame-1"
+    }
+  ],
+  "OwnerProducer": {
+    "ComponentID": "C04",
+    "ServiceID": "encoder-1",
+    "HostID": "host-1",
+    "BootID": "encoder-boot-1",
+    "ProcessIncarnation": "encoder-process-1",
+    "WriterID": "encoder-writer-1"
+  },
+  "IngressProducer": {
+    "ComponentID": "C07",
+    "ServiceID": "bot-1",
+    "HostID": "host-bot-1",
+    "BootID": "bot-boot-1",
+    "ProcessIncarnation": "bot-process-1",
+    "WriterID": "bot-writer-1"
+  },
+  "StreamID": "stream-1",
+  "RawResource": {
+    "Kind": "RUN",
+    "OwnerID": "encoder-1",
+    "ResourceID": "stream-1"
+  },
+  "QueueResource": {
+    "Kind": "PARTITION",
+    "OwnerID": "encoder-1",
+    "ResourceID": "audio-queue-1"
+  },
+  "Namespace": {
+    "OwnerID": "encoder-1",
+    "Resource": {
+      "Kind": "PARTITION",
+      "OwnerID": "encoder-1",
+      "ResourceID": "audio-queue-1"
+    },
+    "WorkKind": "MEDIA",
+    "ProducerIncarnation": "encoder-process-1",
+    "SequenceEpoch": "queue-epoch-1"
+  },
+  "Frame": {
+    "FrameRef": "encoder-frame-1",
+    "OwnerID": "encoder-1",
+    "Scope": "domain-1",
+    "SourceRevision": 1
+  },
+  "RawBudgetBytes": 65536,
+  "AdmissionState": {
+    "Key": {
+      "ContractRef": {
+        "ContractID": "CC03",
+        "LogicalRevision": 1,
+        "SpecRef": "G0-LOGICAL-20261115-R1",
+        "ModuleCommitRef": "d32ea3514b1c1010391caae0348b0ff9e751f447"
+      },
+      "OwnerID": "encoder-1",
+      "RecordID": "admission-record-1"
+    },
+    "MembershipSnapshot": "membership-1",
+    "AdmissionEpoch": "admission-1",
+    "Lane": "OPEN",
+    "Drain": "WAITING",
+    "Gate": "HELD",
+    "Revision": 1,
+    "RequiredGuardRefs": [
+      "local-guard-1"
+    ],
+    "AllowedNamespaces": [
+      {
+        "OwnerID": "encoder-1",
+        "Resource": {
+          "Kind": "PARTITION",
+          "OwnerID": "encoder-1",
+          "ResourceID": "audio-queue-1"
+        },
+        "WorkKind": "MEDIA",
+        "ProducerIncarnation": "encoder-process-1",
+        "SequenceEpoch": "queue-epoch-1"
+      }
+    ]
+  }
+}

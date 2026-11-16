@@ -13,6 +13,7 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/ffmpeg"
 	"github.com/example/autostream-encoder-recorder/internal/imagefeed"
 	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
+	"github.com/example/autostream-encoder-recorder/internal/manualhold"
 	"github.com/example/autostream-encoder-recorder/internal/observability"
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/videocover"
@@ -39,6 +40,7 @@ var (
 )
 
 type Manager struct {
+	StartAdmission           *manualhold.Guard
 	ArchiveRoot              string
 	StopReceiptTTL           time.Duration
 	FFmpegBin                string
@@ -111,7 +113,18 @@ func (m *Manager) Start(job lifecycle.StreamJob) (Snapshot, error) {
 	return m.startProcess(context.Background(), job, nil)
 }
 
-func (m *Manager) startProcess(ctx context.Context, job lifecycle.StreamJob, preparation *StartPreparation) (Snapshot, error) {
+func (m *Manager) startProcess(ctx context.Context, job lifecycle.StreamJob, preparation *StartPreparation) (result Snapshot, resultErr error) {
+	if err := manualhold.ValidateStart(ctx, job.StreamID, job.ArchiveRunID); err != nil {
+		return Snapshot{}, err
+	}
+	ctx, lease, admissionErr := m.StartAdmission.Enter(ctx, job.StreamID)
+	if admissionErr != nil {
+		return Snapshot{}, admissionErr
+	}
+	lease.MarkEffectsPossible()
+	if lease != nil {
+		defer func() { resultErr = lease.Finish(resultErr) }()
+	}
 	if job.StreamID == "" || job.Name == "" {
 		return Snapshot{}, errors.New("stream id and name are required")
 	}
@@ -289,6 +302,9 @@ func (m *Manager) startProcess(ctx context.Context, job lifecycle.StreamJob, pre
 		return Snapshot{}, err
 	}
 	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
+	}
+	if err := lease.BeforeLaunch(ctx); err != nil {
 		return Snapshot{}, err
 	}
 	process, err := starter.Start(context.Background(), m.ffmpegBin(), args)

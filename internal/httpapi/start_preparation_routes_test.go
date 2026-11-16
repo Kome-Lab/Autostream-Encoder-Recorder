@@ -81,7 +81,7 @@ func newPreparationHTTPFixture(t *testing.T) *preparationHTTPFixture {
 		f.resolves.Add(1)
 		return "synthetic-private-output", nil
 	}
-	f.handler = NewServerWithManagersAndRuntimeConfig("encoder_recorder", f.pm, workerevents.NewManager(f.root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: "node-config-signing-key", RequireSignedIngest: true}, resolver, provider)
+	f.handler = legacyNewServerWithManagersAndRuntimeConfig("encoder_recorder", f.pm, workerevents.NewManager(f.root), TokenVerifier{PlainToken: "service-token", IngestTokenSigningKey: "node-config-signing-key", RequireSignedIngest: true}, resolver, provider)
 	t.Cleanup(func() {
 		_, _ = f.pm.AbortStartPreparation(context.Background(), streamproc.StartPreparationIdentity{StreamID: f.identity.StreamID, StartID: f.identity.StartID, EncoderServiceID: f.identity.EncoderServiceID, JobGeneration: 7})
 	})

@@ -114,7 +114,7 @@ func newV2TestServer(t *testing.T, processManager *streamproc.Manager, streamIDs
 
 func newV2TestServerWithManagers(t *testing.T, processManager *streamproc.Manager, eventManager *workerevents.Manager, verifier TokenVerifier, streamIDs ...string) http.Handler {
 	t.Helper()
-	return NewServerWithManagersAndRuntimeConfig(
+	return legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		processManager,
 		eventManager,
@@ -155,7 +155,7 @@ func TestUpdaterVersionEndpointIsUnauthenticated(t *testing.T) {
 	t.Setenv("SERVICE_ID", "legacy-env-service-id")
 	t.Setenv("SERVICE_VERSION", "v9.9.9")
 
-	handler := NewServerWithManagers(
+	handler := legacyNewServerWithManagers(
 		"encoder_recorder",
 		nil,
 		workerevents.NewManager(t.TempDir()),
@@ -211,7 +211,7 @@ func TestNewServerFailsClosedForInvalidListenerConfigRevision(t *testing.T) {
 			t.Fatal("NewServer must reject an invalid listener config_revision")
 		}
 	}()
-	_ = NewServerWithManagers(
+	_ = legacyNewServerWithManagers(
 		control.ServiceType,
 		nil,
 		workerevents.NewManager(t.TempDir()),
@@ -228,14 +228,14 @@ func TestNewServerFailsClosedForInvalidNodeIdentity(t *testing.T) {
 			t.Fatal("NewServer must reject a node config for a different service type")
 		}
 	}()
-	_ = NewServer(control.ServiceType)
+	_ = legacyNewServer(control.ServiceType)
 }
 
 func TestUpdaterVersionFailsClosedWhenIdentityDriftsAfterConstruction(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yml")
 	writeNodeConfigForVerifierTest(t, configPath, control.ServiceType)
 	t.Setenv("AUTOSTREAM_NODE_CONFIG", configPath)
-	handler := NewServerWithManagers(
+	handler := legacyNewServerWithManagers(
 		control.ServiceType,
 		nil,
 		workerevents.NewManager(t.TempDir()),

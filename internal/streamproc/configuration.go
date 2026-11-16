@@ -36,7 +36,7 @@ func NewManagerFromEnv() *Manager {
 			reporter = controlClient
 		}
 	}
-	return &Manager{
+	manager := &Manager{
 		ArchiveRoot:              archiveRoot,
 		FFmpegBin:                ffmpegBin,
 		Starter:                  ExecStarter{},
@@ -70,6 +70,10 @@ func NewManagerFromEnv() *Manager {
 			},
 		},
 	}
+	if err := manager.ConfigureStartAdmission(); err != nil {
+		panic(err)
+	}
+	return manager
 }
 
 func (m *Manager) archiveRoot() string {

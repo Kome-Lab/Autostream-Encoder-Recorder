@@ -26,7 +26,7 @@ func TestUpdaterVersionPendingThenBindsAuthoritativeIdentityAndRejectsDrift(t *t
 	t.Setenv("CREDENTIALS_DIRECTORY", credentialDir)
 
 	latch := NewUpdaterIdentityLatch(control.ServiceType)
-	handler := NewServerWithManagersAndRuntimeConfigAndUpdaterIdentity(
+	handler := legacyNewServerWithManagersAndRuntimeConfigAndUpdaterIdentity(
 		control.ServiceType,
 		nil,
 		workerevents.NewManager(t.TempDir()),
