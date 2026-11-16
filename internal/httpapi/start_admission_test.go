@@ -210,6 +210,81 @@ func msrEncoderHTTP(t *testing.T, guard *manualhold.Guard, starter *msrActualSta
 const msrEncoderStartBody = "{\"stream_id\":\"stream-test\",\"archive_run_id\":\"run-test\",\"started_at\":\"2026-11-16T00:00:00Z\",\"name\":\"Synthetic MSR\",\"input_url\":\"srt://input.example.com:9000\"}"
 
 func TestMSREncoderActualHTTPFence(t *testing.T) {
+	t.Run("stop_waits_for_accepted_start", func(t *testing.T) {
+		barrier := filepath.Join(t.TempDir(), "launch")
+		t.Setenv("AUTOSTREAM_MSR_LAUNCH_BARRIER_FILE", barrier)
+		producer := msrTargetProducer("C04", "encoder-test")
+		guard := msrTargetGuard(t, t.TempDir(), producer, manualhold.InspectorFunc(func(_ context.Context, r lifecycle.Record) (lifecycle.Record, error) { return r, nil }))
+		starter := &msrActualStarter{}
+		product := msrEncoderHTTP(t, guard, starter, "synthetic-service-token")
+		stopArrived := make(chan struct{})
+		var once sync.Once
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && r.URL.Path == "/streams/stream-test/stop" {
+				once.Do(func() { close(stopArrived) })
+			}
+			product.ServeHTTP(w, r)
+		}))
+		defer server.Close()
+		defer func() { _ = os.WriteFile(barrier+".release", []byte("release"), 0600) }()
+		start := msrTargetRecord(t, producer, "stream-test", 1, "accepted-before-stop", "automatic-start")
+		starting := msrAsyncTargetRequest(t, server.URL, "/streams/start", msrEncoderStartBody, &start)
+		msrAwaitActualLaunchBarrier(t, barrier)
+		stopping := msrAsyncTargetRequest(t, server.URL, "/streams/stream-test/stop", "{}", nil)
+		select {
+		case <-stopArrived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("actual Stop handler was not reached")
+		}
+		select {
+		case result := <-stopping:
+			t.Fatalf("Stop returned before accepted Start left actual Starter boundary: %d %s %v", result.code, result.body, result.err)
+		case <-time.After(30 * time.Millisecond):
+		}
+		if err := os.WriteFile(barrier+".release", []byte("release"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		started := <-starting
+		if started.err != nil || started.code != http.StatusAccepted {
+			t.Fatalf("Start completion: %d %s %v", started.code, started.body, started.err)
+		}
+		stopped := <-stopping
+		if stopped.err != nil || stopped.code != http.StatusAccepted || !strings.Contains(string(stopped.body), "stopping") || starter.calls.Load() != 1 {
+			t.Fatalf("Stop after Start completion: %d %s %v launches=%d", stopped.code, stopped.body, stopped.err, starter.calls.Load())
+		}
+		// The existing Stop response retains its captured "stopping" snapshot.
+		// Observe terminal state through the existing pure status API separately.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			request, err := http.NewRequest(http.MethodGet, server.URL+"/streams/stream-test/process-status", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Authorization", "Bearer synthetic-service-token")
+			response, err := (&http.Client{Timeout: time.Second}).Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var current processSnapshotResponse
+			decodeErr := json.NewDecoder(response.Body).Decode(&current)
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusOK || decodeErr != nil {
+				t.Fatalf("pure status after Stop: %d %v", response.StatusCode, decodeErr)
+			}
+			if current.Status == "stopped" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("Stop terminal state not observed: %s", current.Status)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		code, body := msrTargetRequest(t, server.URL, "/streams/stream-test/stop", "synthetic-service-token", "{}", nil)
+		if code != http.StatusAccepted || !strings.Contains(string(body), "already_stopped") || starter.calls.Load() != 1 {
+			t.Fatalf("late Start passed Stop ACK or stop receipt changed: %d %s launches=%d", code, body, starter.calls.Load())
+		}
+	})
+
 	producer := msrTargetProducer("C04", "encoder-test")
 	var checks atomic.Int32
 	inspector := manualhold.InspectorFunc(func(_ context.Context, r lifecycle.Record) (lifecycle.Record, error) { checks.Add(1); return r, nil })
@@ -263,8 +338,12 @@ func TestMSREncoderActualPrelaunchCurrentness(t *testing.T) {
 	defer server.Close()
 	start := msrTargetRecord(t, producer, "stream-test", 1, "start", "automatic-start")
 	code, body := msrTargetRequest(t, server.URL, "/streams/start", "synthetic-service-token", msrEncoderStartBody, &start)
-	if code != 409 || starter.calls.Load() != 0 || checks.Load() != 2 {
+	if code != http.StatusServiceUnavailable || !strings.Contains(string(body), "UNKNOWN") || starter.calls.Load() != 0 || checks.Load() != 2 {
 		t.Fatalf("prelaunch fence: %d %s launches=%d checks=%d", code, body, starter.calls.Load(), checks.Load())
+	}
+	observed, observation, inspectErr := guard.Inspect("stream-test", start.Header.Correlation.RequestID)
+	if inspectErr != nil || !manualhold.Equal(observed, start) || observation == nil || observation.Knowledge != lifecycle.KnowledgeUnknown || observation.Outcome.State != lifecycle.Unavailable || observation.Outcome.Value != nil {
+		t.Fatalf("late product-preparation rejection must remain UNKNOWN: %v %+v", inspectErr, observation)
 	}
 }
 func TestMSRTargetProcess(t *testing.T) {
@@ -281,4 +360,58 @@ func TestMSRTargetProcess(t *testing.T) {
 	inspector := manualhold.HTTPInspector{Config: func() (string, string, error) { return baseURL, token, nil }, HTTP: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	guard := msrTargetGuard(t, directory, msrTargetProducer("C04", service), inspector)
 	msrServeProcess(t, msrEncoderHTTP(t, guard, &msrActualStarter{}, token))
+}
+
+type msrHTTPResult struct {
+	code int
+	body []byte
+	err  error
+}
+
+func msrAsyncTargetRequest(t *testing.T, baseURL, route, body string, record *lifecycle.Record) <-chan msrHTTPResult {
+	t.Helper()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+route, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer synthetic-service-token")
+	request.Header.Set("Content-Type", "application/json")
+	if record != nil {
+		encoded, err := manualhold.Encode(*record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set(manualhold.Header, encoded)
+	}
+	result := make(chan msrHTTPResult, 1)
+	go func() {
+		response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+		if err != nil {
+			result <- msrHTTPResult{err: err}
+			return
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		result <- msrHTTPResult{code: response.StatusCode, body: body, err: err}
+	}()
+	return result
+}
+func msrAwaitActualLaunchBarrier(t *testing.T, barrier string) {
+	t.Helper()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(barrier + ".reached"); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		select {
+		case <-timeout.C:
+			t.Fatal("actual launch boundary not reached")
+		case <-ticker.C:
+		}
+	}
 }

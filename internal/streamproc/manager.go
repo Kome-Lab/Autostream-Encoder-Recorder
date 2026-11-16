@@ -121,6 +121,7 @@ func (m *Manager) startProcess(ctx context.Context, job lifecycle.StreamJob, pre
 	if admissionErr != nil {
 		return Snapshot{}, admissionErr
 	}
+	lease.MarkEffectsPossible()
 	if lease != nil {
 		defer func() { resultErr = lease.Finish(resultErr) }()
 	}

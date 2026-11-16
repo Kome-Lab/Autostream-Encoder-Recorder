@@ -29,14 +29,15 @@
     "scripts/ci/test_iu_workflow_preserve.py": "b35bf15473a55f8c3fc3b2be80c2ed1915a270b009b122ec689f2130044cc96a",
     "internal/httpapi/legacy_start_admission_test.go": "d65c760a8f769833cffdd42ddf7472aadc01e43e81b6bfcefa3187ad3fb0a4e5",
     "internal/httpapi/start_admission_routes.go": "5cb2ea628d393d12686503499f14a2a9f53838e5d2b5cf86198cf799f19c2f1e",
-    "internal/httpapi/start_admission_test.go": "bf87dc3ed5145430003087f4c874fbf44e5099298d021ea38114065483f58e14",
-    "internal/manualhold/guard.go": "a798bda3f03836f29353e934927e05dc14fbc001e800da1b65355448aefa8f9b",
-    "internal/manualhold/guard_test.go": "c020c2e4a41e0650fa46f1f3faeb5b14bfa94c40a3cc1bc23767fa8eb271f960",
+    "internal/httpapi/start_admission_test.go": "090ef2052443b9cfc4a8d75bf732ef5be4c3d2b3a43b9d7eb2401836099dd8e5",
+    "internal/manualhold/guard.go": "8dc2abea5591438c3cb3b6ae9d3a48d03993cee309734e807ee0cb6f54d750bb",
+    "internal/manualhold/guard_test.go": "99215a19959a9af6ccae4892d1897b461c7a049dbce27352fac51c58249366d0",
     "internal/manualhold/protocol.go": "d5ea6c39d6783e49906ac1ac25a5839e3bbb394fe1e1c83c61543295b1c0dc20",
     "internal/streamproc/start_admission.go": "f13915dab3dfe58c2a5e5668af54e4f25c8ff439c9e7bfd0e76b687264fe89ef",
     "internal/streamproc/start_admission_test.go": "3e68c93bd43ba8ab8d196ea8d76616bde6712d8b6038a2cab19a3a08b004db78",
     "scripts/ci/msr-checks.sh": "f3a47d60668f13dad95225c1e70ebd88e104cc8b2f399e90972fd62e7d961e5c",
     "scripts/ci/msr-json-events.py": "33314128bc672ce619fc452fdeb7bee99ff07b4d16104461b4f1ea99e5199b5b",
+    "scripts/ci/msr-required-subtests.txt": "8dc93d26c9e8c75952ae16a48b0320d66d30d388c279ef7fa4c202938aae2519",
     "scripts/ci/msr-required-tests.txt": "00dea06fe6e00ee1f078f600efa898b69927d734a4ff9025ace6b69b249271fb",
     "scripts/ci/test_msr_json_events.py": "0bad09c746a5d274132978cb99035131aa487055654740d90b6bdf7093ff1bd8"
   },
@@ -285,11 +286,11 @@
     },
     "internal/httpapi/start_preparation_routes.go": {
       "before_sha256": "c9d42d105d997ed5bcbd9febf631033dca4fa74ce71f8bd0e7d2091eec8f6c25",
-      "after_sha256": "7f2138bbbb786aaf9cbe9c408485013225890f8677bdc47d50b12c729c08d953",
+      "after_sha256": "70540e8bfd8b0ede2082388767e00ae0ff4dd83103c7d73321bff49109e29fec",
       "edits": [
         {
           "old": "\t\t\twriteJSON(w, 401, map[string]string{\"code\": \"missing_or_invalid_worker_video_ingest_token\"})\n\t\t\treturn\n\t\t}\n\t\tid := streamproc.StartPreparationIdentity{StreamID: request.StreamID, StartID: wire.StartID, EncoderServiceID: wire.EncoderServiceID, JobGeneration: request.VideoCoverStart.JobGeneration, ArchiveRunID: request.ArchiveRunID}\n\t\tctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)\n\t\tdefer cancel()\n",
-          "new": "\t\t\twriteJSON(w, 401, map[string]string{\"code\": \"missing_or_invalid_worker_video_ingest_token\"})\n\t\t\treturn\n\t\t}\n\t\tadmissionCtx, admissionErr := manualhold.RequestContext(r)\n\t\tif admissionErr != nil {\n\t\t\twriteStartAdmissionError(w, admissionErr)\n\t\t\treturn\n\t\t}\n\t\tif err := manualhold.ValidateStart(admissionCtx, request.StreamID, request.ArchiveRunID); err != nil {\n\t\t\twriteStartAdmissionError(w, err)\n\t\t\treturn\n\t\t}\n\t\tadmissionCtx, lease, admissionErr := pm.StartAdmission.Enter(admissionCtx, request.StreamID)\n\t\tif admissionErr != nil {\n\t\t\twriteStartAdmissionError(w, admissionErr)\n\t\t\treturn\n\t\t}\n\t\tif lease != nil {\n\t\t\tdefer func() {\n\t\t\t\tif !lease.Done() {\n\t\t\t\t\t_ = lease.Finish(manualhold.ErrUnknown)\n\t\t\t\t}\n\t\t\t}()\n\t\t}\n\t\tr = r.WithContext(admissionCtx)\n\t\tid := streamproc.StartPreparationIdentity{StreamID: request.StreamID, StartID: wire.StartID, EncoderServiceID: wire.EncoderServiceID, JobGeneration: request.VideoCoverStart.JobGeneration, ArchiveRunID: request.ArchiveRunID}\n\t\tctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)\n\t\tdefer cancel()\n"
+          "new": "\t\t\twriteJSON(w, 401, map[string]string{\"code\": \"missing_or_invalid_worker_video_ingest_token\"})\n\t\t\treturn\n\t\t}\n\t\tadmissionCtx, admissionErr := manualhold.RequestContext(r)\n\t\tif admissionErr != nil {\n\t\t\twriteStartAdmissionError(w, admissionErr)\n\t\t\treturn\n\t\t}\n\t\tif err := manualhold.ValidateStart(admissionCtx, request.StreamID, request.ArchiveRunID); err != nil {\n\t\t\twriteStartAdmissionError(w, err)\n\t\t\treturn\n\t\t}\n\t\tadmissionCtx, lease, admissionErr := pm.StartAdmission.Enter(admissionCtx, request.StreamID)\n\t\tif admissionErr != nil {\n\t\t\twriteStartAdmissionError(w, admissionErr)\n\t\t\treturn\n\t\t}\n\t\tlease.MarkEffectsPossible()\n\t\tif lease != nil {\n\t\t\tdefer func() {\n\t\t\t\tif !lease.Done() {\n\t\t\t\t\t_ = lease.Finish(manualhold.ErrUnknown)\n\t\t\t\t}\n\t\t\t}()\n\t\t}\n\t\tr = r.WithContext(admissionCtx)\n\t\tid := streamproc.StartPreparationIdentity{StreamID: request.StreamID, StartID: wire.StartID, EncoderServiceID: wire.EncoderServiceID, JobGeneration: request.VideoCoverStart.JobGeneration, ArchiveRunID: request.ArchiveRunID}\n\t\tctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)\n\t\tdefer cancel()\n"
         },
         {
           "old": "\treturn b, true\n}\nfunc preparationError(w http.ResponseWriter, err error) {\n\tstatus, code := http.StatusBadGateway, \"start_preparation_runtime_failed\"\n\tif errors.Is(err, streamproc.ErrAlreadyRunning) || errors.Is(err, streamproc.ErrPreparationConflict) {\n\t\tstatus, code = http.StatusConflict, \"start_preparation_conflict\"\n",
@@ -313,8 +314,16 @@
     },
     "internal/httpapi/stream_routes.go": {
       "before_sha256": "d1cde83900cf51996ba1d5e5e60fc8fe394bdf4fa882d39e9334afba04f669bc",
-      "after_sha256": "d2b1d9268441cf9ef2e20fb08dc8747ce7b26abfe382944b743fe9f091132bd3",
+      "after_sha256": "d6a26f029f9d1b3c6f4a929389e96578e242d0354e23d321e96f587aac63762e",
       "edits": [
+        {
+          "old": "\t\tif err != nil {\n\t\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"code\": \"stop_stream_failed\"})\n\t\t\treturn\n\t\t}\n\t\tif audioManager != nil {\n\t\t\taudioManager.StopBridge(streamID)\n\t\t}\n\t\tif videoManager != nil {\n\t\t\tvideoManager.StopBridge(streamID)\n\t\t}\n\t\twriteJSON(w, http.StatusAccepted, publicProcessSnapshot(snapshot))\n\t}\n",
+          "new": "\t\tif err != nil {\n\t\t\twriteJSON(w, http.StatusInternalServerError, map[string]string{\"code\": \"stop_stream_failed\"})\n\t\t\treturn\n\t\t}\n\t\twriteJSON(w, http.StatusAccepted, publicProcessSnapshot(snapshot))\n\t}\n"
+        },
+        {
+          "old": "\t\t\treturn\n\t\t}\n\t\tstreamID := strings.TrimSpace(r.PathValue(\"id\"))\n\t\tif videoManager != nil {\n\t\t\tif current, statusErr := processManager.Status(streamID); statusErr == nil && (current.Status == \"running\" || current.Status == \"stopping\") {\n\t\t\t\tvideoManager.MarkStopRequested(streamID)\n\t\t\t}\n\t\t}\n\t\tsnapshot, err := processManager.Stop(streamID)\n\t\tif errors.Is(err, streamproc.ErrAlreadyStopped) {\n\t\t\tif audioManager != nil {\n\t\t\t\taudioManager.StopBridge(streamID)\n\t\t\t}\n\t\t\tif videoManager != nil {\n\t\t\t\tvideoManager.StopBridge(streamID)\n\t\t\t}\n\t\t\twriteJSON(w, http.StatusAccepted, map[string]string{\"status\": \"already_stopped\"})\n\t\t\treturn\n\t\t}\n",
+          "new": "\t\t\treturn\n\t\t}\n\t\tstreamID := strings.TrimSpace(r.PathValue(\"id\"))\n\t\tvar snapshot streamproc.Snapshot\n\t\terr := processManager.StartAdmission.WithStop(r.Context(), streamID, func() error {\n\t\t\tif videoManager != nil {\n\t\t\t\tif current, statusErr := processManager.Status(streamID); statusErr == nil && (current.Status == \"running\" || current.Status == \"stopping\") {\n\t\t\t\t\tvideoManager.MarkStopRequested(streamID)\n\t\t\t\t}\n\t\t\t}\n\t\t\tvar stopErr error\n\t\t\tsnapshot, stopErr = processManager.Stop(streamID)\n\t\t\tif stopErr == nil || errors.Is(stopErr, streamproc.ErrAlreadyStopped) {\n\t\t\t\tif audioManager != nil {\n\t\t\t\t\taudioManager.StopBridge(streamID)\n\t\t\t\t}\n\t\t\t\tif videoManager != nil {\n\t\t\t\t\tvideoManager.StopBridge(streamID)\n\t\t\t\t}\n\t\t\t}\n\t\t\treturn stopErr\n\t\t})\n\t\tif errors.Is(err, manualhold.ErrUnknown) || errors.Is(err, manualhold.ErrRefused) {\n\t\t\twriteStartAdmissionError(w, err)\n\t\t\treturn\n\t\t}\n\t\tif errors.Is(err, streamproc.ErrAlreadyStopped) {\n\t\t\twriteJSON(w, http.StatusAccepted, map[string]string{\"status\": \"already_stopped\"})\n\t\t\treturn\n\t\t}\n"
+        },
         {
           "old": "\t\t\treturn\n\t\t}\n\t\tif err != nil {\n\t\t\tif audioBridgeMode && audioManager != nil {\n\t\t\t\taudioManager.StopBridge(job.StreamID)\n\t\t\t}\n",
           "new": "\t\t\treturn\n\t\t}\n\t\tif err != nil {\n\t\t\tif errors.Is(err, manualhold.ErrRefused) || errors.Is(err, manualhold.ErrUnknown) {\n\t\t\t\twriteStartAdmissionError(w, err)\n\t\t\t\treturn\n\t\t\t}\n\t\t\tif audioBridgeMode && audioManager != nil {\n\t\t\t\taudioManager.StopBridge(job.StreamID)\n\t\t\t}\n"
@@ -325,7 +334,7 @@
         },
         {
           "old": "\t\t\treturn\n\t\t}\n\t\tjob := startRequest.streamJob()\n\t\tif err := startRequest.validateArchiveRun(); err != nil {\n\t\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"code\": \"bad_request\"})\n\t\t\treturn\n",
-          "new": "\t\t\treturn\n\t\t}\n\t\tjob := startRequest.streamJob()\n\t\tadmissionCtx, admissionErr := manualhold.RequestContext(r)\n\t\tif admissionErr != nil {\n\t\t\twriteStartAdmissionError(w, admissionErr)\n\t\t\treturn\n\t\t}\n\t\tif err := manualhold.ValidateStart(admissionCtx, job.StreamID, job.ArchiveRunID); err != nil {\n\t\t\twriteStartAdmissionError(w, err)\n\t\t\treturn\n\t\t}\n\t\tadmissionCtx, lease, admissionErr := processManager.StartAdmission.Enter(admissionCtx, job.StreamID)\n\t\tif admissionErr != nil {\n\t\t\twriteStartAdmissionError(w, admissionErr)\n\t\t\treturn\n\t\t}\n\t\tif lease != nil {\n\t\t\tdefer func() {\n\t\t\t\tif !lease.Done() {\n\t\t\t\t\t_ = lease.Finish(manualhold.ErrUnknown)\n\t\t\t\t}\n\t\t\t}()\n\t\t}\n\t\tr = r.WithContext(admissionCtx)\n\t\tif err := startRequest.validateArchiveRun(); err != nil {\n\t\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"code\": \"bad_request\"})\n\t\t\treturn\n"
+          "new": "\t\t\treturn\n\t\t}\n\t\tjob := startRequest.streamJob()\n\t\tadmissionCtx, admissionErr := manualhold.RequestContext(r)\n\t\tif admissionErr != nil {\n\t\t\twriteStartAdmissionError(w, admissionErr)\n\t\t\treturn\n\t\t}\n\t\tif err := manualhold.ValidateStart(admissionCtx, job.StreamID, job.ArchiveRunID); err != nil {\n\t\t\twriteStartAdmissionError(w, err)\n\t\t\treturn\n\t\t}\n\t\tadmissionCtx, lease, admissionErr := processManager.StartAdmission.Enter(admissionCtx, job.StreamID)\n\t\tif admissionErr != nil {\n\t\t\twriteStartAdmissionError(w, admissionErr)\n\t\t\treturn\n\t\t}\n\t\tlease.MarkEffectsPossible()\n\t\tif lease != nil {\n\t\t\tdefer func() {\n\t\t\t\tif !lease.Done() {\n\t\t\t\t\t_ = lease.Finish(manualhold.ErrUnknown)\n\t\t\t\t}\n\t\t\t}()\n\t\t}\n\t\tr = r.WithContext(admissionCtx)\n\t\tif err := startRequest.validateArchiveRun(); err != nil {\n\t\t\twriteJSON(w, http.StatusBadRequest, map[string]string{\"code\": \"bad_request\"})\n\t\t\treturn\n"
         },
         {
           "old": "\t\"github.com/example/autostream-encoder-recorder/internal/audioingest\"\n\t\"github.com/example/autostream-encoder-recorder/internal/ffmpeg\"\n\t\"github.com/example/autostream-encoder-recorder/internal/lifecycle\"\n\t\"github.com/example/autostream-encoder-recorder/internal/outputrelay\"\n\t\"github.com/example/autostream-encoder-recorder/internal/streamproc\"\n\t\"github.com/example/autostream-encoder-recorder/internal/videocover\"\n",
@@ -401,7 +410,7 @@
     },
     "internal/streamproc/manager.go": {
       "before_sha256": "6117939aee65b7817fdc1cedece296dfe6834eda928c86d664029323b7a40ba1",
-      "after_sha256": "552913aa5e72b565dc1531c54bf4a2bd0f38559fc271a21fd4d3698827e1f824",
+      "after_sha256": "b7d442123bcb8c119abbc04905b80b66b26b3b2bb9cf53b6a415b737ff406937",
       "edits": [
         {
           "old": "\tif err := ctx.Err(); err != nil {\n\t\treturn Snapshot{}, err\n\t}\n\tprocess, err := starter.Start(context.Background(), m.ffmpegBin(), args)\n\tif err != nil {\n\t\treturn Snapshot{}, err\n",
@@ -409,7 +418,7 @@
         },
         {
           "old": "\treturn m.startProcess(context.Background(), job, nil)\n}\n\nfunc (m *Manager) startProcess(ctx context.Context, job lifecycle.StreamJob, preparation *StartPreparation) (Snapshot, error) {\n\tif job.StreamID == \"\" || job.Name == \"\" {\n\t\treturn Snapshot{}, errors.New(\"stream id and name are required\")\n\t}\n",
-          "new": "\treturn m.startProcess(context.Background(), job, nil)\n}\n\nfunc (m *Manager) startProcess(ctx context.Context, job lifecycle.StreamJob, preparation *StartPreparation) (result Snapshot, resultErr error) {\n\tif err := manualhold.ValidateStart(ctx, job.StreamID, job.ArchiveRunID); err != nil {\n\t\treturn Snapshot{}, err\n\t}\n\tctx, lease, admissionErr := m.StartAdmission.Enter(ctx, job.StreamID)\n\tif admissionErr != nil {\n\t\treturn Snapshot{}, admissionErr\n\t}\n\tif lease != nil {\n\t\tdefer func() { resultErr = lease.Finish(resultErr) }()\n\t}\n\tif job.StreamID == \"\" || job.Name == \"\" {\n\t\treturn Snapshot{}, errors.New(\"stream id and name are required\")\n\t}\n"
+          "new": "\treturn m.startProcess(context.Background(), job, nil)\n}\n\nfunc (m *Manager) startProcess(ctx context.Context, job lifecycle.StreamJob, preparation *StartPreparation) (result Snapshot, resultErr error) {\n\tif err := manualhold.ValidateStart(ctx, job.StreamID, job.ArchiveRunID); err != nil {\n\t\treturn Snapshot{}, err\n\t}\n\tctx, lease, admissionErr := m.StartAdmission.Enter(ctx, job.StreamID)\n\tif admissionErr != nil {\n\t\treturn Snapshot{}, admissionErr\n\t}\n\tlease.MarkEffectsPossible()\n\tif lease != nil {\n\t\tdefer func() { resultErr = lease.Finish(resultErr) }()\n\t}\n\tif job.StreamID == \"\" || job.Name == \"\" {\n\t\treturn Snapshot{}, errors.New(\"stream id and name are required\")\n\t}\n"
         },
         {
           "old": ")\n\ntype Manager struct {\n\tArchiveRoot              string\n\tStopReceiptTTL           time.Duration\n\tFFmpegBin                string\n",

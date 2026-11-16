@@ -142,6 +142,7 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			writeStartAdmissionError(w, admissionErr)
 			return
 		}
+		lease.MarkEffectsPossible()
 		if lease != nil {
 			defer func() {
 				if !lease.Done() {
@@ -317,19 +318,30 @@ func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Ma
 			return
 		}
 		streamID := strings.TrimSpace(r.PathValue("id"))
-		if videoManager != nil {
-			if current, statusErr := processManager.Status(streamID); statusErr == nil && (current.Status == "running" || current.Status == "stopping") {
-				videoManager.MarkStopRequested(streamID)
-			}
-		}
-		snapshot, err := processManager.Stop(streamID)
-		if errors.Is(err, streamproc.ErrAlreadyStopped) {
-			if audioManager != nil {
-				audioManager.StopBridge(streamID)
-			}
+		var snapshot streamproc.Snapshot
+		err := processManager.StartAdmission.WithStop(r.Context(), streamID, func() error {
 			if videoManager != nil {
-				videoManager.StopBridge(streamID)
+				if current, statusErr := processManager.Status(streamID); statusErr == nil && (current.Status == "running" || current.Status == "stopping") {
+					videoManager.MarkStopRequested(streamID)
+				}
 			}
+			var stopErr error
+			snapshot, stopErr = processManager.Stop(streamID)
+			if stopErr == nil || errors.Is(stopErr, streamproc.ErrAlreadyStopped) {
+				if audioManager != nil {
+					audioManager.StopBridge(streamID)
+				}
+				if videoManager != nil {
+					videoManager.StopBridge(streamID)
+				}
+			}
+			return stopErr
+		})
+		if errors.Is(err, manualhold.ErrUnknown) || errors.Is(err, manualhold.ErrRefused) {
+			writeStartAdmissionError(w, err)
+			return
+		}
+		if errors.Is(err, streamproc.ErrAlreadyStopped) {
 			writeJSON(w, http.StatusAccepted, map[string]string{"status": "already_stopped"})
 			return
 		}
@@ -348,12 +360,6 @@ func stopStream(processManager *streamproc.Manager, audioManager *audioingest.Ma
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "stop_stream_failed"})
 			return
-		}
-		if audioManager != nil {
-			audioManager.StopBridge(streamID)
-		}
-		if videoManager != nil {
-			videoManager.StopBridge(streamID)
 		}
 		writeJSON(w, http.StatusAccepted, publicProcessSnapshot(snapshot))
 	}

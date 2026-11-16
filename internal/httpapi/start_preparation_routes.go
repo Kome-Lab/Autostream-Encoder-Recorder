@@ -94,6 +94,7 @@ func prepareStreamStart(pm *streamproc.Manager, am *audioingest.Manager, vm *vid
 			writeStartAdmissionError(w, admissionErr)
 			return
 		}
+		lease.MarkEffectsPossible()
 		if lease != nil {
 			defer func() {
 				if !lease.Done() {
