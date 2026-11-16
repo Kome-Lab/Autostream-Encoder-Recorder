@@ -96,7 +96,15 @@ func newServerWithManagersAndRuntimeConfigAndUpdaterIdentity(serviceType string,
 	if processManager != nil && videoManager != nil && videoManager.Reporter == nil {
 		videoManager.Reporter = processManager.Reporter
 	}
+	if processManager != nil {
+		if err := processManager.ConfigureStartAdmission(); err != nil {
+			panic(err)
+		}
+	}
 	mux := http.NewServeMux()
+	if processManager != nil {
+		registerManualStartAdmissionRoutes(mux, processManager.StartAdmission, func(r *http.Request) bool { return verifier.Verify(r.Header.Get("Authorization")) })
+	}
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})

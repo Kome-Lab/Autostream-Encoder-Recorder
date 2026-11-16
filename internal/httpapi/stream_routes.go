@@ -10,6 +10,7 @@ import (
 	"github.com/example/autostream-encoder-recorder/internal/audioingest"
 	"github.com/example/autostream-encoder-recorder/internal/ffmpeg"
 	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
+	"github.com/example/autostream-encoder-recorder/internal/manualhold"
 	"github.com/example/autostream-encoder-recorder/internal/outputrelay"
 	"github.com/example/autostream-encoder-recorder/internal/streamproc"
 	"github.com/example/autostream-encoder-recorder/internal/videocover"
@@ -127,6 +128,28 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			return
 		}
 		job := startRequest.streamJob()
+		admissionCtx, admissionErr := manualhold.RequestContext(r)
+		if admissionErr != nil {
+			writeStartAdmissionError(w, admissionErr)
+			return
+		}
+		if err := manualhold.ValidateStart(admissionCtx, job.StreamID, job.ArchiveRunID); err != nil {
+			writeStartAdmissionError(w, err)
+			return
+		}
+		admissionCtx, lease, admissionErr := processManager.StartAdmission.Enter(admissionCtx, job.StreamID)
+		if admissionErr != nil {
+			writeStartAdmissionError(w, admissionErr)
+			return
+		}
+		if lease != nil {
+			defer func() {
+				if !lease.Done() {
+					_ = lease.Finish(manualhold.ErrUnknown)
+				}
+			}()
+		}
+		r = r.WithContext(admissionCtx)
 		if err := startRequest.validateArchiveRun(); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "bad_request"})
 			return
@@ -237,7 +260,7 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			writeJSON(w, http.StatusBadRequest, map[string]string{"code": "internal_audio_input_not_allowed"})
 			return
 		}
-		snapshot, err := processManager.Start(job)
+		snapshot, err := processManager.StartWithContext(r.Context(), job)
 		if errors.Is(err, streamproc.ErrAlreadyRunning) {
 			if audioBridgeMode && audioManager != nil {
 				audioManager.StopBridge(job.StreamID)
@@ -249,6 +272,10 @@ func startStream(processManager *streamproc.Manager, audioManager *audioingest.M
 			return
 		}
 		if err != nil {
+			if errors.Is(err, manualhold.ErrRefused) || errors.Is(err, manualhold.ErrUnknown) {
+				writeStartAdmissionError(w, err)
+				return
+			}
 			if audioBridgeMode && audioManager != nil {
 				audioManager.StopBridge(job.StreamID)
 			}

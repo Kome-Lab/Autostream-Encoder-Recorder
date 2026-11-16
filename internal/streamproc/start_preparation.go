@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	shared "github.com/Kome-Lab/Autostream-Contracts/v3lifecycle"
 	"github.com/example/autostream-encoder-recorder/internal/lifecycle"
+	"github.com/example/autostream-encoder-recorder/internal/manualhold"
 	"github.com/example/autostream-encoder-recorder/internal/videocover"
 )
 
@@ -32,6 +34,7 @@ type StartPreparationState struct {
 	Code          string                   `json:"code,omitempty"`
 }
 type StartPreparation struct {
+	admission     *shared.Record
 	identity      StartPreparationIdentity
 	tracked       *trackedProcess
 	phase         string
@@ -62,6 +65,9 @@ func preparationDiagnostic(id StartPreparationIdentity, event, phase string) {
 	log.Printf("encoder start: event=%s stream_id=%s start_id=%s job_generation=%d phase=%s", event, id.StreamID, id.StartID, id.JobGeneration, phase)
 }
 func (m *Manager) BeginStartPreparation(ctx context.Context, id StartPreparationIdentity) (*StartPreparation, context.Context, error) {
+	if err := manualhold.ValidateStart(ctx, id.StreamID, id.ArchiveRunID); err != nil {
+		return nil, nil, err
+	}
 	if id.StreamID == "" || id.StartID == "" || id.EncoderServiceID == "" || id.JobGeneration == 0 || id.ArchiveRunID == "" {
 		return nil, nil, ErrPreparationConflict
 	}
@@ -87,7 +93,7 @@ func (m *Manager) BeginStartPreparation(ctx context.Context, id StartPreparation
 		return nil, nil, ErrPreparationConflict
 	}
 	child, cancel := context.WithCancel(ctx)
-	p := &StartPreparation{identity: id, phase: "preparing", cancel: cancel, cleanupDone: make(chan struct{}), prepareDone: make(chan struct{})}
+	p := &StartPreparation{admission: manualhold.RecordFromContext(ctx), identity: id, phase: "preparing", cancel: cancel, cleanupDone: make(chan struct{}), prepareDone: make(chan struct{})}
 	p.tracked = &trackedProcess{snapshot: Snapshot{StreamID: id.StreamID, Status: "starting"}, preparation: p}
 	if m.processes == nil {
 		m.processes = map[string]*trackedProcess{}

@@ -22,7 +22,7 @@ func TestRouteCompositionPreservesMethodsAuthenticationAndSecurityHeaders(t *tes
 	// credential permissions; identity binding has its own transition tests.
 	t.Setenv("AUTOSTREAM_NODE_CONFIG", filepath.Join(root, "pending-config.yml"))
 	providerCalls, resolverCalls := 0, 0
-	handler := NewServerWithManagersAndRuntimeConfig(
+	handler := legacyNewServerWithManagersAndRuntimeConfig(
 		"encoder_recorder",
 		&streamproc.Manager{ArchiveRoot: root, OutputRelayMode: outputrelay.ModeDirect},
 		workerevents.NewManager(root),

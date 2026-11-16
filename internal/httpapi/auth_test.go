@@ -18,7 +18,7 @@ import (
 )
 
 func TestControlEndpointsFailClosedWhenTokenIsNotConfigured(t *testing.T) {
-	handler := NewServer("encoder_recorder")
+	handler := legacyNewServer("encoder_recorder")
 	req := httptest.NewRequest(http.MethodPost, "/streams/dry-run", bytes.NewBufferString(`{}`))
 	req.Header.Set("Authorization", "Bearer anything")
 	res := httptest.NewRecorder()
@@ -29,7 +29,7 @@ func TestControlEndpointsFailClosedWhenTokenIsNotConfigured(t *testing.T) {
 }
 
 func TestControlEndpointsRejectInvalidToken(t *testing.T) {
-	handler := NewServerWithManagers("encoder_recorder", &streamproc.Manager{OutputRelayMode: outputrelay.ModeDirect}, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "expected-token"})
+	handler := legacyNewServerWithManagers("encoder_recorder", &streamproc.Manager{OutputRelayMode: outputrelay.ModeDirect}, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "expected-token"})
 	tests := []struct {
 		name   string
 		method string
@@ -61,7 +61,7 @@ func TestControlEndpointsRejectInvalidToken(t *testing.T) {
 
 func TestStreamControlEndpointsRejectOversizedJSONBodies(t *testing.T) {
 	t.Setenv("SERVICE_CONTROL_TOKEN", "service-token")
-	handler := NewServerWithManagers("encoder_recorder", &streamproc.Manager{OutputRelayMode: outputrelay.ModeDirect}, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "service-token"})
+	handler := legacyNewServerWithManagers("encoder_recorder", &streamproc.Manager{OutputRelayMode: outputrelay.ModeDirect}, workerevents.NewManager(t.TempDir()), TokenVerifier{PlainToken: "service-token"})
 	tests := []string{"/streams/dry-run", "/streams/start", "/streams/package"}
 	for _, path := range tests {
 		t.Run(path, func(t *testing.T) {
@@ -178,7 +178,7 @@ func TestTokenVerifierReadsNodeRuntimeTokenAfterStartup(t *testing.T) {
 	if check := serviceTokenPreflight(verifier); check.Status != "ok" || !strings.Contains(check.Message, "Node Runtime Token") || strings.Contains(check.Message, "SERVICE_CONTROL_TOKEN") {
 		t.Fatalf("node runtime token should be identified accurately in preflight: %#v", check)
 	}
-	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), verifier)
+	handler := legacyNewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), verifier)
 	statusReq := httptest.NewRequest(http.MethodGet, "/status", nil)
 	statusRes := httptest.NewRecorder()
 	handler.ServeHTTP(statusRes, statusReq)

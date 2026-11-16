@@ -515,6 +515,7 @@ func serviceCapabilities() map[string]any {
 	policy := outputrelay.FromEnv()
 	outputRelayMode, relayConfigValid := policy.CapabilityMode()
 	capabilities := map[string]any{
+		"manual_auto_start_hold_v1":     true,
 		"ffmpeg":                        true,
 		"record_final_mkv":              true,
 		"remux_final_mp4":               true,

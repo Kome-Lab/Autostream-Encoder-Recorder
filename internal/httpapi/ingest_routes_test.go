@@ -20,7 +20,7 @@ import (
 )
 
 func TestWorkerEventsRejectsOversizedBodyBeforeTokenValidation(t *testing.T) {
-	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), TokenVerifier{WorkerEventsPlainToken: "worker-token"})
+	handler := legacyNewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), TokenVerifier{WorkerEventsPlainToken: "worker-token"})
 	body := `{"stream_id":"stream-01","type":"caption.telop","payload":{"text":"` + strings.Repeat("x", maxWorkerEventBodyBytes) + `"}}`
 	req := httptest.NewRequest(http.MethodPost, "/worker-events", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer wrong-token")
@@ -32,7 +32,7 @@ func TestWorkerEventsRejectsOversizedBodyBeforeTokenValidation(t *testing.T) {
 }
 
 func TestDiscordOpusAudioRejectsOversizedBodyBeforeTokenValidation(t *testing.T) {
-	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), TokenVerifier{DiscordAudioPlainToken: "audio-token"})
+	handler := legacyNewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), TokenVerifier{DiscordAudioPlainToken: "audio-token"})
 	body := `{"stream_id":"stream-01","source":"discord-bot-01","packets":[{"ssrc":1,"sequence":1,"timestamp":1,"opus_base64":"` + strings.Repeat("A", defaultDiscordAudioBodyBytes) + `"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/stream-01/audio/opus", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer wrong-token")
@@ -47,7 +47,7 @@ func TestDiscordOpusAudioEndpointRejectsOfflineStream(t *testing.T) {
 	root := t.TempDir()
 	eventManager := workerevents.NewManager(root)
 	sum := sha256.Sum256([]byte("audio-token"))
-	handler := NewServerWithManagers("encoder_recorder", nil, eventManager, TokenVerifier{DiscordAudioSHA256Hex: hex.EncodeToString(sum[:])})
+	handler := legacyNewServerWithManagers("encoder_recorder", nil, eventManager, TokenVerifier{DiscordAudioSHA256Hex: hex.EncodeToString(sum[:])})
 
 	body := `{"stream_id":"stream-01","source":"discord-bot-01","packets":[{"ssrc":1234,"user_id":"user-01","sequence":1,"timestamp":960,"received_at":"2026-05-28T00:00:00Z","opus_base64":"AQID"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/streams/stream-01/audio/opus", bytes.NewBufferString(body))
@@ -371,7 +371,7 @@ func TestWorkerEventsEndpointRejectsOfflineStream(t *testing.T) {
 	root := t.TempDir()
 	eventManager := workerevents.NewManager(root)
 	sum := sha256.Sum256([]byte("worker-token"))
-	handler := NewServerWithManagers("encoder_recorder", nil, eventManager, TokenVerifier{WorkerEventsSHA256Hex: hex.EncodeToString(sum[:])})
+	handler := legacyNewServerWithManagers("encoder_recorder", nil, eventManager, TokenVerifier{WorkerEventsSHA256Hex: hex.EncodeToString(sum[:])})
 	body := `{"id":"event-01","stream_id":"stream-01","type":"caption.telop","payload":{"text":"hello"},"timestamp":"2026-05-28T00:00:00Z"}`
 	req := httptest.NewRequest(http.MethodPost, "/worker-events", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer worker-token")
@@ -387,7 +387,7 @@ func TestWorkerEventsEndpointRejectsOfflineStream(t *testing.T) {
 
 func TestWorkerEventsEndpointRejectsInvalidToken(t *testing.T) {
 	sum := sha256.Sum256([]byte("worker-token"))
-	handler := NewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), TokenVerifier{WorkerEventsSHA256Hex: hex.EncodeToString(sum[:])})
+	handler := legacyNewServerWithManagers("encoder_recorder", nil, workerevents.NewManager(t.TempDir()), TokenVerifier{WorkerEventsSHA256Hex: hex.EncodeToString(sum[:])})
 	req := httptest.NewRequest(http.MethodPost, "/worker-events", bytes.NewBufferString(`{}`))
 	req.Header.Set("Authorization", "Bearer wrong")
 	res := httptest.NewRecorder()
@@ -403,7 +403,7 @@ func TestRecentWorkerEventsEndpoint(t *testing.T) {
 	if _, err := manager.Add(workerevents.Event{ID: "event-01", StreamID: "stream-01", Type: "overlay.current_time"}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewServerWithManagers("encoder_recorder", nil, manager, TokenVerifier{PlainToken: "token"})
+	handler := legacyNewServerWithManagers("encoder_recorder", nil, manager, TokenVerifier{PlainToken: "token"})
 	req := httptest.NewRequest(http.MethodGet, "/streams/stream-01/worker-events", nil)
 	req.Header.Set("Authorization", "Bearer token")
 	res := httptest.NewRecorder()
